@@ -43,6 +43,13 @@ type MonitorMergeJobsFuture<'a> =
 /// - `Engine` implementations used by tests may stub behavior, but stubs should
 ///   be explicit and limited to the behavior under test.
 pub trait Engine {
+    fn skill_install_directory(&self, tool: &str) -> String {
+        ToolRegistry::from_inventory()
+            .get(tool)
+            .map(|adapter| adapter.skill_install_directory())
+            .unwrap_or_else(|| format!(".{tool}/skills"))
+    }
+
     fn list_tools(&self, paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>);
     fn doctor(&self, paths: &ProjectPaths) -> Vec<ToolCheck>;
     fn plan(
@@ -1816,6 +1823,13 @@ impl MaccEngine {
 }
 
 impl Engine for MaccEngine {
+    fn skill_install_directory(&self, tool: &str) -> String {
+        self.registry
+            .get(tool)
+            .map(|adapter| adapter.skill_install_directory())
+            .unwrap_or_else(|| format!(".{tool}/skills"))
+    }
+
     fn run_skill(
         &self,
         paths: &ProjectPaths,
@@ -2295,7 +2309,7 @@ fields: []
     #[test]
     fn engine_trait_method_count_guard() {
         // Shared graphical launch review, confirmation and supervisor attachment.
-        const EXPECTED_METHOD_COUNT: usize = 146;
+        const EXPECTED_METHOD_COUNT: usize = 147;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")

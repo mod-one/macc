@@ -190,6 +190,11 @@ pub(super) fn restore_from(
     } else {
         None
     };
+    let skill_lock = if manifest.includes.config {
+        super::skill_locks::load(&target_save_dir)?
+    } else {
+        None
+    };
     if opts.dry_run {
         return Ok(());
     }
@@ -221,6 +226,10 @@ pub(super) fn restore_from(
                 })?;
             }
         }
+    }
+
+    if let Some(lock) = skill_lock {
+        lock.save(&paths.skills_lock_path())?;
     }
 
     if config_only {

@@ -50,7 +50,19 @@ pub struct FetchUnit {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SourceProvenance {
+    pub requested: Source,
+    pub resolved: Source,
+    pub cache_key: String,
+    /// Explicit user tracking policy; absent when retaining an existing pin's policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MaterializedFetchUnit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SourceProvenance>,
     pub source_root_path: std::path::PathBuf,
     pub selections: Vec<Selection>,
 }
@@ -63,6 +75,8 @@ pub struct PlanningContext<'a> {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Selection {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
     pub id: String,
     pub subpath: String,
     pub kind: SelectionKind,
@@ -214,6 +228,7 @@ pub fn resolve_fetch_units(
     let skills_catalog = crate::catalog::load_skills_catalog_with_local(paths)?;
     let mcp_catalog = load_effective_mcp_catalog(paths)?;
 
+    let lock = crate::skills_catalog::SkillsLockFile::load(&paths.skills_lock_path())?;
     let mut raw_selections = Vec::new();
 
     let mut skill_ids = collect_skill_ids(resolved);
@@ -237,14 +252,64 @@ pub fn resolve_fetch_units(
                 )));
             }
         };
-        raw_selections.push((
-            entry.source.clone(),
-            Selection {
-                id: entry.id.clone(),
-                subpath: entry.selector.subpath.clone(),
-                kind: SelectionKind::Skill,
-            },
-        ));
+        let tools: Vec<_> = resolved
+            .tools
+            .enabled
+            .iter()
+            .filter(|tool| entry.tools.is_empty() || entry.tools.contains(tool))
+            .filter(|tool| {
+                entry.mandatory
+                    || resolved.selections.skills.contains(id)
+                    || resolved
+                        .tools
+                        .config
+                        .get(*tool)
+                        .is_some_and(|value| read_string_list(value, "skills").contains(id))
+                    || resolved
+                        .tools
+                        .specific
+                        .get(*tool)
+                        .is_some_and(|value| read_string_list(value, "skills").contains(id))
+            })
+            .map(String::as_str)
+            .collect();
+        if tools.is_empty() && !resolved.tools.enabled.is_empty() {
+            continue;
+        }
+        let tools = if tools.is_empty() { vec![""] } else { tools };
+        for tool in tools {
+            let source = crate::skills_catalog::locking::source(entry, &lock, tool)?;
+            let mut checked = entry.clone();
+            checked.source = source.clone();
+            crate::catalog::availability::annotate(paths, std::slice::from_mut(&mut checked));
+            crate::catalog::availability::ensure_selectable(&checked)?;
+            let subpath = crate::skills_catalog::locking::record(&lock, id, tool)
+                .filter(|e| {
+                    e.source
+                        .resolved_ref
+                        .as_deref()
+                        .is_some_and(crate::skills_catalog::locking::is_sha)
+                        || e.source.checksum.is_some()
+                })
+                .map(|e| e.source.subpath.clone())
+                .unwrap_or_else(|| entry.selector.subpath.clone());
+            if !crate::skills_catalog::locking::relative(&subpath) {
+                return Err(MaccError::Validation("Unsafe locked skill subpath".into()));
+            }
+            raw_selections.push((
+                source,
+                Selection {
+                    id: entry.id.clone(),
+                    subpath,
+                    kind: SelectionKind::Skill,
+                    tools: if tool.is_empty() {
+                        vec![]
+                    } else {
+                        vec![tool.into()]
+                    },
+                },
+            ));
+        }
     }
 
     for id in &resolved.selections.mcp {
@@ -259,6 +324,7 @@ pub fn resolve_fetch_units(
                 id: entry.id.clone(),
                 subpath: entry.selector.subpath.clone(),
                 kind: SelectionKind::Mcp,
+                tools: vec![],
             },
         ));
     }
@@ -600,6 +666,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
         skills_catalog.entries.push(SkillEntry {
             id: "skill2".into(),
@@ -619,6 +686,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
         skills_catalog
             .save_atomically(&paths, &paths.skills_catalog_path())
@@ -706,6 +774,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
         let mut mcp_catalog = McpCatalog::default();
         mcp_catalog.entries.push(McpEntry {
@@ -853,6 +922,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
         skills_catalog
             .save_atomically(&paths, &paths.skills_catalog_path())

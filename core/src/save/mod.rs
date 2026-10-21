@@ -290,3 +290,5 @@ security:
         assert!(report.config_changed);
     }
 }
+
+mod skill_locks;

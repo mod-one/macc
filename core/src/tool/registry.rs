@@ -33,6 +33,10 @@ pub struct SkillInvocation {
 pub trait ToolAdapter: Send + Sync {
     /// Unique identifier for the tool.
     fn id(&self) -> String;
+    /// Project directory used for copied catalog skills.
+    fn skill_install_directory(&self) -> String {
+        format!(".{}/skills", self.id())
+    }
 
     /// Produces an ActionPlan based on the resolved configuration.
     fn plan(&self, ctx: &PlanningContext) -> crate::Result<ActionPlan>;

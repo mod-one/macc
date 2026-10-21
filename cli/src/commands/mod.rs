@@ -204,3 +204,5 @@ pub fn create_save_bundle_interactive(
         }
     }
 }
+
+mod skills_install;

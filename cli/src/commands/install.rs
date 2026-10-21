@@ -17,6 +17,18 @@ impl<'a> InstallCommand<'a> {
 
 impl<'a> Command for InstallCommand<'a> {
     fn run(&self) -> Result<()> {
+        if let InstallCommands::Skill { tool, id } = self.command {
+            return super::skills_install::install(
+                &self.app,
+                super::skills_install::Request {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    reference: None,
+                    source: None,
+                },
+                false,
+            );
+        }
         let paths = self.app.project_paths()?;
         let dummy_plan = macc_core::plan::ActionPlan::new();
         macc_core::ops_motif::print_trust_review_card(&paths, &dummy_plan, false);
@@ -26,11 +38,7 @@ impl<'a> Command for InstallCommand<'a> {
         }
         let backend = CliCatalogInstallBackend { app: &self.app };
         match self.command {
-            InstallCommands::Skill { tool, id } => {
-                self.app
-                    .engine
-                    .catalog_install_skill(&paths, tool, id, &backend, &CliCatalogUi)
-            }
+            InstallCommands::Skill { .. } => unreachable!("handled by shared skill lifecycle"),
             InstallCommands::Mcp { id } => {
                 self.app
                     .engine

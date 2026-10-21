@@ -5,6 +5,7 @@ export type InstalledFilter = 'all' | 'installed' | 'not-installed';
 
 export interface SkillCatalogViewItem {
   kind: 'skill';
+  availability?: ApiCatalogSkillEntry['availability'];
   id: string;
   name: string;
   description: string;
@@ -46,6 +47,7 @@ export function skillToViewItem(
 ): SkillCatalogViewItem {
   return {
     kind: 'skill',
+    availability: entry.availability,
     id: entry.id,
     name: entry.name,
     description: entry.description,

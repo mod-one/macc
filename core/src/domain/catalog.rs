@@ -106,6 +106,7 @@ pub fn build_skill_entry(input: CatalogEntryInput) -> Result<SkillEntry> {
         targets: Default::default(),
         category: None,
         compatibility: None,
+        availability: None,
     })
 }
 

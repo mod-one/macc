@@ -158,6 +158,7 @@ pub(super) fn create_in(
         hashes.config = Some(sha);
         paths_meta.config = Some("config/macc.yaml".to_string());
         includes.config = true;
+        super::skill_locks::capture(paths, &tmp_save_dir)?;
     }
 
     // 2. Capture sessions through the canonical authority service.

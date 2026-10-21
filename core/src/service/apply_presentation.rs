@@ -65,10 +65,39 @@ pub fn review(paths: &ProjectPaths, plan: &ActionPlan, ops: &[PlannedOp]) -> Str
                     .iter()
                     .filter(|u| u.source.kind != crate::catalog::SourceKind::Local)
                     .collect();
+                let proposed_lock = plan.actions.iter().find_map(|action| match action {
+                    crate::plan::Action::WriteFile { path, content, .. }
+                        if path == ".macc/skills.lock.json" =>
+                    {
+                        serde_json::from_slice::<crate::skills_catalog::SkillsLockFile>(content)
+                            .ok()
+                    }
+                    _ => None,
+                });
                 let unpinned = remote
                     .iter()
                     .filter(|u| {
-                        u.source.checksum.as_ref().is_none_or(|s| s.is_empty())
+                        let will_pin = proposed_lock.as_ref().is_some_and(|lock| {
+                            !u.selections.is_empty()
+                                && u.selections.iter().all(|selection| {
+                                    selection.kind == crate::resolve::SelectionKind::Skill
+                                        && lock.skills.iter().any(|entry| {
+                                            entry.id == selection.id
+                                                && (selection.tools.is_empty()
+                                                    || selection.tools.contains(&entry.tool))
+                                                && (entry
+                                                    .source
+                                                    .resolved_ref
+                                                    .as_deref()
+                                                    .is_some_and(
+                                                        crate::skills_catalog::locking::is_sha,
+                                                    )
+                                                    || entry.source.checksum.is_some())
+                                        })
+                                })
+                        });
+                        !will_pin
+                            && u.source.checksum.as_ref().is_none_or(|s| s.is_empty())
                             && !(u.source.reference.len() == 40
                                 && u.source.reference.bytes().all(|b| b.is_ascii_hexdigit()))
                     })

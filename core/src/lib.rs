@@ -710,6 +710,18 @@ pub fn build_plan(
         }
     }
 
+    let skill_roots = resolved
+        .tools
+        .enabled
+        .iter()
+        .filter_map(|id| {
+            registry
+                .get(id)
+                .map(|adapter| (id.clone(), adapter.skill_install_directory()))
+        })
+        .collect();
+    skills_catalog::lifecycle::plan_files(&mut total_plan, materialized_units, &skill_roots)?;
+    skills_catalog::lifecycle::plan_lock(paths, &mut total_plan, materialized_units, &skill_roots)?;
     total_plan.o2_activation = o2::activation::preview(&paths.root)?;
     service::preparation::configure(paths, &mut total_plan)?;
     total_plan.preparation = service::preparation::preview(paths)?;
@@ -1098,6 +1110,7 @@ pub fn apply_plan(
     allow_user_scope: bool,
 ) -> Result<ApplyReport> {
     plan.normalize();
+    let _skills_lock = skills_catalog::locking::guard(paths, plan)?;
     validate_plan(plan, allow_user_scope)?;
 
     let _preparation_guard = if plan.preparation.is_some() {
@@ -1431,7 +1444,7 @@ pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
     let mut report = ClearReport::default();
     let mut removed_paths: Vec<PathBuf> = Vec::new();
     for rel in entries {
-        if o2::activation::retained_state(&rel) {
+        if rel == ".macc/skills.lock.json" || o2::activation::retained_state(&rel) {
             report.skipped += 1;
             continue;
         }
@@ -1479,7 +1492,7 @@ pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
 
     let mut report = ClearReport::default();
     for rel in entries {
-        if o2::activation::retained_state(&rel) {
+        if rel == ".macc/skills.lock.json" || o2::activation::retained_state(&rel) {
             report.skipped += 1;
             continue;
         }

@@ -13,6 +13,10 @@ impl ToolAdapter for AgyAdapter {
         "agy".to_string()
     }
 
+    fn skill_install_directory(&self) -> String {
+        ".agents/skills".into()
+    }
+
     fn context_file_target(&self) -> Option<String> {
         Some("GEMINI.md".to_string())
     }
@@ -65,7 +69,9 @@ fn install_remote_skills(
     let mut installed = BTreeSet::new();
     for unit in ctx.materialized_units {
         for selection in &unit.selections {
-            if selection.kind == SelectionKind::Skill {
+            if selection.kind == SelectionKind::Skill
+                && (selection.tools.is_empty() || selection.tools.iter().any(|tool| tool == "agy"))
+            {
                 plan_builders::plan_skill_install(
                     plan,
                     "agents",

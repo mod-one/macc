@@ -1,7 +1,12 @@
 /// Web API handlers for the Skills & Catalog lifecycle (spec §16).
 use super::errors::ApiError;
 use super::WebState;
-use axum::extract::State;
+use axum::extract::{Query, State};
+#[derive(Default, serde::Deserialize)]
+pub(super) struct AvailabilityQuery {
+    #[serde(default)]
+    refresh: bool,
+}
 use axum::Json;
 
 // ── GET /api/v1/catalog/skills/available ─────────────────────────────────────
@@ -11,9 +16,15 @@ use axum::Json;
 /// Lists skills available from configured catalogs.
 pub(super) async fn available_handler(
     State(state): State<WebState>,
+    Query(query): Query<AvailabilityQuery>,
 ) -> std::result::Result<Json<serde_json::Value>, ApiError> {
+    macc_core::catalog::availability::schedule_refresh(&state.paths, query.refresh);
+    // Capture before reading entries: a check finishing during the read must still trigger a client poll.
+    let checking = macc_core::catalog::availability::checking(&state.paths);
     let entries = state.engine.catalog_skills_available(&state.paths, None);
-    Ok(Json(serde_json::json!({ "skills": entries })))
+    Ok(Json(
+        serde_json::json!({ "skills": entries, "checking": checking }),
+    ))
 }
 
 // ── GET /api/v1/catalog/mcp/available ────────────────────────────────────────

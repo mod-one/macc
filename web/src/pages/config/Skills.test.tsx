@@ -233,4 +233,48 @@ describe('Skills page', () => {
     await screen.findByText('Skills & Catalog');
     expect(screen.getByText('MACC Performer')).toBeInTheDocument();
   });
+  it('disables unavailable skills and keeps unknown skills selectable', async () => {
+    getConfigMock.mockResolvedValue(buildConfig());
+    getCatalogMcpAvailableMock.mockResolvedValue({ mcp: [] });
+    getCatalogSkillsAvailableMock.mockResolvedValue({ skills: [
+      buildSkill({ availability: { state: 'unavailable', reason: 'Declared path is absent', checked_at: 1, stale: false } }),
+      buildSkill({ id: 'private-skill', name: 'Private Skill', availability: { state: 'unknown', reason: 'Access not verified', checked_at: 1, stale: false } }),
+    ] });
+    render(<Skills />);
+    await screen.findByText(/Declared path is absent/);
+    const buttons = screen.getAllByRole('button', { name: 'Install' });
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeEnabled();
+    fireEvent.click(buttons[0]);
+    expect(updateConfigMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck availability' }));
+    await waitFor(() => expect(getCatalogSkillsAvailableMock).toHaveBeenCalledWith({ refresh: true }));
+  });
+
+  it('retains already selected unavailable skills and permits explicit removal', async () => {
+    getConfigMock.mockResolvedValue(buildConfig({ selectedSkills: ['macc-performer'] }));
+    getCatalogMcpAvailableMock.mockResolvedValue({ mcp: [] });
+    getCatalogSkillsAvailableMock.mockResolvedValue({ skills: [buildSkill({
+      availability: { state: 'unavailable', reason: 'Path removed upstream', checked_at: 1, stale: true, last_error: 'Network timeout' },
+    })] });
+    render(<Skills />);
+    await screen.findByText(/Path removed upstream/);
+    expect(screen.getAllByText('Installed').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeEnabled();
+    expect(updateConfigMock).not.toHaveBeenCalled();
+  });
+
+  it('updates a completed background check without saving or clearing selections', async () => {
+    getConfigMock.mockResolvedValue(buildConfig());
+    getCatalogMcpAvailableMock.mockResolvedValue({ mcp: [] });
+    getCatalogSkillsAvailableMock
+      .mockResolvedValueOnce({ skills: [buildSkill()], checking: true })
+      .mockResolvedValue({ skills: [buildSkill({ availability: { state: 'unavailable', reason: 'Missing after check', checked_at: 1, stale: false } })], checking: false });
+    render(<Skills />);
+    await screen.findByText('Checking skill sources in the background…');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Install' })).toBeDisabled(), { timeout: 4000 });
+    expect(screen.queryByText('Checking skill sources in the background…')).not.toBeInTheDocument();
+    expect(updateConfigMock).not.toHaveBeenCalled();
+  });
+
 });

@@ -78,6 +78,12 @@ fn install_remote_content(
     let mut mcp_servers = BTreeMap::new();
     for unit in ctx.materialized_units {
         for selection in &unit.selections {
+            if selection.kind == SelectionKind::Skill
+                && !selection.tools.is_empty()
+                && !selection.tools.iter().any(|tool| tool == "vibe")
+            {
+                continue;
+            }
             match selection.kind {
                 SelectionKind::Skill => {
                     plan_builders::plan_skill_install(

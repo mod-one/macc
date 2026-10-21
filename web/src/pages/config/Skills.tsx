@@ -82,6 +82,7 @@ const Skills: React.FC = () => {
   const [skillsCatalog, setSkillsCatalog] = React.useState<ApiCatalogSkillEntry[]>([]);
   const [mcpCatalog, setMcpCatalog] = React.useState<ApiCatalogMcpEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [checking, setChecking] = React.useState(false);
   const [isSaving, setIsSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -91,17 +92,18 @@ const Skills: React.FC = () => {
   const [installedFilter, setInstalledFilter] = React.useState<InstalledFilter>('all');
   const [removeCandidate, setRemoveCandidate] = React.useState<CatalogViewItem | null>(null);
 
-  const loadCatalog = React.useCallback(async () => {
+  const loadCatalog = React.useCallback(async (refresh = false) => {
     setIsLoading(true);
     setError(null);
     try {
       const [nextConfig, nextSkills, nextMcp] = await Promise.all([
         getConfig(),
-        getCatalogSkillsAvailable(),
+        getCatalogSkillsAvailable({ refresh }),
         getCatalogMcpAvailable(),
       ]);
       setConfig(normalizeConfigResponse(nextConfig));
       setSkillsCatalog(Array.isArray(nextSkills.skills) ? nextSkills.skills : []);
+      setChecking(nextSkills.checking === true);
       setMcpCatalog(Array.isArray(nextMcp.mcp) ? nextMcp.mcp : []);
     } catch (loadError) {
       setError(formatError(loadError));
@@ -113,6 +115,21 @@ const Skills: React.FC = () => {
   React.useEffect(() => {
     void loadCatalog();
   }, [loadCatalog]);
+
+  React.useEffect(() => {
+    if (!checking) return;
+    let active = true;
+    const timer = setInterval(() => {
+      void getCatalogSkillsAvailable().then((result) => {
+        if (!active) return;
+        setSkillsCatalog(result.skills);
+        setChecking(result.checking === true);
+      }).catch((failure: unknown) => {
+        if (active) { setError(formatError(failure)); setChecking(false); }
+      });
+    }, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [checking]);
 
   const saveConfigSelection = React.useCallback(async (request: ApiConfigUpdateRequest) => {
     const nextConfig = normalizeConfigResponse(await updateConfig(request));
@@ -153,6 +170,10 @@ const Skills: React.FC = () => {
   const installItem = React.useCallback(
     async (item: CatalogViewItem) => {
       if (!config) return;
+      if (item.kind === 'skill' && item.availability?.state === 'unavailable') {
+        setError(item.availability.reason);
+        return;
+      }
       setIsSaving(true);
       setError(null);
 
@@ -230,14 +251,15 @@ const Skills: React.FC = () => {
         </div>
         <Button
           className="h-8 border-[var(--border)] bg-[var(--bg-card)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-          onClick={() => void loadCatalog()}
+          onClick={() => void loadCatalog(true)}
           type="button"
         >
           <RefreshIcon className="mr-1.5 h-3.5 w-3.5" />
-          Refresh
+          Recheck availability
         </Button>
       </div>
 
+      {checking && <p role="status">Checking skill sources in the background…</p>}
       {error && <ErrorBanner message={error} title="Catalog error" />}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -349,6 +371,8 @@ const Skills: React.FC = () => {
         >
           {filteredItems.map((item, index) => {
             const mandatory = item.kind === 'skill' && item.mandatory;
+            const availability = item.kind === 'skill' ? item.availability : undefined;
+            const unavailable = availability?.state === 'unavailable';
 
             return (
               <li
@@ -378,6 +402,13 @@ const Skills: React.FC = () => {
                   <p className="mt-0.5 line-clamp-1 text-sm text-[var(--text-secondary)]">
                     {item.description}
                   </p>
+                  {item.kind === 'skill' && (
+                    <p className={cn('mt-1 text-xs', unavailable ? 'text-[var(--error)]' : 'text-[var(--text-muted)]')}>
+                      {availability?.state ?? 'Not verified'}{availability?.stale ? ' (cached; recheck needed)' : ''}
+                      {availability ? ` — ${availability.reason}` : ''}
+                      {availability?.last_error ? ` · Last check: ${availability.last_error}` : ''}
+                    </p>
+                  )}
                   <div className="mt-1.5 flex flex-wrap gap-1">
                     {item.tools.map((tool) => (
                       <span
@@ -438,7 +469,8 @@ const Skills: React.FC = () => {
                   ) : (
                     <Button
                       className="h-7 px-2.5 text-xs"
-                      disabled={isSaving}
+                      disabled={isSaving || unavailable}
+                      title={unavailable ? availability?.reason : undefined}
                       onClick={() => void installItem(item)}
                       style={{
                         borderColor: 'color-mix(in oklch, var(--accent) 40%, transparent)',

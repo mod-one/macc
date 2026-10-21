@@ -6,6 +6,7 @@ pub mod fetch;
 pub mod merge;
 pub mod render;
 pub mod schema;
+pub mod source_cache;
 pub mod url_parsing;
 
 pub use capabilities::ToolCapabilities;

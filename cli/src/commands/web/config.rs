@@ -54,7 +54,21 @@ pub(super) async fn update_config_handler(
     })?;
     let mandatory_skills =
         macc_core::catalog::mandatory_skill_ids(&state.paths).map_err(ApiError::from)?;
+    let catalog =
+        macc_core::catalog::load_skills_catalog_with_local(&state.paths).map_err(ApiError::from)?;
     let canonical = macc_core::config::transaction::update(&state.paths, None, |canonical| {
+        if let Some(ids) = &request.selected_skills {
+            for id in ids.iter().filter(|id| {
+                !canonical
+                    .selections
+                    .as_ref()
+                    .is_some_and(|selections| selections.skills.contains(id))
+            }) {
+                if let Some(entry) = catalog.entries.iter().find(|entry| &entry.id == id) {
+                    macc_core::catalog::availability::ensure_selectable(entry)?;
+                }
+            }
+        }
         apply_update(canonical, &request, &mandatory_skills)?;
         Ok(())
     })

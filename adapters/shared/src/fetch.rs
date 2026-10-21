@@ -38,27 +38,20 @@ fn choose_writable_cache_root(paths: &ProjectPaths, key: &str) -> MaccResult<Pat
     Ok(project_root)
 }
 
-fn cache_root_from_archive_path(archive_path: &Path) -> MaccResult<PathBuf> {
-    let raw_dir = archive_path.parent().ok_or_else(|| {
-        MaccError::Validation(format!(
-            "Invalid archive path layout (missing parent): {}",
-            archive_path.display()
-        ))
-    })?;
-    let cache_root = raw_dir.parent().ok_or_else(|| {
-        MaccError::Validation(format!(
-            "Invalid archive path layout (missing cache root): {}",
-            archive_path.display()
-        ))
-    })?;
-    Ok(cache_root.to_path_buf())
-}
-
 pub fn download_source_raw(
     paths: &ProjectPaths,
     source: &Source,
     quiet: bool,
     offline: bool,
+) -> MaccResult<PathBuf> {
+    download_source_raw_refresh(paths, source, quiet, offline, false)
+}
+pub(crate) fn download_source_raw_refresh(
+    paths: &ProjectPaths,
+    source: &Source,
+    quiet: bool,
+    offline: bool,
+    refresh: bool,
 ) -> MaccResult<PathBuf> {
     if source.kind != SourceKind::Http {
         return Err(MaccError::Validation(format!(
@@ -68,7 +61,7 @@ pub fn download_source_raw(
     }
 
     let key = source.cache_key();
-    if let Some(root) = existing_cache_root(paths, &key) {
+    if let Some(root) = existing_cache_root(paths, &key).filter(|_| !refresh) {
         let target = root.join("raw").join("archive.zip");
         if target.exists() {
             if let Some(expected_checksum) = &source.checksum {
@@ -203,7 +196,36 @@ pub fn materialize_fetch_unit(
     quiet: bool,
     offline: bool,
 ) -> MaccResult<MaterializedFetchUnit> {
-    let root = materialize_source(paths, &unit.source, quiet, offline)?;
+    materialize_fetch_unit_refresh(paths, unit, quiet, offline, false)
+}
+pub fn materialize_fetch_unit_refresh(
+    paths: &ProjectPaths,
+    unit: FetchUnit,
+    quiet: bool,
+    offline: bool,
+    refresh: bool,
+) -> MaccResult<MaterializedFetchUnit> {
+    if unit
+        .selections
+        .iter()
+        .any(|selection| !macc_core::skills_catalog::locking::relative(&selection.subpath))
+    {
+        return Err(MaccError::Validation("Unsafe selection subpath".into()));
+    }
+    let (root, provenance) = if unit.source.kind == SourceKind::Git {
+        let (root, provenance) =
+            crate::source_cache::materialize_git(paths, &unit.source, quiet, offline, refresh)?;
+        (root, Some(provenance))
+    } else if unit.source.kind == SourceKind::Http {
+        let (root, provenance) =
+            crate::source_cache::materialize_http(paths, &unit.source, quiet, offline, refresh)?;
+        (root, Some(provenance))
+    } else {
+        (
+            materialize_source(paths, &unit.source, quiet, offline)?,
+            None,
+        )
+    };
 
     // Validate that each selection's subpath exists under returned root
     for selection in &unit.selections {
@@ -235,6 +257,7 @@ pub fn materialize_fetch_unit(
     }
 
     Ok(MaterializedFetchUnit {
+        provenance,
         source_root_path: root,
         selections: unit.selections,
     })
@@ -261,119 +284,10 @@ pub fn git_fetch(
     quiet: bool,
     offline: bool,
 ) -> MaccResult<PathBuf> {
-    if source.kind != SourceKind::Git {
-        return Err(MaccError::Validation(format!(
-            "git_fetch only supports Git sources, got {:?}",
-            source.kind
-        )));
-    }
-
-    let key = source.cache_key();
-    let cache_root = if let Some(existing) = existing_cache_root(paths, &key) {
-        existing
-    } else {
-        choose_writable_cache_root(paths, &key)?
-    };
-    let repo_dir = cache_root.join("repo");
-
-    if !repo_dir.exists() {
-        if offline {
-            return Err(MaccError::Validation(format!(
-                "Offline mode enabled: repository not found in cache for {}",
-                source.url
-            )));
-        }
-        if !quiet {
-            println!("Cloning {}...", source.url);
-        }
-        let mut args = vec!["clone", "--no-checkout"];
-        // If we have subpaths, we can optimize the clone
-        if !source.subpaths.is_empty() {
-            args.push("--filter=blob:none");
-        }
-        args.push(&source.url);
-        args.push("repo");
-
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&cache_root)
-            .output()
-            .map_err(|e| MaccError::Io {
-                path: cache_root.to_string_lossy().into(),
-                action: "run git clone".into(),
-                source: e,
-            })?;
-
-        if !output.status.success() {
-            return Err(MaccError::Validation(format!(
-                "git clone failed for {}: {}",
-                source.url,
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-    } else if !offline {
-        if !quiet {
-            println!("Updating {}...", source.url);
-        }
-        let output = Command::new("git")
-            .args(["fetch", "--all", "--tags"])
-            .current_dir(&repo_dir)
-            .output()
-            .map_err(|e| MaccError::Io {
-                path: repo_dir.to_string_lossy().into(),
-                action: "run git fetch".into(),
-                source: e,
-            })?;
-
-        if !output.status.success() {
-            return Err(MaccError::Validation(format!(
-                "git fetch failed for {}: {}",
-                source.url,
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-    }
-
-    // Handle sparse checkout if subpaths are provided
-    if !source.subpaths.is_empty() {
-        enable_sparse_checkout(&repo_dir)?;
-        set_sparse_paths(&repo_dir, &source.subpaths)?;
-    }
-
-    if !source.reference.is_empty() {
-        if !quiet {
-            println!("Resolving ref {}...", source.reference);
-        }
-        let sha = resolve_ref_to_sha(&repo_dir, &source.reference)?;
-        if !quiet {
-            println!("Checking out {}...", sha);
-        }
-        checkout_ref(&repo_dir, &sha)?;
-    } else if !source.subpaths.is_empty() {
-        // If we have subpaths but no specific ref, we still need to checkout the default branch
-        if !quiet {
-            println!("Checking out default branch...");
-        }
-        checkout_ref(&repo_dir, "HEAD")?;
-    }
-
-    // Validate subpaths exist
-    if !source.subpaths.is_empty() {
-        for subpath in &source.subpaths {
-            let p = repo_dir.join(subpath);
-            if !p.exists() {
-                return Err(MaccError::Validation(format!(
-                    "Subpath '{}' not found in repository after checkout",
-                    subpath
-                )));
-            }
-        }
-    }
-
-    Ok(repo_dir)
+    crate::source_cache::materialize_git(paths, source, quiet, offline, false).map(|(root, _)| root)
 }
 
-fn enable_sparse_checkout(repo_dir: &Path) -> MaccResult<()> {
+pub(crate) fn enable_sparse_checkout(repo_dir: &Path) -> MaccResult<()> {
     let output = Command::new("git")
         .args(["sparse-checkout", "init", "--cone"])
         .current_dir(repo_dir)
@@ -393,8 +307,8 @@ fn enable_sparse_checkout(repo_dir: &Path) -> MaccResult<()> {
     Ok(())
 }
 
-fn set_sparse_paths(repo_dir: &Path, subpaths: &[String]) -> MaccResult<()> {
-    let mut args = vec!["sparse-checkout", "set"];
+pub(crate) fn set_sparse_paths(repo_dir: &Path, subpaths: &[String]) -> MaccResult<()> {
+    let mut args = vec!["sparse-checkout", "set", "--"];
     for p in subpaths {
         args.push(p);
     }
@@ -418,7 +332,7 @@ fn set_sparse_paths(repo_dir: &Path, subpaths: &[String]) -> MaccResult<()> {
     Ok(())
 }
 
-fn resolve_ref_to_sha(repo_dir: &Path, reference: &str) -> MaccResult<String> {
+pub(crate) fn resolve_ref_to_sha(repo_dir: &Path, reference: &str) -> MaccResult<String> {
     let candidates = [
         format!("refs/remotes/origin/{}", reference),
         format!("refs/tags/{}", reference),
@@ -450,48 +364,6 @@ fn resolve_ref_to_sha(repo_dir: &Path, reference: &str) -> MaccResult<String> {
     )))
 }
 
-fn checkout_ref(repo_dir: &Path, reference: &str) -> MaccResult<()> {
-    let output = Command::new("git")
-        .args(["checkout", "--force", reference])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|e| MaccError::Io {
-            path: repo_dir.to_string_lossy().into(),
-            action: "run git checkout".into(),
-            source: e,
-        })?;
-
-    if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git checkout {} failed: {}",
-            reference,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn disable_sparse_checkout(repo_dir: &Path) -> MaccResult<()> {
-    let output = Command::new("git")
-        .args(["sparse-checkout", "disable"])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|e| MaccError::Io {
-            path: repo_dir.to_string_lossy().into(),
-            action: "disable sparse-checkout".into(),
-            source: e,
-        })?;
-
-    if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git sparse-checkout disable failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(())
-}
-
 /// Downloads and unpacks a source into the cache.
 pub fn download_and_unpack(
     paths: &ProjectPaths,
@@ -499,45 +371,8 @@ pub fn download_and_unpack(
     quiet: bool,
     offline: bool,
 ) -> MaccResult<PathBuf> {
-    let archive_path = download_source_raw(paths, source, quiet, offline)?;
-    let cache_root = cache_root_from_archive_path(&archive_path)?;
-    let unpack_dir = cache_root.join("unpacked");
-
-    if unpack_dir.exists() {
-        // For now, if it exists, we assume it's valid.
-        return Ok(unpack_dir);
-    }
-
-    let tmp_unpack = cache_root.join(format!(
-        "unpacked-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
-    ));
-    if tmp_unpack.exists() {
-        std::fs::remove_dir_all(&tmp_unpack).ok();
-    }
-
-    if let Err(err) = unpack_archive(&archive_path, &tmp_unpack) {
-        let _ = std::fs::remove_dir_all(&tmp_unpack);
-        return Err(err);
-    }
-
-    // Atomic promote of unpacked directory
-    if let Some(parent) = unpack_dir.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-                path: parent.to_string_lossy().into(),
-                action: "create unpack parent directory".into(),
-                source: e,
-            })?;
-        }
-    }
-    std::fs::rename(&tmp_unpack, &unpack_dir).map_err(|e| MaccError::Io {
-        path: unpack_dir.to_string_lossy().into(),
-        action: "finalize unpack directory".into(),
-        source: e,
-    })?;
-
-    Ok(unpack_dir)
+    crate::source_cache::materialize_http(paths, source, quiet, offline, false)
+        .map(|(root, _)| root)
 }
 
 /// Safely unpacks a ZIP archive into the target directory with Zip Slip protection.
@@ -742,7 +577,7 @@ mod tests {
 
         // 3. Verify
         assert!(unpack_dir.exists());
-        assert!(unpack_dir.ends_with("unpacked"));
+        assert!(unpack_dir.ends_with("tree"));
         assert_eq!(
             std::fs::read_to_string(unpack_dir.join("test.txt")).unwrap(),
             "content"
@@ -801,7 +636,7 @@ mod tests {
 
         // 3. Verify
         assert!(repo_dir.exists());
-        assert!(repo_dir.join(".git").exists());
+        assert!(!repo_dir.join(".git").exists());
         assert_eq!(
             std::fs::read_to_string(repo_dir.join("README.md")).unwrap(),
             "hello"
@@ -991,12 +826,13 @@ mod tests {
                 id: "s1".into(),
                 subpath: "skills/s1".into(),
                 kind: SelectionKind::Skill,
+                tools: vec![],
             }],
         };
 
         let result =
             materialize_fetch_unit(&paths, unit, false, false).expect("Should materialize unit");
-        assert!(result.source_root_path.ends_with("unpacked"));
+        assert!(result.source_root_path.ends_with("tree"));
         assert_eq!(result.selections.len(), 1);
         assert_eq!(result.selections[0].id, "s1");
 
@@ -1007,6 +843,7 @@ mod tests {
                 id: "s2".into(),
                 subpath: "missing".into(),
                 kind: SelectionKind::Skill,
+                tools: vec![],
             }],
         };
         let result_fail = materialize_fetch_unit(&paths, unit_fail, false, false);
@@ -1058,6 +895,7 @@ mod tests {
                 id: "s1".into(),
                 subpath: "skills/s1".into(),
                 kind: SelectionKind::Skill,
+                tools: vec![],
             }],
         };
 

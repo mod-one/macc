@@ -433,7 +433,7 @@ directory (the current directory when omitted); absolute paths are preserved.
 <summary>Catalog skills (package lifecycle)</summary>
 
 ```bash
-macc skills available [--tool <tool>] [--tag <tag>] [--json]
+macc skills available [--tool <tool>] [--tag <tag>] [--refresh] [--json]
 macc skills status [--tool <tool>] [--verbose] [--json]
 macc skills install <id> --tool <tool> [--reference <ref>] [--pin] [--dry-run]
 macc skills update [<id>] [--tool <tool>] [--dry-run]
@@ -443,11 +443,15 @@ macc skills diff [<id>] [--tool <tool>]
 macc skills uninstall <id> [--tool <tool>] [--all-tools]
 ```
 
+Git skill installs now pin exact commits and copy files through a shared immutable cache. Both `macc skills install` and `macc install skill` perform a reviewed installation. Apply honors `.macc/skills.lock.json`; move versions explicitly with `macc skills update`. See [reproducible installation](docs/CATALOGS.md#reproducible-installation-and-explicit-updates).
+
 Catalog skills follow a **four-state model**: available (from catalog) → selected (in `macc.yaml`) → installed (on disk) → locked (`skills.lock.json`). Hook bundles (`category: hook-bundle`) reduce noisy tool output before it enters assistant context.
+
+Skill source availability is checked automatically and cached. Confirmed missing entries are disabled in CLI, TUI and Web; network/access failures stay unverified. Use `macc skills available --refresh` to recheck. See [catalog availability](docs/CATALOGS.md#automatic-skill-availability-checks).
 
 **Lockfile:** `.macc/skills.lock.json` — commit this; it records resolved refs and file digests for reproducibility.
 
-**Cache:** `.macc/cache/` — do not commit; automatically ignored.
+**Cache:** `~/.macc/cache/` holds shared source snapshots; `.macc/cache/` holds project artifacts and serves as a fallback. Keep caches out of version control.
 
 **Web API:** `GET /api/v1/catalog/skills/available`, `/status`, `/installed`, `POST /verify`.
 

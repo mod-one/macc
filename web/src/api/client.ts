@@ -790,10 +790,10 @@ export async function listSkills(
 // ── Catalog skills lifecycle (spec §15 / §16) ─────────────────────────────────
 
 export async function getCatalogSkillsAvailable(
-  options: ApiRequestOptions = {},
-): Promise<{ skills: ApiCatalogSkillEntry[] }> {
-  return requestJson<{ skills: ApiCatalogSkillEntry[] }>(
-    '/catalog/skills/available',
+  options: ApiRequestOptions & { refresh?: boolean } = {},
+): Promise<{ skills: ApiCatalogSkillEntry[]; checking?: boolean }> {
+  return requestJson<{ skills: ApiCatalogSkillEntry[]; checking?: boolean }>(
+    `/catalog/skills/available${options.refresh ? '?refresh=true' : ''}`,
     { method: 'GET', signal: options.signal },
     options.baseUrl,
   );

@@ -2,6 +2,11 @@
 ///
 /// Provides the four-state model: available → selected → installed → locked.
 /// All types here are data-only; no network I/O is performed.
+pub mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
+pub mod locking;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -138,13 +143,23 @@ impl SkillsLockFile {
             action: "read skills lockfile".into(),
             source: e,
         })?;
-        serde_json::from_str(&content).map_err(|e| {
+        let mut lock: Self = serde_json::from_str(&content).map_err(|e| {
             crate::MaccError::Validation(format!(
                 "Failed to parse skills lockfile {}: {}",
                 path.display(),
                 e
             ))
-        })
+        })?;
+        if lock.version == 0 {
+            lock.version = 1;
+        }
+        if lock.version != 1 {
+            return Err(crate::MaccError::Validation(format!(
+                "Unsupported skills lockfile version {}",
+                lock.version
+            )));
+        }
+        Ok(lock)
     }
 
     pub fn save(&self, path: &Path) -> crate::Result<()> {
@@ -158,11 +173,19 @@ impl SkillsLockFile {
         let content = serde_json::to_string_pretty(self).map_err(|e| {
             crate::MaccError::Validation(format!("Failed to serialize skills lockfile: {}", e))
         })?;
-        std::fs::write(path, content).map_err(|e| crate::MaccError::Io {
-            path: path.to_string_lossy().into(),
-            action: "write skills lockfile".into(),
-            source: e,
-        })
+        let parent = path.parent().ok_or_else(|| {
+            crate::MaccError::Validation("Lockfile has no parent directory".into())
+        })?;
+        let _guard = crate::fs_lock::AdvisoryLock::acquire(
+            &parent.join("state/skills-write.lock"),
+            std::time::Duration::from_secs(30),
+            "skills lockfile",
+        )?;
+        crate::atomic_write(
+            &crate::ProjectPaths::from_root(parent),
+            path,
+            content.as_bytes(),
+        )
     }
 
     pub fn find(&self, id: &str, tool: &str) -> Option<&SkillLockEntry> {
@@ -612,7 +635,7 @@ pub fn verify_skills(
         }
 
         // Check cache entry exists.
-        let cache_path = cache_dir.join(&entry.cache.cache_key);
+        let cache_path = locking::cache_location(cache_dir, &entry.cache.cache_key);
         if !cache_path.exists() {
             findings.push(VerifyFinding {
                 skill_id: entry.id.clone(),
@@ -658,7 +681,13 @@ pub fn diff_skill(
 
     for target in &entry.installed.targets {
         let installed_path = project_root.join(&target.dest);
-        let cache_src_path = cache_dir.join(&entry.cache.cache_key).join(&target.src);
+        let cache_root = locking::cache_location(cache_dir, &entry.cache.cache_key);
+        let cache_src_path = if entry.cache.cache_key.starts_with("sources-v2/") {
+            cache_root.join("tree")
+        } else {
+            cache_root
+        }
+        .join(&target.src);
 
         if !installed_path.exists() {
             diffs.push(SkillDiffEntry {

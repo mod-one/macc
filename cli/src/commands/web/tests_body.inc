@@ -5568,3 +5568,33 @@ async fn apply_rejects_a_changed_preview_without_overwriting_new_work() {
     assert_eq!(response.status(),axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(fs::read_to_string(&target).unwrap(),"new work after preview");
 }
+
+#[tokio::test]
+async fn config_rejects_new_unavailable_skill_and_allows_removing_an_existing_selection() {
+    let root=temp_root("config-unavailable-skill");fs::create_dir_all(&root).unwrap();write_test_config(&root);
+    let paths=ProjectPaths::from_root(&root);
+    let entry:macc_core::catalog::SkillEntry=serde_json::from_value(serde_json::json!({
+        "id":"unavailable-fixture","name":"Unavailable fixture","description":"","tags":[],
+        "selector":{"subpath":"missing"},"source":{"kind":"local","url":".","ref":"local"}
+    })).unwrap();
+    let mut catalog=macc_core::catalog::SkillsCatalog::default();catalog.entries.push(entry);
+    catalog.save_atomically(&paths,&paths.project_skills_catalog_path()).unwrap();
+    let state=test_web_state(&root,Arc::new(TestEngine::with_fixtures()),WebAssetsMode::Embedded);
+    let app=build_web_router(state);
+    let original=fs::read(&paths.config_path).unwrap();
+    let response=app.clone().oneshot(Request::builder().uri("/api/v1/config").method("PUT")
+        .header("content-type","application/json").body(Body::from(r#"{"selectedSkills":["unavailable-fixture"]}"#)).unwrap()).await.unwrap();
+    assert_eq!(response.status(),axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(fs::read(&paths.config_path).unwrap(),original);
+    // A pre-existing selection is preserved by unrelated updates; explicit removal remains possible.
+    let mut config=macc_core::load_canonical_config(&paths.config_path).unwrap();
+    config.selections=Some(macc_core::config::SelectionsConfig{skills:vec!["unavailable-fixture".into()],..Default::default()});
+    fs::write(&paths.config_path,config.to_yaml().unwrap()).unwrap();
+    for body in [r#"{"quiet":true}"#,r#"{"selectedSkills":[]}"#] {
+        let response=app.clone().oneshot(Request::builder().uri("/api/v1/config").method("PUT")
+            .header("content-type","application/json").body(Body::from(body)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),axum::http::StatusCode::OK);
+    }
+    let config=macc_core::load_canonical_config(&paths.config_path).unwrap();
+    assert!(!config.selections.unwrap().skills.contains(&"unavailable-fixture".into()));
+}

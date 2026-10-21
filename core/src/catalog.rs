@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+pub mod availability;
 pub mod service;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -76,6 +77,8 @@ pub struct Selector {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SkillEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<availability::Availability>,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -170,10 +173,15 @@ impl SkillsCatalog {
     }
 
     pub fn save_atomically(&self, paths: &ProjectPaths, path: &Path) -> MaccResult<()> {
-        let mut json = serde_json::to_string_pretty(self).map_err(|e| MaccError::Catalog {
-            operation: "serialize_skills".to_string(),
-            message: format!("Failed to serialize skills catalog: {}", e),
-        })?;
+        let mut persisted = self.clone();
+        for entry in &mut persisted.entries {
+            entry.availability = None;
+        }
+        let mut json =
+            serde_json::to_string_pretty(&persisted).map_err(|e| MaccError::Catalog {
+                operation: "serialize_skills".to_string(),
+                message: format!("Failed to serialize skills catalog: {}", e),
+            })?;
         json.push('\n');
         let _ = write_if_changed(
             paths,
@@ -222,6 +230,7 @@ pub fn load_skills_catalog_with_local(paths: &ProjectPaths) -> MaccResult<Skills
     }
 
     catalog.entries.sort_by(|a, b| a.id.cmp(&b.id));
+    availability::annotate(paths, &mut catalog.entries);
     Ok(catalog)
 }
 
@@ -280,10 +289,9 @@ pub fn load_effective_skills_catalog(paths: &ProjectPaths) -> MaccResult<SkillsC
     let embedded = embedded_skills_catalog()?;
     let user = SkillsCatalog::load(&paths.skills_catalog_path())?;
     let project = SkillsCatalog::load(&paths.project_skills_catalog_path())?;
-    Ok(merge_skill_layers(
-        merge_skill_layers(embedded, user),
-        project,
-    ))
+    let mut catalog = merge_skill_layers(merge_skill_layers(embedded, user), project);
+    availability::annotate(paths, &mut catalog.entries);
+    Ok(catalog)
 }
 
 pub fn mandatory_skill_ids(paths: &ProjectPaths) -> MaccResult<Vec<String>> {
@@ -386,6 +394,7 @@ fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
     }
 
@@ -478,6 +487,7 @@ impl McpCatalog {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Skill {
+    pub availability: Option<availability::Availability>,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -705,6 +715,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
 
         catalog.save_atomically(&paths, &path).unwrap();
@@ -788,6 +799,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         };
 
         // Upsert new
@@ -949,6 +961,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
         user_skills
             .save_atomically(&paths, &paths.skills_catalog_path())
@@ -979,6 +992,7 @@ mod tests {
             targets: Default::default(),
             category: None,
             compatibility: None,
+            availability: None,
         });
         project_skills
             .save_atomically(&paths, &paths.project_skills_catalog_path())

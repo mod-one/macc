@@ -860,7 +860,7 @@ pub enum SkillsSubcommands {
     /// Check run-skill health and configuration
     Doctor,
     // ── Catalog/package lifecycle (spec §4) ────────────────────────────────
-    /// List skills available from configured catalogs
+    /// List catalog skills and automatically check source availability
     Available {
         /// Filter by tool adapter
         #[arg(long)]
@@ -871,6 +871,9 @@ pub enum SkillsSubcommands {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
+        /// Recheck remote availability even if cached (respects offline mode)
+        #[arg(long)]
+        refresh: bool,
         /// Output machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -1933,11 +1936,13 @@ fn run_with_engine_provider(
                     source,
                     tag,
                     json,
+                    refresh,
                 } => SkillsSubcommand::Available {
                     tool: tool.clone(),
                     source: source.clone(),
                     tag: tag.clone(),
                     json: *json,
+                    refresh: *refresh,
                 },
                 SkillsSubcommands::Status {
                     tool,
@@ -1951,23 +1956,24 @@ fn run_with_engine_provider(
                 SkillsSubcommands::Install {
                     id,
                     tool,
-                    source: _,
+                    source,
                     reference,
-                    pin,
+                    pin: _,
                     dry_run,
                 } => SkillsSubcommand::Install {
                     id: id.clone(),
                     tool: tool.clone(),
                     reference: reference.clone(),
-                    pin: *pin,
+                    source: source.clone(),
                     dry_run: *dry_run,
                 },
                 SkillsSubcommands::Update {
                     id,
                     tool,
                     dry_run,
-                    latest: _,
+                    latest,
                 } => SkillsSubcommand::Update {
+                    latest: *latest,
                     id: id.clone(),
                     tool: tool.clone(),
                     dry_run: *dry_run,

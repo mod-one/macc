@@ -316,6 +316,7 @@ pub(crate) fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'sta
         ],
         Screen::ToolSettings => vec![("↑↓", "Move"), ("Space/Enter", "Edit"), ("s", "Save")],
         Screen::Skills => vec![
+            ("r", "Recheck sources"),
             ("↑↓", "Move"),
             ("Space/Enter", "Toggle"),
             ("a", "All"),

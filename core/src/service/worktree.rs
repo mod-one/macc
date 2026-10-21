@@ -87,6 +87,7 @@ pub fn apply_worktree(
     if worktree_root != repo_root {
         let repo_paths = crate::ProjectPaths::from_root(repo_root);
         crate::catalog::sync_project_catalog_to_worktree(&repo_paths, &paths)?;
+        crate::skills_catalog::locking::inherit(&repo_paths, &paths)?;
     }
     let canonical = load_canonical_config(&paths.config_path)?;
     let metadata = crate::read_worktree_metadata(worktree_root)?

@@ -26,11 +26,17 @@ impl<'a> Command for CatalogCommand<'a> {
         match self.command {
             CatalogCommands::Skills { skills_command } => match skills_command {
                 crate::CatalogSubCommands::List => {
+                    if self.app.overrides.offline != Some(true) {
+                        macc_core::catalog::availability::refresh(&paths, false)?;
+                    }
                     let catalog = load_effective_skills_catalog(&paths)?;
                     list_skills(&self.app, &catalog);
                     Ok(())
                 }
                 crate::CatalogSubCommands::Search { query } => {
+                    if self.app.overrides.offline != Some(true) {
+                        macc_core::catalog::availability::refresh(&paths, false)?;
+                    }
                     let catalog = load_effective_skills_catalog(&paths)?;
                     search_skills(&self.app, &catalog, query);
                     Ok(())

@@ -72,7 +72,10 @@ fn install_remote_skills(
     let mut installed = BTreeSet::new();
     for unit in ctx.materialized_units {
         for selection in &unit.selections {
-            if selection.kind == SelectionKind::Skill {
+            if selection.kind == SelectionKind::Skill
+                && (selection.tools.is_empty()
+                    || selection.tools.iter().any(|tool| tool == "gemini"))
+            {
                 plan_builders::plan_skill_install(
                     plan,
                     "gemini",

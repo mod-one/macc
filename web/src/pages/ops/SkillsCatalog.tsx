@@ -169,6 +169,10 @@ function AvailableView({
                   >
                     <div className="font-medium text-[var(--text-primary)]">{e.name}</div>
                     <div className="font-mono text-xs text-[var(--text-muted)]">{e.id}</div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      {e.availability?.state ?? 'Not verified'}{e.availability?.stale ? ' (cached)' : ''}
+                      {e.availability ? ` — ${e.availability.reason}` : ''}
+                    </div>
                     {e.description && (
                       <div className="mt-0.5 text-xs text-[var(--text-secondary)] line-clamp-1">
                         {e.description}
@@ -475,21 +479,23 @@ const SkillsCatalog: React.FC = () => {
   const [statusWarnings, setStatusWarnings] = useState<string[]>([]);
   const [installed, setInstalled] = useState<ApiSkillLockEntry[]>([]);
   const [findings, setFindings] = useState<ApiVerifyFinding[]>([]);
+  const [checking, setChecking] = useState(false);
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [provenanceId, setProvenanceId] = useState<string | null>(null);
 
-  const fetchAll = async () => {
+  const fetchAll = async (refresh = false) => {
     setLoading(true);
     setError(null);
     try {
       const [avail, stat, inst] = await Promise.all([
-        getCatalogSkillsAvailable(),
+        getCatalogSkillsAvailable({ refresh }),
         getCatalogSkillsStatus(),
         getCatalogSkillsInstalled(),
       ]);
       setAvailable(avail.skills);
+      setChecking(avail.checking === true);
       setStatuses(stat.skills);
       setStatusWarnings(stat.warnings);
       setInstalled(inst.skills);
@@ -516,6 +522,19 @@ const SkillsCatalog: React.FC = () => {
   useEffect(() => {
     void fetchAll();
   }, []);
+
+  useEffect(() => {
+    if (!checking) return;
+    let active = true;
+    const timer = setInterval(() => {
+      void getCatalogSkillsAvailable().then((result) => {
+        if (active) { setAvailable(result.skills); setChecking(result.checking === true); }
+      }).catch((failure: unknown) => {
+        if (active) { setError(failure instanceof Error ? failure : new Error('Availability check failed')); setChecking(false); }
+      });
+    }, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [checking]);
 
   const provenanceEntry = provenanceId
     ? installed.find((e) => e.id === provenanceId) ?? null
@@ -552,9 +571,9 @@ const SkillsCatalog: React.FC = () => {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button onClick={fetchAll} disabled={loading}>
+          <Button onClick={() => void fetchAll(true)} disabled={loading || checking}>
             <Icons.Activity />
-            <span className="ml-2">Refresh</span>
+            <span className="ml-2">{checking ? 'Checking sources…' : 'Recheck availability'}</span>
           </Button>
           <Button
             className="bg-[var(--accent)] text-white hover:opacity-90"

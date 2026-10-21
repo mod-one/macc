@@ -107,6 +107,9 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
     let registry = macc_registry::default_registry();
     let engine = std::sync::Arc::new(macc_core::MaccEngine::new(registry));
     let mut state = AppState::new(engine);
+    if let Some(paths) = &state.project_paths {
+        macc_core::catalog::availability::schedule(paths);
+    }
     match mode {
         LaunchMode::CoordinatorRun { phase_overrides } => {
             state.goto_screen(Screen::CoordinatorLive);
@@ -138,7 +141,17 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, state: &mut AppState) -> io::Result<()> {
+    let mut catalog_tick = std::time::Instant::now() - Duration::from_secs(2);
     loop {
+        if state.current_screen() == Screen::Skills
+            && catalog_tick.elapsed() >= Duration::from_secs(2)
+        {
+            if let Some(paths) = &state.project_paths {
+                macc_core::catalog::availability::schedule(paths);
+            }
+            state.refresh_skills();
+            catalog_tick = std::time::Instant::now();
+        }
         state.tick();
         terminal.draw(|f| ui(f, state, true))?;
 
@@ -668,7 +681,17 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Char('r') => {
-            if current_screen == Screen::Home {
+            if current_screen == Screen::Skills {
+                if let Some(paths) = &state.project_paths {
+                    macc_core::catalog::availability::schedule_refresh(paths, true);
+                }
+                state.refresh_skills();
+                state.set_status(
+                    UiStatusLevel::Info,
+                    "Skill source check requested (respects offline mode).",
+                    Some(Duration::from_secs(4)),
+                );
+            } else if current_screen == Screen::Home {
                 // Home screen: 'r' starts the coordinator and navigates to Coordinator Live.
                 state.start_coordinator_command(CoordinatorCommand::Run);
             } else if current_screen == Screen::Watch {
@@ -935,7 +958,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     let skill = &state.skills[*index];
                     let is_enabled = selected_skills.contains(&skill.id.to_string());
                     let enabled_marker = if is_enabled { "[x]" } else { "[ ]" };
-                    let mandatory_badge = if skill.mandatory { " [mandatory]" } else { "" };
+                    let mandatory_badge =
+                        if skill.availability.as_ref().is_some_and(|a| a.disabled()) {
+                            " [unavailable]"
+                        } else if skill.mandatory {
+                            " [mandatory]"
+                        } else {
+                            ""
+                        };
                     ListItem::new(Line::from(vec![
                         Span::raw(enabled_marker),
                         Span::raw(" "),
@@ -972,11 +1002,29 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let mut desc_text = format!("ID: {}\n\n", current_skill.id);
                 desc_text.push_str("Description:\n");
                 desc_text.push_str(&current_skill.description);
+                if let Some(a) = &current_skill.availability {
+                    desc_text.push_str(&format!("\n\nAvailability: {:?} — {}", a.state, a.reason));
+                    if a.stale {
+                        desc_text.push_str("\nCached result; press [r] to recheck.");
+                    }
+                    if let Some(error) = &a.last_error {
+                        desc_text.push_str(&format!("\nLast check: {error}"));
+                    }
+                } else {
+                    desc_text.push_str("\n\nAvailability: not verified yet.");
+                }
+                if let Some(paths) = &state.project_paths {
+                    if macc_core::catalog::availability::checking(paths) {
+                        desc_text.push_str("\nChecking sources in the background…");
+                    }
+                }
                 if current_skill.mandatory {
                     desc_text.push_str("\n\nMandatory skill: always enabled from catalog policy.");
                 }
 
-                let desc_para = Paragraph::new(desc_text).block(panel("Details"));
+                let desc_para = Paragraph::new(desc_text)
+                    .wrap(Wrap { trim: false })
+                    .block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
             }
         }

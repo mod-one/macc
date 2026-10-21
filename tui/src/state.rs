@@ -533,6 +533,7 @@ impl AppState {
                                 name: entry.name,
                                 description: entry.description,
                                 mandatory: entry.mandatory,
+                                availability: entry.availability,
                             },
                         );
                     }
@@ -5271,6 +5272,16 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.ensure_working_copy();
         let skill = self.skills[selected_index].clone();
         let skill_id = skill.id;
+        if skill.availability.as_ref().is_some_and(|a| a.disabled())
+            && !self.read_string_list_at(&path).contains(&skill_id)
+        {
+            self.set_status(
+                UiStatusLevel::Warning,
+                format!("Skill unavailable: {}", skill.availability.unwrap().reason),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
         if skill.mandatory {
             self.set_status(
                 UiStatusLevel::Warning,
@@ -5289,7 +5300,17 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             return;
         };
         self.ensure_working_copy();
-        let mut skills: Vec<String> = self.skills.iter().map(|s| s.id.to_string()).collect();
+        let selected = self.read_string_list_at(&path);
+        let mut skills: Vec<String> = self
+            .skills
+            .iter()
+            .filter(|s| {
+                s.mandatory
+                    || selected.contains(&s.id)
+                    || !s.availability.as_ref().is_some_and(|a| a.disabled())
+            })
+            .map(|s| s.id.to_string())
+            .collect();
         skills.sort();
         skills.dedup();
         self.set_string_list_at(&path, skills);
@@ -7043,6 +7064,42 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_skills_cannot_be_added_but_existing_selection_is_retained() {
+        use macc_core::catalog::availability::{Availability, State};
+        let mut state = AppState::with_engine(fixture_engine(&fixture_ids()));
+        let mut config = CanonicalConfig::default();
+        config.selections = Some(Default::default());
+        state.working_copy = Some(config);
+        state.skill_target_path = Some("/selections/skills".into());
+        state.skills = vec![Skill {
+            id: "absent".into(),
+            name: "Absent".into(),
+            description: "".into(),
+            mandatory: false,
+            availability: Some(Availability::new(
+                State::Unavailable,
+                "Source path missing",
+                1,
+            )),
+        }];
+        state.skill_selection_index = 0;
+        state.search_query.clear();
+        state.toggle_skill();
+        assert!(!state.selected_skills().contains(&"absent".into()));
+        state.select_all_skills();
+        assert!(!state.selected_skills().contains(&"absent".into()));
+        state.set_string_list_at("/selections/skills", vec!["absent".into()]);
+        state.select_all_skills();
+        assert!(state.selected_skills().contains(&"absent".into()));
+        state.toggle_skill();
+        assert!(!state.selected_skills().contains(&"absent".into()));
+        state.skills[0].availability =
+            Some(Availability::new(State::Unknown, "Network timeout", 2));
+        state.toggle_skill();
+        assert!(state.selected_skills().contains(&"absent".into()));
+    }
+
+    #[test]
     fn test_skills_selection() {
         use macc_core::catalog::{Selector, SkillEntry, SkillsCatalog, Source, SourceKind};
 
@@ -7082,6 +7139,7 @@ mod tests {
                 targets: Default::default(),
                 category: None,
                 compatibility: None,
+                availability: None,
             });
         }
         catalog

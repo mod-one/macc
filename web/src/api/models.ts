@@ -969,7 +969,16 @@ export interface ApiSkillItem {
 // ── Catalog skills lifecycle (spec §15) ───────────────────────────────────────
 
 /** A skill available from configured catalogs. */
+export interface ApiSkillAvailability {
+  state: 'available' | 'unavailable' | 'unknown';
+  reason: string;
+  checked_at: number;
+  stale: boolean;
+  last_error?: string;
+}
+
 export interface ApiCatalogSkillEntry {
+  availability?: ApiSkillAvailability;
   id: string;
   name: string;
   description: string;

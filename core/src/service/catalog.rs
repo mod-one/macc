@@ -94,6 +94,18 @@ pub fn list_skills(catalog: &SkillsCatalog, ui: &dyn CatalogUi) {
             "{:<20} {:<30} {:<10} {:<20}",
             entry.id, entry.name, kind, tags
         ));
+        if let Some(a) = &entry.availability {
+            ui.info(&format!(
+                "  {:?}: {}{}",
+                a.state,
+                a.reason,
+                if a.stale {
+                    " (cached; recheck needed)"
+                } else {
+                    ""
+                }
+            ));
+        }
     }
 }
 
@@ -115,6 +127,18 @@ pub fn search_skills(catalog: &SkillsCatalog, query: &str, ui: &dyn CatalogUi) {
             "{:<20} {:<30} {:<10} {:<20}",
             entry.id, entry.name, kind, tags
         ));
+        if let Some(a) = &entry.availability {
+            ui.info(&format!(
+                "  {:?}: {}{}",
+                a.state,
+                a.reason,
+                if a.stale {
+                    " (cached; recheck needed)"
+                } else {
+                    ""
+                }
+            ));
+        }
     }
 }
 
@@ -358,6 +382,7 @@ pub fn import_url(
                 targets: Default::default(),
                 category: None,
                 compatibility: None,
+                availability: None,
             });
             catalog.save_atomically(paths, &paths.skills_catalog_path())?;
             ui.info(&format!(

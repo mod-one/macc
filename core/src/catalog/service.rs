@@ -201,6 +201,8 @@ pub fn install_skill(
             message: format!("Skill '{}' not found in catalog.", id),
         })?;
 
+    super::availability::ensure_selectable(entry)?;
+
     let (descriptors, diagnostics) = backend.list_tools(paths);
     let tool_title = descriptors
         .iter()
@@ -219,6 +221,7 @@ pub fn install_skill(
             id: entry.id.clone(),
             subpath: entry.selector.subpath.clone(),
             kind: SelectionKind::Skill,
+            tools: vec![],
         }],
     };
     let materialized = backend.materialize_fetch_unit(
@@ -274,6 +277,7 @@ pub fn install_mcp(
             id: entry.id.clone(),
             subpath: entry.selector.subpath.clone(),
             kind: SelectionKind::Mcp,
+            tools: vec![],
         }],
     };
     let materialized = backend.materialize_fetch_unit(

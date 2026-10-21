@@ -25,6 +25,7 @@ pub enum SkillsSubcommand {
         source: Option<String>,
         tag: Option<String>,
         json: bool,
+        refresh: bool,
     },
     CatalogStatus {
         tool: Option<String>,
@@ -35,10 +36,11 @@ pub enum SkillsSubcommand {
         id: String,
         tool: String,
         reference: Option<String>,
-        pin: bool,
+        source: Option<String>,
         dry_run: bool,
     },
     Update {
+        latest: bool,
         id: Option<String>,
         tool: Option<String>,
         dry_run: bool,
@@ -237,7 +239,11 @@ impl Command for SkillsCmdCommand {
                 source,
                 tag,
                 json,
+                refresh,
             } => {
+                if self.app.overrides.offline != Some(true) {
+                    macc_core::catalog::availability::refresh(&paths, *refresh)?;
+                }
                 let entries = self
                     .app
                     .engine
@@ -270,8 +276,8 @@ impl Command for SkillsCmdCommand {
 
                 println!("Available skills\n");
                 println!(
-                    "{:<24} {:<18} {:<10} {:<14} {:<10} Risk",
-                    "ID", "Tools", "Source", "Ref", "Policy"
+                    "{:<24} {:<18} {:<10} {:<14} {:<10} {:<8} Availability",
+                    "ID", "Tools", "Source", "Ref", "Policy", "Risk"
                 );
                 println!(
                     "{:-<24} {:-<18} {:-<10} {:-<14} {:-<10} ---",
@@ -288,14 +294,31 @@ impl Command for SkillsCmdCommand {
                     let risk = e.risk.as_deref().unwrap_or("-");
                     let policy = if e.mandatory { "mandatory" } else { "-" };
                     println!(
-                        "{:<24} {:<18} {:<10} {:<14} {:<10} {}",
+                        "{:<24} {:<18} {:<10} {:<14} {:<10} {:<8} {}",
                         e.id,
                         &tools_str[..tools_str.len().min(17)],
                         src_short,
                         ref_str,
                         policy,
-                        risk
+                        risk,
+                        e.availability
+                            .as_ref()
+                            .map(|a| format!(
+                                "{:?}{}",
+                                a.state,
+                                if a.stale { " (cached)" } else { "" }
+                            ))
+                            .unwrap_or_else(|| "Not verified".into())
                     );
+                    if let Some(a) = &e.availability {
+                        if a.state != macc_core::catalog::availability::State::Available || a.stale
+                        {
+                            println!("  {}", a.reason);
+                        }
+                        if let Some(error) = &a.last_error {
+                            println!("  Last check: {error}");
+                        }
+                    }
                 }
             }
 
@@ -370,194 +393,33 @@ impl Command for SkillsCmdCommand {
                 id,
                 tool,
                 reference,
-                pin,
+                source,
                 dry_run,
             } => {
-                use macc_core::skills_catalog::{
-                    detect_conflicts, git_cache_key, CacheRef, InstalledTargets, LockedPackage,
-                    LockedSource, SkillLockEntry,
-                };
-
-                let catalog_entries = self
-                    .app
-                    .engine
-                    .catalog_skills_available(&paths, Some(tool.as_str()));
-                let entry = catalog_entries.iter().find(|e| e.id == id.as_str());
-
-                if entry.is_none() {
-                    eprintln!("Skill '{}' not found in catalog. Run 'macc skills available' to see available skills.", id);
-                    return Err(macc_core::MaccError::Catalog {
-                        operation: "install".to_string(),
-                        message: format!("Skill '{}' not found", id),
-                    });
-                }
-                let entry = entry.unwrap();
-
-                // Check tool is supported.
-                if !entry.tools.is_empty() && !entry.tools.iter().any(|t| t == tool.as_str()) {
-                    eprintln!(
-                        "Skill '{}' does not support tool '{}'. Supported: {}",
-                        id,
-                        tool,
-                        entry.tools.join(", ")
-                    );
-                    return Err(macc_core::MaccError::Catalog {
-                        operation: "install".to_string(),
-                        message: format!(
-                            "{}: Unsupported tool '{}'",
-                            macc_core::skills_catalog::MACC_SKILL_1003,
-                            tool
-                        ),
-                    });
-                }
-
-                let requested_ref = reference
-                    .clone()
-                    .or_else(|| entry.recommended_ref.clone())
-                    .unwrap_or_else(|| entry.source.reference.clone());
-
-                // For mutable branch refs without --pin, warn.
-                let is_mutable_ref = !matches!(requested_ref.as_str(), r if r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit()));
-                if is_mutable_ref && !pin {
-                    eprintln!(
-                        "Warning: Ref '{}' is mutable. Use --pin to resolve to an immutable SHA.",
-                        requested_ref
-                    );
-                }
-
-                // Build planned targets from catalog entry.
-                let planned_targets: Vec<(String, String)> = entry
-                    .targets
-                    .get(tool.as_str())
-                    .map(|dests| {
-                        dests
-                            .iter()
-                            .map(|d| (entry.selector.subpath.clone() + "/" + d, d.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // Load lockfile and check conflicts.
-                let lockfile = self.app.engine.skills_lockfile(&paths)?;
-                let conflicts = detect_conflicts(&planned_targets, &lockfile, &paths.root);
-
-                if !conflicts.is_empty() {
-                    eprintln!("Conflict detected:\n");
-                    for c in &conflicts {
-                        eprintln!("  Destination: {}", c.dest);
-                        eprintln!("  Issue: {}", c.message);
-                    }
-                    if *dry_run {
-                        return Ok(());
-                    }
-                    return Err(macc_core::MaccError::Catalog {
-                        operation: "install".to_string(),
-                        message: format!(
-                            "{}: Install plan has {} conflict(s)",
-                            macc_core::skills_catalog::MACC_SKILL_3001,
-                            conflicts.len()
-                        ),
-                    });
-                }
-
-                if *dry_run {
-                    println!(
-                        "Install plan for '{}' ({}): {} file(s)",
-                        id,
-                        tool,
-                        planned_targets.len()
-                    );
-                    for (_, dest) in &planned_targets {
-                        println!("  → {}", dest);
-                    }
-                    println!("\nNo files written (--dry-run).");
-                    return Ok(());
-                }
-
-                // Build the lock entry (fetch is out of scope for MVP — record intent).
-                let resolved_ref: Option<String> = None; // SHA resolution requires network (pin flag reserved for future use)
-                let cache_key = git_cache_key(
-                    &entry.source.url,
-                    resolved_ref.as_deref().unwrap_or(&requested_ref),
-                );
-
-                let now = chrono::Utc::now().to_rfc3339();
-                let mut updated_lockfile = lockfile;
-                updated_lockfile.upsert(SkillLockEntry {
-                    id: id.clone(),
-                    tool: tool.clone(),
-                    source: LockedSource {
-                        kind: format!("{:?}", entry.source.kind).to_lowercase(),
-                        url: Some(entry.source.url.clone()),
-                        requested_ref: Some(requested_ref.clone()),
-                        resolved_ref: resolved_ref.clone(),
-                        checksum: entry.source.checksum.clone(),
-                        subpath: entry.selector.subpath.clone(),
-                        pinned: *pin && resolved_ref.is_some(),
-                    },
-                    package: LockedPackage {
-                        manifest_path: None,
-                        manifest_digest: None,
+                super::skills_install::install(
+                    &self.app,
+                    super::skills_install::Request {
                         id: id.clone(),
-                        version: None,
+                        tool: tool.clone(),
+                        reference: reference.clone(),
+                        source: source.clone(),
                     },
-                    cache: CacheRef { cache_key },
-                    installed: InstalledTargets {
-                        at: now,
-                        targets: planned_targets
-                            .iter()
-                            .map(|(src, dest)| macc_core::skills_catalog::InstalledTarget {
-                                src: src.clone(),
-                                dest: dest.clone(),
-                                digest: None,
-                                owner: "macc".to_string(),
-                            })
-                            .collect(),
-                    },
-                });
-                updated_lockfile.save(&paths.skills_lock_path())?;
-
-                println!(
-                    "Recorded install intent for '{}' ({}) in skills.lock.json.",
-                    id, tool
-                );
-                if is_mutable_ref && !pin {
-                    println!(
-                        "Note: skill is tracked from mutable ref '{}' (not pinned).",
-                        requested_ref
-                    );
-                }
-                println!("Run 'macc apply' to materialize the skill files.");
+                    *dry_run,
+                )?;
             }
-
-            SkillsSubcommand::Update { id, tool, dry_run } => {
-                let statuses = self.app.engine.skills_status(&paths, tool.as_deref())?;
-                let to_check: Vec<_> = statuses
-                    .iter()
-                    .filter(|s| id.as_deref().is_none_or(|fid| s.id == fid))
-                    .collect();
-
-                if to_check.is_empty() {
-                    println!("No installed skills match the filter.");
-                    return Ok(());
-                }
-
-                println!("Update plan:\n");
-                for s in &to_check {
-                    let action = if s.pinned {
-                        "verify (pinned — no automatic move)"
-                    } else {
-                        "check for newer commit on mutable ref"
-                    };
-                    println!("  {} ({}) — {}", s.id, s.tool, action);
-                }
-
-                if *dry_run {
-                    println!("\nNo files written (--dry-run).");
-                } else {
-                    println!("\nNote: actual ref resolution and fetch require network access.");
-                    println!("Run 'macc skills verify' to check installed digest drift.");
-                }
+            SkillsSubcommand::Update {
+                id,
+                tool,
+                dry_run,
+                latest,
+            } => {
+                super::skills_install::update(
+                    &self.app,
+                    id.as_deref(),
+                    tool.as_deref(),
+                    *dry_run,
+                    *latest,
+                )?;
             }
 
             SkillsSubcommand::Verify { tool, json } => {
@@ -710,5 +572,51 @@ impl Command for SkillsCmdCommand {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+    #[test]
+    fn global_offline_flag_skips_automatic_catalog_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = macc_core::ProjectPaths::from_root(dir.path());
+        std::fs::create_dir_all(&paths.macc_dir).unwrap();
+        let mut config = macc_core::config::CanonicalConfig::default();
+        config.settings.offline = false;
+        std::fs::write(&paths.config_path, config.to_yaml().unwrap()).unwrap();
+        // Unsupported transports also make a regression deterministic without network traffic.
+        let mut catalog = macc_core::catalog::load_effective_skills_catalog(&paths).unwrap();
+        for skill in &mut catalog.entries {
+            skill.source.url = "https://example.invalid/fixture.git".into();
+        }
+        catalog
+            .save_atomically(&paths, &paths.project_skills_catalog_path())
+            .unwrap();
+        let app = AppContext::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(macc_core::TestEngine::with_fixtures()),
+            macc_core::resolve::CliOverrides {
+                offline: Some(true),
+                ..Default::default()
+            },
+        );
+        SkillsCmdCommand {
+            app,
+            subcommand: SkillsSubcommand::Available {
+                tool: None,
+                source: None,
+                tag: None,
+                json: true,
+                refresh: true,
+            },
+        }
+        .run()
+        .unwrap();
+        assert!(!paths
+            .macc_dir
+            .join("state/catalog-availability.json")
+            .exists());
     }
 }

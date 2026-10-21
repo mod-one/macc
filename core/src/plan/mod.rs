@@ -20,6 +20,8 @@ pub enum Scope {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct ActionPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_lock_revision: Option<String>,
     pub actions: Vec<Action>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub o2_activation: Option<crate::o2::activation::Activation>,
