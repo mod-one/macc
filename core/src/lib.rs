@@ -11,6 +11,7 @@ pub mod domain;
 pub mod engine;
 pub mod fs_lock;
 pub mod git;
+pub mod hooks;
 pub mod o2;
 pub mod session_store;
 pub use config::migrate;
@@ -552,6 +553,7 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             skills: None,
             context: None,
             prd_generation: None,
+            hooks: None,
             session_management: None,
             memory: None,
             context_engine: None,

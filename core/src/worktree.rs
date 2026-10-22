@@ -750,6 +750,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            hooks: None,
             session_management: None,
             memory: None,
             context_engine: None,

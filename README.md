@@ -561,3 +561,5 @@ MACC is local-first.
 - Secret scanning blocks unsafe generated output.
 
 See [Supervisor recovery](docs/SUPERVISOR.md) for automatic diagnosis, repair, reports and detached operation.
+
+Managed output and evidence hooks: see [Hooks](docs/HOOKS.md) for the dedicated catalogue, client workflows and external package contract.

@@ -14,6 +14,7 @@ pub mod context;
 pub mod coordinator;
 pub mod doctor;
 pub mod failure;
+pub mod hooks;
 pub mod init;
 pub mod install;
 pub mod lifecycle_support;

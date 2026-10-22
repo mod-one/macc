@@ -455,7 +455,7 @@
     {
       "id": "test-output-failures-only",
       "name": "Test Output Failures Only",
-      "description": "Filters test logs so only failures, summaries, and actionable stack traces enter assistant context.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Filters test logs so only failures, summaries, and actionable stack traces enter assistant context.",
       "tags": [
         "hook-bundle",
         "testing",
@@ -490,7 +490,7 @@
     {
       "id": "lint-errors-only",
       "name": "Lint Errors Only",
-      "description": "Keeps lint errors and actionable warnings; collapses successful lint output.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Keeps lint errors and actionable warnings; collapses successful lint output.",
       "tags": [
         "hook-bundle",
         "linting",
@@ -522,7 +522,7 @@
     {
       "id": "stacktrace-collapse",
       "name": "Stacktrace Collapse",
-      "description": "Collapses repetitive stack frames while preserving top error, cause chain, and project frames.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Collapses repetitive stack frames while preserving top error, cause chain, and project frames.",
       "tags": [
         "hook-bundle",
         "debugging",
@@ -557,7 +557,7 @@
     {
       "id": "git-diff-stat-before-full-diff",
       "name": "Git Diff Stat Before Full Diff",
-      "description": "Shows diff stat and changed files before exposing the full diff.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Shows diff stat and changed files before exposing the full diff.",
       "tags": [
         "hook-bundle",
         "git",
@@ -589,7 +589,7 @@
     {
       "id": "log-grep-error-first",
       "name": "Log Grep Error First",
-      "description": "Surfaces error, warn, fatal, panic, exception, and recent context first.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Surfaces error, warn, fatal, panic, exception, and recent context first.",
       "tags": [
         "hook-bundle",
         "logging",
@@ -621,7 +621,7 @@
     {
       "id": "coordinator-event-summarizer",
       "name": "Coordinator Event Summarizer",
-      "description": "Summarizes MACC coordinator event streams by task, phase, and state transition.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Summarizes MACC coordinator event streams by task, phase, and state transition.",
       "tags": [
         "hook-bundle",
         "macc",
@@ -654,7 +654,7 @@
     {
       "id": "performer-log-summary",
       "name": "Performer Log Summary",
-      "description": "Summarizes long performer logs into action/result/error sections.",
+      "description": "Legacy hook discovery alias. Manage activation in the dedicated Hooks catalogue. Summarizes long performer logs into action/result/error sections.",
       "tags": [
         "hook-bundle",
         "macc",

@@ -14,6 +14,7 @@ mod errors;
 mod failures;
 #[allow(clippy::result_large_err)]
 mod git;
+mod hooks;
 mod launch;
 #[allow(clippy::result_large_err)]
 mod logs;
@@ -242,6 +243,9 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/sessions/checkpoints/:id",get(sessions::checkpoint))
         .route("/api/v1/sessions/checkpoints/:id/reconcile",get(sessions::reconciliation_plan).post(sessions::reconciliation_apply))
+        .route("/api/v1/hooks", get(hooks::status))
+        .route("/api/v1/hooks/inspect", post(hooks::inspect).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
+        .route("/api/v1/hooks/action", post(hooks::action).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
         .route("/api/v1/o2", get(o2::status))
         .route("/api/v1/o2/action", post(o2::action).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/v1/sessions/usage",get(usage::status))

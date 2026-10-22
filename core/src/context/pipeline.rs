@@ -64,6 +64,7 @@ pub fn apply(
                 .unwrap_or_else(|| s.default_bundles.clone())
         })
         .unwrap_or_default();
+    bundles = crate::hooks::selected(config, &skill.id, &bundles)?;
     // Reducers require an explicit output contract. Unknown output is bounded raw.
     let failed = result.status == "failed" || result.exit_code.is_some_and(|code| code != 0);
     if failed {
@@ -134,6 +135,17 @@ pub fn apply(
             None
         };
         hook_used |= hook.is_some();
+        let hook = if !failed && !bundles.is_empty() {
+            match crate::hooks::transform(config, &bundles, hook.as_deref().unwrap_or(raw)) {
+                Ok(text) => Some(text),
+                Err(error) => {
+                    tracing::warn!(%error, skill=%skill.id, "Managed output hook failed; raw output retained");
+                    Some(raw.clone())
+                }
+            }
+        } else {
+            hook
+        };
         if o2_active {
             let reduced = crate::o2::output::render(
                 &paths.root,

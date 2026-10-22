@@ -189,7 +189,14 @@ impl CoordinatorEvidenceCollector {
     pub fn collect(&self) -> CoordinatorEvidence {
         let collected_at = chrono::Utc::now().to_rfc3339();
 
-        let recent_events = self.read_recent_events();
+        let recent_events = crate::hooks::evidence(
+            &self.repo_root,
+            "coordinator-event-summarizer",
+            &self.read_recent_events().join("\n"),
+        )
+        .lines()
+        .map(str::to_string)
+        .collect();
         let (task_state_counts, failed_tasks) = self.read_registry_state();
         let run_log_footer = self.read_run_log_footer();
         let (coordinator_result, coordinator_exit_reason) =

@@ -73,20 +73,23 @@ pub(crate) fn render(
     })
 }
 pub fn reduce(root: &Path, bundle: &str, raw: &str) -> Result<Reduced> {
-    if !crate::context::reduction::known(bundle) {
-        return Err(error("Unknown output reduction bundle"));
+    let config = crate::load_canonical_config(&crate::ProjectPaths::from_root(root).config_path)?;
+    let ids = crate::hooks::selected(&config, "", &[bundle.to_string()])?;
+    if ids.is_empty() {
+        return Err(error("Unknown or disabled output reduction hook"));
     }
-    let policy = super::policy::load(root)?;
-    if !policy.context_engine.output_reduction {
+    let policy = super::policy::from_config(&config);
+    if !policy.context_engine.enabled || !policy.context_engine.output_reduction {
         return Err(error("Output reduction disabled"));
     }
+    let transformed = crate::hooks::transform(&config, &ids, raw)?;
     render(
         root,
         raw,
-        &[bundle.into()],
+        &ids,
         policy.context_engine.pull_limit_tokens as usize,
         policy.context_engine.max_output_bytes as usize,
-        None,
+        Some(transformed),
         None,
     )
 }

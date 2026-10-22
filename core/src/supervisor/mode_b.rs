@@ -159,8 +159,19 @@ impl EvidenceCollector {
             worktree_path,
             &["log", "--oneline", &format!("HEAD ^{}", base_branch)],
         );
-        let performer_log = self.read_performer_log(task_id, worktree_path);
-        let coordinator_events = self.read_coordinator_events(task_id);
+        let performer_log = crate::hooks::evidence(
+            &self.repo_root,
+            "performer-log-summary",
+            &self.read_performer_log(task_id, worktree_path),
+        );
+        let coordinator_events = crate::hooks::evidence(
+            &self.repo_root,
+            "coordinator-event-summarizer",
+            &self.read_coordinator_events(task_id).join("\n"),
+        )
+        .lines()
+        .map(str::to_string)
+        .collect();
 
         WorktreeEvidence {
             task_id: task_id.to_string(),

@@ -114,6 +114,10 @@ pub(crate) fn contextual_items(state: &AppState) -> Vec<CommandPaletteItem> {
             [
                 (Screen::Home, "Home"),
                 (Screen::Tools, "Tools"),
+                (
+                    Screen::Hooks,
+                    "Hooks — processors, owners and external packages",
+                ),
                 (Screen::Automation, "Settings"),
                 (Screen::CoordinatorLive, "Coordinator live"),
             ]

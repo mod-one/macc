@@ -43,7 +43,8 @@ fn rows(bindings: Vec<(&str, &str)>) -> Vec<Command> {
 
 /// Input is isolated from page navigation. Function keys remain available.
 pub(crate) fn input_active(state: &AppState) -> bool {
-    (state.current_screen() == Screen::Apply && state.apply_confirmation_open())
+    (state.current_screen() == Screen::Hooks && state.hooks.input_active())
+        || (state.current_screen() == Screen::Apply && state.apply_confirmation_open())
         || state.search_editing
         || (state.current_screen() == Screen::ToolSettings && state.is_tool_field_editing())
         || (matches!(
@@ -57,6 +58,7 @@ pub(crate) fn input_active(state: &AppState) -> bool {
 /// Global destinations must never bypass an active modal or text editor.
 pub(crate) fn exclusive(state: &AppState) -> bool {
     input_active(state)
+        || (state.current_screen() == Screen::Hooks && state.hooks.modal())
         || state.launch_dialog.is_some()
         || state.approval_window.is_some()
         || state.prd_queue_editor.is_some()
@@ -78,6 +80,9 @@ pub(crate) fn exclusive(state: &AppState) -> bool {
 }
 
 pub(crate) fn active(state: &AppState) -> Vec<Command> {
+    if state.current_screen() == Screen::Hooks {
+        return rows(state.hooks.bindings());
+    }
     if state.launch_dialog.is_some() {
         return rows(vec![
             ("Tab", "Next option"),
@@ -272,6 +277,7 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
         ("x", "Apply configuration…"),
         ("O", "O2 workspace"),
         ("J", "Sessions"),
+        ("H", "Hooks"),
         ("A", "Waiting approval"),
         ("U", "Redo configuration"),
     ];
@@ -297,6 +303,7 @@ pub(crate) fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'sta
             ("r", "Start coordinator"),
             ("O", "O2 workspace"),
             ("J", "Sessions"),
+            ("H", "Hooks"),
             ("d", "Doctor"),
             ("p", "Preview"),
         ],
@@ -315,6 +322,11 @@ pub(crate) fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'sta
             ("s", "Save"),
         ],
         Screen::ToolSettings => vec![("↑↓", "Move"), ("Space/Enter", "Edit"), ("s", "Save")],
+        Screen::Hooks => vec![
+            ("Space", "Review activation…"),
+            ("i", "Import hook…"),
+            ("r", "Refresh"),
+        ],
         Screen::Skills => vec![
             ("r", "Recheck sources"),
             ("↑↓", "Move"),

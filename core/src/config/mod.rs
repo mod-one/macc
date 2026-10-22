@@ -10,6 +10,8 @@ use std::path::Path;
 pub struct CanonicalConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<crate::hooks::HooksConfig>,
     pub tools: ToolsConfig,
     #[serde(default)]
     pub standards: StandardsConfig,
@@ -1089,6 +1091,7 @@ impl CanonicalConfig {
 
     pub fn validate(&self) -> crate::Result<()> {
         crate::o2::policy::from_config(self).validate()?;
+        crate::hooks::validate(self)?;
         if let Some(policy) = &self.session_management {
             policy.validate()?;
         }
@@ -1159,6 +1162,7 @@ impl Default for CanonicalConfig {
             adaptive_compaction: None,
             code_intelligence: None,
             prd_generation: None,
+            hooks: None,
         }
     }
 }
@@ -1864,6 +1868,7 @@ settings:
             adaptive_compaction: None,
             code_intelligence: None,
             prd_generation: None,
+            hooks: None,
         };
 
         let yaml1 = config.to_yaml().expect("Should serialize");

@@ -1,3 +1,5 @@
+#[path = "hooks_tests.rs"]
+mod hooks_tests;
 #[path = "o2_api_tests.rs"]
 mod o2_api_tests;
 #[path = "sessions_api_tests.rs"]

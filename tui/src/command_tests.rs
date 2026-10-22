@@ -13,6 +13,7 @@ fn every_page_has_visible_commands_and_opens_the_same_palette() {
         Screen::Mcp,
         Screen::Logs,
         Screen::Skills,
+        Screen::Hooks,
         Screen::Agents,
         Screen::ToolSettings,
         Screen::Preview,

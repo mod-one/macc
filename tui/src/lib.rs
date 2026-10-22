@@ -26,6 +26,9 @@ mod command_palette;
 mod command_tests;
 mod coordinator_poll;
 use command_palette::*;
+mod hooks;
+#[cfg(test)]
+mod hooks_tests;
 mod o2;
 pub mod ownership;
 pub mod prd_queue;
@@ -561,6 +564,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
 
     if current_screen == Screen::Apply {
         state.apply_key(key);
+        return;
+    }
+    if hooks::handle(state, key) {
         return;
     }
     if session_navigation::handle(state, key) {
@@ -1452,7 +1458,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(body_area);
 
-            let mut overview = String::from("WORKSPACES\n[O] O2 — Memory, context & intelligence\n[J] Sessions — Conversations & settings\n[F2] Commands    [F1] Help\n\n");
+            let mut overview = String::from("WORKSPACES\n[O] O2 — Memory, context & intelligence\n[J] Sessions — Conversations & settings\n[H] Hooks — Output processors & feature requirements\n[F2] Commands    [F1] Help\n\n");
             if !state.errors.is_empty() {
                 overview.push_str("Errors:\n");
                 for err in &state.errors {
@@ -1543,6 +1549,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             f.render_widget(steps_para, body_chunks[1]);
         }
         Screen::Sessions | Screen::O2 => state.sessions.draw(f, body_area),
+        Screen::Hooks => state.hooks.draw(f, body_area),
         Screen::Settings => {
             // Settings has been merged into Coordinator Settings (Screen::Automation).
             // This screen is no longer the primary destination — it acts as a redirect notice.

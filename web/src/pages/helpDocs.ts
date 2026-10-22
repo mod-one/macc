@@ -76,6 +76,7 @@ Use the **Config** pages to manage tool adapters and standards.
 - **Tools**: adapter-level settings and health.
 - **Standards**: coding standards and presets.
 - **Skills**: install/remove skill packages.
+- **Hooks**: discover processors, inspect required feature owners and import reviewed external hook.json snapshots.
 - **Settings**: global web/coordinator/runtime settings.
 
 When unsure, start from Settings and search for the key in global search.`,

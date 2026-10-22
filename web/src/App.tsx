@@ -10,6 +10,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Tools = lazy(() => import('./pages/config/Tools'));
 const Standards = lazy(() => import('./pages/config/Standards'));
 const Skills = lazy(() => import('./pages/config/Skills'));
+const Hooks = lazy(() => import('./pages/config/Hooks'));
 const O2 = lazy(() => import('./pages/ops/O2'));
 const Sessions = lazy(() => import('./pages/ops/Sessions'));
 const Settings = lazy(() => import('./pages/config/Settings'));
@@ -51,6 +52,7 @@ const App: React.FC = () => {
             <Route path="tools" element={<Tools />} />
             <Route path="standards" element={<Standards />} />
             <Route path="skills" element={<Skills />} />
+            <Route path="hooks" element={<Hooks />} />
             <Route path="settings" element={<Settings />} />
             <Route path="sessions" element={<Sessions />} />
             {['overview', 'memory', 'context', 'compaction', 'code-intelligence', 'tuning', 'o2'].map(path => <Route key={path} path={path} element={<O2 />} />)}

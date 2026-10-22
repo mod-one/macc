@@ -143,6 +143,7 @@ fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
 }
 
 pub struct AppState {
+    pub(crate) hooks: crate::hooks::HooksScreen,
     pub sessions: crate::sessions::SessionsScreen,
     pub prd_queue_editor: Option<crate::prd_queue::Editor>,
     pub engine: Arc<dyn Engine + Send + Sync>,
@@ -331,6 +332,7 @@ impl AppState {
     pub fn with_engine(engine: Arc<dyn Engine + Send + Sync>) -> Self {
         let client_identity = Self::new_client_identity();
         let mut state = Self {
+            hooks: crate::hooks::HooksScreen::default(),
             sessions: crate::sessions::SessionsScreen::default(),
             engine,
             project_paths: None,

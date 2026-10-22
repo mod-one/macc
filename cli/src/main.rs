@@ -76,6 +76,11 @@ enum SaveSubcommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Discover, configure and import tool-neutral hooks
+    Hooks {
+        #[command(subcommand)]
+        command: commands::hooks::HooksCommand,
+    },
     /// Memory, context, compaction and code intelligence operations
     O2 {
         #[command(subcommand)]
@@ -1503,6 +1508,9 @@ fn run_with_engine_provider(
         std::env::current_exe().map_err(|e| MaccError::Validation(e.to_string()))?,
     );
     match &cli.command {
+        Some(Commands::Hooks { command }) => {
+            commands::hooks::Hooks(app.clone(), command.clone()).run()
+        }
         Some(Commands::O2 { command }) => commands::o2::O2::new(app.clone(), command.clone()).run(),
         Some(Commands::SessionStore { command }) => {
             commands::session_store::SessionStoreCommand::new(app.clone(), command.clone()).run()

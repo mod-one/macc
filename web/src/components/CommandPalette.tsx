@@ -105,6 +105,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onOpenChange }) =
       { id: 'nav-git', label: 'Go to Git Graph', group: 'Navigation', keywords: ['ops', 'commits'], shortcut: 'G G', run: nav('/ops/git') },
       { id: 'nav-tools', label: 'Go to Tools', group: 'Navigation', keywords: ['config'], shortcut: 'G U', run: nav('/config/tools') },
       { id: 'nav-standards', label: 'Go to Standards', group: 'Navigation', keywords: ['config'], shortcut: 'G S', run: nav('/config/standards') },
+      { id: 'nav-hooks', label: 'Go to Hooks', group: 'Navigation', keywords: ['config', 'hooks', 'processors', 'required', 'owners'], shortcut: '', run: nav('/config/hooks') },
       { id: 'nav-skills', label: 'Go to Skills', group: 'Navigation', keywords: ['config'], shortcut: 'G H', run: nav('/config/skills') },
       { id: 'nav-settings', label: 'Go to Settings', group: 'Navigation', keywords: ['config'], shortcut: 'G E', run: nav('/config/settings') },
       { id: 'nav-help', label: 'Go to Help', group: 'Navigation', keywords: ['docs'], shortcut: 'G ?', run: nav('/help') },

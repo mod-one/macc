@@ -372,6 +372,7 @@ fn extract_sections(source: &CanonicalConfig, sections: &[ProfileSection]) -> Ca
         adaptive_compaction: source.adaptive_compaction.clone(),
         code_intelligence: source.code_intelligence.clone(),
         prd_generation: source.prd_generation.clone(),
+        hooks: source.hooks.clone(),
     }
 }
 
@@ -474,6 +475,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            hooks: None,
             session_management: None,
             memory: None,
             context_engine: None,
