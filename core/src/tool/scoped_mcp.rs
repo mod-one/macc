@@ -43,7 +43,7 @@ impl RegistrationSpec {
         }
         Ok(())
     }
-    fn server(&self) -> serde_json::Value {
+    pub(crate) fn server(&self) -> serde_json::Value {
         let command = std::env::current_exe()
             .ok()
             .filter(|p| p.file_name().is_some_and(|s| s == "macc"))

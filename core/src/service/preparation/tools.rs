@@ -16,13 +16,8 @@ fn available(spec: &ToolSpec) -> bool {
         )
     })
 }
-pub(super) fn requirements(
-    paths: &ProjectPaths,
-    config: &crate::config::CanonicalConfig,
-) -> Result<Vec<Requirement>> {
-    let (specs, diagnostics) =
-        ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root))
-            .load_all_with_embedded();
+/// Shared selection for preparation and read-only MCP visibility.
+pub(crate) fn selected_ids(config: &crate::config::CanonicalConfig) -> Vec<String> {
     let mut selected = config.tools.enabled.clone();
     if let Some(tool) = config
         .automation
@@ -40,6 +35,18 @@ pub(super) fn requirements(
     {
         selected.push(tool.clone());
     }
+    selected.sort();
+    selected.dedup();
+    selected
+}
+pub(super) fn requirements(
+    paths: &ProjectPaths,
+    config: &crate::config::CanonicalConfig,
+) -> Result<Vec<Requirement>> {
+    let (specs, diagnostics) =
+        ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root))
+            .load_all_with_embedded();
+    let selected = selected_ids(config);
     if diagnostics
         .iter()
         .any(|d| d.path.starts_with(&paths.macc_dir))

@@ -20,7 +20,7 @@ def instruction(state, step):
     if step == 0:
         return ('\nRetrieve the approved policy through MCP before editing: run '
                 '`python3 .macc/memory_mcp_client.py search "policy"`. '
-                'Read the returned approved record; if only references are returned, use '
+                'Read the returned summary, then retrieve the complete record with '
                 '`python3 .macc/memory_mcp_client.py get MEMORY_ID`. '
                 'This client is the explicitly allowed .macc reader for this task. '
                 'If MCP fails, report the failure rather than claiming it was used.\n')
@@ -41,6 +41,7 @@ def inspect(invoke, wt, state, records):
         return
     sessions = {(r.get('logical_session_id'), str(r.get('generation'))) for r in records}
     found = False
+    fragments = {}
     for event in events:
         if event.get('error') or (event.get('session_id'), event.get('generation')) not in sessions:
             raise RuntimeError('MCP call failed or was not attributed to the measured session')
@@ -55,6 +56,21 @@ def inspect(invoke, wt, state, records):
                 for hit in data.get('records', []):
                     if hit.get('memory', {}).get('id') == state['memory_id'] and hit.get('checksum') == state['memory_checksum'] and hit['memory']['proposal'].get('body') == state['proposal']['body']:
                         found = True
+                if exchange['request'].get('params', {}).get('name') == 'memory.get' and data.get('id') == state['memory_id'] and data.get('checksum') == state['memory_checksum'] and isinstance(data.get('fragment'), str):
+                    key = (event.get('session_id'), event.get('generation'))
+                    fragments.setdefault(key, {})[data['offset']] = data['fragment']
+    for pieces in fragments.values():
+        raw = ''
+        for offset, fragment in sorted(pieces.items()):
+            if offset != len(raw):
+                break
+            raw += fragment
+        try:
+            hit = json.loads(raw)
+        except ValueError:
+            continue
+        if hit.get('memory', {}).get('id') == state['memory_id'] and hit.get('checksum') == state['memory_checksum'] and hit['memory']['proposal'].get('body') == state['proposal']['body']:
+            found = True
     state['verified'] = found
     if not found:
         raise RuntimeError('No actual live MCP response delivered the complete approved benchmark policy')

@@ -1,6 +1,11 @@
 //! Local MCP stdio protocol adapter over the restricted agent port.
+pub(crate) mod activity;
 mod budget;
 pub(crate) mod catalog;
+pub(crate) mod delivery;
+mod probe_process;
+pub(crate) mod status;
+pub mod verification;
 use super::*;
 use agent::Credentials;
 use serde_json::{json, Value};
@@ -10,6 +15,7 @@ pub struct Server {
     credentials: Credentials,
     initialized: bool,
     ready: bool,
+    pending_delivery: Option<(String, Value)>,
 }
 impl Server {
     pub fn new(root: &Path, credentials: Credentials) -> Result<Self> {
@@ -20,9 +26,18 @@ impl Server {
             credentials,
             initialized: false,
             ready: false,
+            pending_delivery: None,
         })
     }
+    /// Custom transports acknowledge only after successfully writing/flushing the response.
+    pub fn acknowledge(&mut self) -> Result<()> {
+        if let Some((name, wire)) = self.pending_delivery.take() {
+            delivery::record(&self.root, &self.credentials, &name, &wire)?;
+        }
+        Ok(())
+    }
     pub fn handle(&mut self, request: Value) -> Option<Value> {
+        self.pending_delivery = None;
         let id = request.get("id").cloned();
         let valid_id = |id: &Value| {
             id.is_null()
@@ -96,6 +111,13 @@ impl Server {
             if !params.is_object() || params.get("cursor").is_some_and(|v| !v.is_null()) {
                 return Some(rpc_error(&id, -32602, "This fixed catalog has no cursor"));
             }
+            if activity::record(&self.root, &self.credentials, "connected").is_err() {
+                return Some(rpc_error(
+                    &id,
+                    -32001,
+                    "MCP connection could not be recorded",
+                ));
+            }
             return Some(json!({"jsonrpc":"2.0","id":id,"result":catalog::list(&p)}));
         }
         if method != "tools/call" {
@@ -143,12 +165,9 @@ impl Server {
                 (json!({"error":message}), true)
             }
         };
-        Some(budget::bound(
-            &id,
-            data,
-            is_error,
-            p.memory.mcp_output_tokens,
-        ))
+        let wire = budget::bound(&id, data, is_error, p.memory.mcp_output_tokens);
+        self.pending_delivery = Some((name.to_string(), wire.clone()));
+        Some(wire)
     }
 }
 fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
@@ -186,8 +205,12 @@ pub fn serve(
                 .write_all(b"\n")
                 .and_then(|_| output.flush())
                 .map_err(|e| error(e.to_string()))?;
+            server.acknowledge()?;
         }
     }
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod probe_process_tests;

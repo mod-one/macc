@@ -20,9 +20,14 @@ pub(super) fn prepare(paths: &ProjectPaths, plan: &Plan, report: &mut Report) ->
                     ))
                 })?
                 .verify(&paths.root)?;
+            phase(
+                &paths.root,
+                &format!("Verifying {} MCP connection", tool.spec.id),
+            )?;
+            crate::o2::mcp::verification::verify(&paths.root, &tool.spec)?;
         }
         report.completed.push(
-            "Scoped MCP registrations verified; credentials are minted for each leased runner"
+            "Scoped MCP configuration, startup, handshake, catalog and authorized control read verified; control leases revoked"
                 .into(),
         );
     }
@@ -111,6 +116,18 @@ pub(super) fn verify(paths: &ProjectPaths, plan: &Plan) -> Result<()> {
                     MaccError::Validation(format!("{} has no scoped MCP adapter", tool.spec.id))
                 })?
                 .verify(&paths.root)?;
+            let registration = tool
+                .spec
+                .performer
+                .as_ref()
+                .and_then(|p| p.scoped_mcp.as_ref())
+                .unwrap();
+            if !crate::o2::mcp::verification::current(&paths.root, &tool.spec.id, registration)? {
+                return Err(MaccError::Validation(format!(
+                    "{} MCP connection verification missing or stale; complete Apply again",
+                    tool.spec.id
+                )));
+            }
         }
     }
     if p.adaptive_compaction.enabled && p.adaptive_compaction.configure_native_auto {

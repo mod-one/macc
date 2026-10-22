@@ -64,7 +64,9 @@ pub(super) fn initialized(root: &Path, c: Credentials) -> Server {
     s
 }
 pub(super) fn call(s: &mut Server, name: &str, args: Value) -> Value {
-    s.handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap()
+    let wire = s.handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
+    s.acknowledge().unwrap();
+    wire
 }
 pub(super) fn data(wire: &Value) -> Value {
     serde_json::from_str(wire["result"]["content"][0]["text"].as_str().unwrap()).unwrap()

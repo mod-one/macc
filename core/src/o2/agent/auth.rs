@@ -37,7 +37,12 @@ pub fn options(root: &Path, key: &store::LeaseKey) -> Result<Value> {
         generation: key.generation,
         token: token(key),
     };
+    let scope = authorize(root, &db, &credentials)?;
+    drop(db);
+    let _guard = store::lock(root)?;
+    let (db, _) = database(root)?;
     authorize(root, &db, &credentials)?;
+    super::super::mcp::activity::record_in(&db, &credentials, &scope, "available")?;
     Ok(
         json!({"env":{"MACC_O2_PROJECT_ROOT":root.canonicalize().map_err(|e|error(e.to_string()))?,"MACC_O2_MCP_SESSION":key.session_id,"MACC_O2_MCP_GENERATION":key.generation.to_string(),"MACC_O2_MCP_TOKEN":credentials.token}}),
     )

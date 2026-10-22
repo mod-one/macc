@@ -21,7 +21,7 @@ def main(argv=None):
         raise RuntimeError('MCP reader requires the active MACC runner session')
     audit = Path('.macc/benchmark-mcp-events.jsonl')
     method = 'memory.search' if args[0] == 'search' else 'memory.get'
-    arguments = {'query': args[1], 'limit': 1} if args[0] == 'search' else {'id': args[1], 'max_chars': 4096}
+    arguments = {'query': args[1], 'limit': 1} if args[0] == 'search' else {'id': args[1], 'max_chars': 4096, 'force': True}
     started = time.monotonic()
     process = subprocess.Popen([os.environ.get('MACC_SESSION_SERVICE_BIN', 'macc'), 'o2', 'mcp'],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -48,12 +48,30 @@ def main(argv=None):
         return response
     error = None
     response = None
+    detail = []
     try:
         send({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'macc-benchmark-reader', 'version': '1'}}})
         send({'jsonrpc': '2.0', 'method': 'notifications/initialized'}, False)
         response = send({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': method, 'arguments': arguments}})
         if response.get('result', {}).get('isError') is not False:
             raise RuntimeError('Scoped memory read was rejected')
+        if method == 'memory.get':
+            data = json.loads(response['result']['content'][0]['text'])
+            checksum = data.get('checksum')
+            detail.append(data.get('fragment', ''))
+            for request_id in range(3, 67):
+                offset = data.get('next_offset')
+                if offset is None:
+                    break
+                response = send({'jsonrpc': '2.0', 'id': request_id, 'method': 'tools/call', 'params': {'name': method, 'arguments': {**arguments, 'offset': offset}}})
+                if response.get('result', {}).get('isError') is not False:
+                    raise RuntimeError('Scoped memory fragment was rejected')
+                data = json.loads(response['result']['content'][0]['text'])
+                if data.get('checksum') != checksum or (data.get('next_offset') is not None and data['next_offset'] <= offset):
+                    raise RuntimeError('Scoped memory version changed or fragment did not advance')
+                detail.append(data.get('fragment', ''))
+            else:
+                raise RuntimeError('Scoped memory fragment read exceeded 64 requests')
     except (OSError, ValueError, RuntimeError) as failure:
         error = str(failure)
     finally:
@@ -72,7 +90,12 @@ def main(argv=None):
             stream.write(json.dumps(record) + '\n')
     if error:
         raise RuntimeError(error)
-    print(json.dumps(response['result']))
+    result = response['result']
+    if method == 'memory.get':
+        raw = ''.join(detail)
+        json.loads(raw)  # A partial record cannot be presented as complete evidence.
+        result = {'content': [{'type': 'text', 'text': raw}], 'isError': False}
+    print(json.dumps(result))
     return 0
 
 

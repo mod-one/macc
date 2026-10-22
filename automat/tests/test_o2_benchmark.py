@@ -163,7 +163,10 @@ else:
     body += 'def unique_slugs(values): raise NotImplementedError\\n'
 plain = prompt.split('## MACC task checkpoint')[0]
 if 'Retrieve the approved policy through MCP' in plain:
-    subprocess.run([sys.executable, '.macc/memory_mcp_client.py', 'search', 'policy'], check=True, capture_output=True)
+    response = subprocess.run([sys.executable, '.macc/memory_mcp_client.py', 'search', 'policy'], check=True, capture_output=True, text=True)
+    page = json.loads(json.loads(response.stdout)['content'][0]['text'])
+    memory_id = page['records'][0]['memory']['id']
+    subprocess.run([sys.executable, '.macc/memory_mcp_client.py', 'get', memory_id], check=True, capture_output=True)
 if 'Implement reference_code' in plain or 'Implement format_references' in plain:
     body = 'def reference_code(namespace, number):\\n namespace = namespace.strip().lower()\\n number = number.strip()\\n if not namespace or not namespace.isascii() or not namespace.isalpha() or not number or not number.isascii() or not number.isdigit(): raise ValueError()\\n return namespace + "::" + number\\n'
     if 'Implement format_references' in plain:

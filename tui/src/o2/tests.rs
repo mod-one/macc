@@ -207,7 +207,8 @@ fn agent_setup_is_read_only_and_extraction_requires_explicit_apply() {
     panel.refresh(root).unwrap();
     assert!(!panel.mutation(KeyCode::Char('h')));
     panel.key(root, KeyCode::Char('h')).unwrap();
-    assert!(panel.details.contains("required_inherited_environment"));
+    assert!(panel.details.contains("MEMORY MCP ACCESS"));
+    assert!(panel.details.contains("No enabled tools"));
     panel.key(root, KeyCode::Char('e')).unwrap();
     assert!(panel.mutation(KeyCode::Enter));
     for c in "checkpoint-id".chars() {

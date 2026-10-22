@@ -22,6 +22,8 @@ struct Get {
     offset: usize,
     #[serde(default = "chars")]
     max_chars: usize,
+    #[serde(default)]
+    force: bool,
 }
 fn chars() -> usize {
     512
@@ -102,7 +104,24 @@ pub fn call_read(root: &Path, c: &Credentials, name: &str, args: Value) -> Resul
                 return Err(error("Cursor outside current result set"));
             }
             let end = (request.cursor + request.limit).min(hits.len());
-            json!({"records":&hits[request.cursor..end],"next_cursor":(end<hits.len()).then_some(end),"cursor":request.cursor,"trust":"untrusted_evidence; PRD remains authoritative"})
+            let mut records = vec![];
+            for hit in &hits[request.cursor..end] {
+                let seen = super::presentation::presented(
+                    &db,
+                    &scope,
+                    c,
+                    &hit.memory.id,
+                    &hit.checksum,
+                    0,
+                )?;
+                let total = serde_json::to_string(hit)
+                    .map_err(|e| error(e.to_string()))?
+                    .chars()
+                    .count();
+                let complete = seen.is_some_and(|(end, _)| end >= total);
+                records.push(json!({"memory":{"id":hit.memory.id,"proposal":{"title":hit.memory.proposal.title,"kind":hit.memory.proposal.kind}},"checksum":hit.checksum,"preview":if complete{String::new()}else{hit.memory.proposal.body.chars().take(160).collect::<String>()},"already_presented":complete,"presented_until":seen.map(|(end,_)|end.min(total)),"detail_tool":"memory.get"}));
+            }
+            json!({"schema_version":2,"records":records,"next_cursor":(end<hits.len()).then_some(end),"cursor":request.cursor,"summary_only":true,"trust":"untrusted_evidence; PRD remains authoritative"})
         }
         "memory.get" => {
             let request: Get = parse(args)?;
@@ -116,6 +135,22 @@ pub fn call_read(root: &Path, c: &Credentials, name: &str, args: Value) -> Resul
                 .collect::<Vec<_>>();
             if request.offset > raw.len() {
                 return Err(error("Fragment offset outside record"));
+            }
+            if !request.force {
+                if let Some((end, source)) = super::presentation::presented(
+                    &db,
+                    &scope,
+                    c,
+                    &request.id,
+                    &hit.checksum,
+                    request.offset,
+                )? {
+                    let next = end.min(raw.len());
+                    super::auth::connection(root, c)?;
+                    let result = json!({"id":request.id,"checksum":hit.checksum,"already_presented":true,"source":source,"next_offset":(next<raw.len()).then_some(next),"notice":"Content already supplied in this invocation. Continue at next_offset or use force=true to read again."});
+                    super::clean_output(&result)?;
+                    return Ok(result);
+                }
             }
             let end = (request.offset + request.max_chars).min(raw.len());
             json!({"id":request.id,"checksum":hit.checksum,"offset":request.offset,"fragment":raw[request.offset..end].iter().collect::<String>(),"next_offset":(end<raw.len()).then_some(end),"total_chars":raw.len(),"trust":"untrusted_evidence; PRD remains authoritative"})

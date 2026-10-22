@@ -55,7 +55,9 @@ require another preview/confirmation. CLI, TUI and Web execute this same plan.
    runtime, deployment and local index through the provider lifecycle port.
    Healthy compatible receipts are reused. Native indexing requires no download.
 5. Verify the O2 schema, rebuild/validate full-text search, check scoped MCP
-   configurations and prepare/probe declared native compaction settings. Tools
+   configurations and verify a registered-server MCP handshake/catalog/authorized
+   control read under a temporary revocable lease; prepare/probe declared native
+   compaction settings. Tools
    without native compaction capability retain checkpoint rotation.
 6. Check current semantic quality approval when semantic search is enabled.
    Missing evidence opens the assistant to collect a human-labelled suite,

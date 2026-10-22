@@ -1,5 +1,6 @@
 //! Restricted agent port. Operator Action is deliberately not a dispatch surface here.
 mod auth;
+pub(crate) mod presentation;
 mod reads;
 mod writes;
 use super::*;
@@ -12,7 +13,7 @@ pub use writes::{challenge, propose, AgentProposal, Challenge};
 pub fn status(root: &Path) -> Result<Value> {
     let p = policy::load(root)?;
     Ok(
-        json!({"enabled":p.memory.enabled && p.memory.mcp_enabled,"transport":"stdio","protocol":"2025-11-25","authorization":"current project/task/role/worktree lease; renewed by the runner; revoked on release","proposal_status":"proposed","phase_extraction":p.memory.phase_extraction_enabled,"agent_proposals":p.memory.agent_proposals_allowed,"tools":crate::o2::mcp::catalog::names(&p),"registration":{"command":"macc","args":["o2","mcp"],"required_inherited_environment":["MACC_O2_PROJECT_ROOT","MACC_O2_MCP_SESSION","MACC_O2_MCP_GENERATION","MACC_O2_MCP_TOKEN"]},"notice":"Register through the existing MCP configuration for your client and forward the named runtime environment. No credentials are stored in project configuration."}),
+        json!({"enabled":p.memory.enabled && p.memory.mcp_enabled,"transport":"stdio","protocol":"2025-11-25","authorization":"current project/task/role/worktree lease; renewed by the runner; revoked on release","proposal_status":"proposed","phase_extraction":p.memory.phase_extraction_enabled,"agent_proposals":p.memory.agent_proposals_allowed,"tools":crate::o2::mcp::catalog::names(&p),"registration":{"command":"macc","args":["o2","mcp"],"required_inherited_environment":["MACC_O2_PROJECT_ROOT","MACC_O2_MCP_SESSION","MACC_O2_MCP_GENERATION","MACC_O2_MCP_TOKEN"]},"tool_states":super::mcp::status::tool_states(root)?,"notice":"Apply registers and verifies enabled MCP servers. Runtime access requires a live lease; actual memory consultations are observed separately. No credentials are stored in project configuration."}),
     )
 }
 pub(crate) fn enabled(root: &Path) -> Result<policy::Policy> {

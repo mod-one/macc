@@ -266,3 +266,6 @@ fn budget_includes_wire_escaping_unicode_and_fragments() {
 }
 #[path = "regressions.rs"]
 mod regressions;
+
+#[path = "progressive_tests.rs"]
+mod progressive;

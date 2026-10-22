@@ -10,6 +10,7 @@ mod tools;
 use crate::{MaccError, ProjectPaths, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+pub(crate) use tools::selected_ids as selected_tool_ids;
 
 mod model;
 pub use model::*;
@@ -54,7 +55,7 @@ pub fn preview(paths: &ProjectPaths) -> Result<Option<Plan>> {
     }));
     if policy.memory.enabled && policy.memory.mcp_enabled {
         steps.push(
-            "Register scoped memory MCP for every enabled tool; verify project configurations"
+            "Register scoped memory MCP for every enabled tool; verify configuration, startup, handshake, catalog and authorized control read"
                 .into(),
         );
     }

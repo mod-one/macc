@@ -2,6 +2,7 @@
 mod commands;
 mod forms;
 mod jobs;
+mod mcp_status;
 mod overview;
 mod semantic;
 mod semantic_forms;
@@ -178,7 +179,8 @@ impl Panel {
             self.captured_evidence = Some(value.clone());
             self.captured_scope = self.access.clone();
         }
-        self.details = serde_json::to_string_pretty(&value).unwrap_or_default();
+        self.details = mcp_status::format(&value)
+            .unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap_or_default());
         self.scroll = 0;
     }
     fn selected(&self) -> Result<&Value> {

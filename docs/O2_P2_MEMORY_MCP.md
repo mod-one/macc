@@ -154,3 +154,71 @@ symbol/version bindings and stronger operator conflict resolution. MCP keeps its
 fixed scoped catalog and proposal-only writes; freshness checks apply to agent
 search/read as well as automatic context. Capture, promotion and conflict resolution
 remain separate operator actions.
+
+## Verified Apply and observable access
+
+Apply now verifies the complete **registered local server** path for every selected
+adapter: configuration, executable startup, stdio initialization, negotiated MCP
+protocol, memory search/get catalog and a successful authorized `memory.search`.
+An empty corpus is a valid authorized search; Apply never fabricates an approved
+memory. A unique control task/role owns a temporary SQLite lease. Heartbeats keep
+it valid during the bounded subprocess check; cleanup releases it on success or
+failure before a success receipt is published. No model, native AI client or
+project task is started. Control sessions never count as agent consultations.
+
+The proof binds the registration, resolved executable path and its metadata.
+Registration/runtime changes or a failed recheck invalidate connection verification;
+run Apply again. It verifies the registered MACC server, not autonomous discovery,
+trust approval or use by the external AI client. Already open clients may need to
+reconnect. Startup/exit/protocol/authorization/timeout failures prevent readiness.
+Credentials remain inherited environment values, never command arguments or
+persisted receipt contents. No new SQLite schema migration is required.
+
+Inspect `macc o2 agent-status`, **TUI → O2 → Memory → Inspect scoped MCP access**
+(the existing `h` action), or **Web → Memory → Agent access and phase proposals →
+Inspect scoped MCP setup**. Per-tool states distinguish:
+
+- **Configured:** the project registration matches the adapter recipe.
+- **Connection verified:** Apply completed the registered-server control exchange.
+- **Available in run:** a currently valid lease received MCP capability environment.
+- **Catalog connected in run:** an authorized runtime client requested the catalog.
+- **Consulted:** a successful memory-read response was flushed during a real run.
+  This records consultation, including an empty search, not semantic usefulness.
+
+Availability follows live lease validity and disappears on release/expiry. Runtime
+observations exclude the control role. Consultation counts describe the last 1,000
+observations per tool, not an unbounded billing total. Inspection is read-only and
+never mints credentials or launches a client. Enabled supervisor/coordinator tools
+use the same adapter selection as preparation.
+
+## Summary-first reads and presentation receipts
+
+The agent MCP search contract is `summary-first-v2`. `memory.search` and
+`memory.related_to_diff` return bounded **summaries**: memory ID, checksum, title,
+kind, at most 160 preview characters, presentation metadata and `memory.get` as the
+detail tool. They no longer include full proposal/evidence records. Operator
+inspection and the public memory ledger remain unchanged. Existing MCP consumers
+must request details instead of assuming search contains `proposal.body`.
+
+`memory.get` returns checksum-bound Unicode fragments with `offset` and
+`next_offset`. Continue until `next_offset` is null; restart if the checksum
+changes. The whole JSON-RPC envelope remains subject to the configured output
+budget, so the received fragment can be smaller than requested.
+
+Presentation receipts use memory ID/checksum and the current lease generation.
+The current checkpoint's injected memory is recognized, and previously flushed
+MCP fragments are referenced rather than resent. Responses explain
+`already_presented`, identify push/MCP origin and provide the next unread offset
+when necessary. Set `force: true` on an explicit `memory.get` to reread approved
+current content. Search summaries alone never establish full-content delivery.
+
+Receipts are written **after transport flush**, using the actual bounded fragment
+range. Unsent, rejected, truncated-away or failed responses cannot suppress later
+reads. New versions, scopes and generations retain their existing authorization
+and freshness checks. The last 512 fragment receipts bound dedup inspection;
+forgetting older receipts can resend content, never hide unread content. No raw
+memory body, search query or live capability token is copied into these receipts.
+
+The benchmark reader understands progressive detail fragments. New comparisons
+have a changed reader fingerprint; earlier experiment archives and their original
+protocols remain unchanged.
