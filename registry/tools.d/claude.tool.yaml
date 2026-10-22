@@ -82,11 +82,11 @@ performer:
   effort_flag: "--effort"
 model_tiers:
   mini:
-    model: haiku
-    effort: Medium
+    model: opus
+    effort: Low
   standard:
     model: sonnet
-    effort: Medium
+    effort: High
   heavy:
     model: opus
     effort: High
@@ -172,7 +172,7 @@ fields:
       options: ["fable", "opus", "sonnet", "sonnet[1m]", "haiku"]
     help: "Model used when routing tier = mini (light, fast tasks)."
     pointer: /tools/config/claude/model_tiers/mini/model
-    default: "haiku"
+    default: "opus"
   - id: tier_mini_effort
     label: Mini tier — effort
     kind:
@@ -180,7 +180,7 @@ fields:
       options: ["Low", "Medium", "High", "Max"]
     help: "Effort level for the mini tier (not applicable to Haiku)."
     pointer: /tools/config/claude/model_tiers/mini/effort
-    default: "Medium"
+    default: "Low"
   - id: tier_standard_model
     label: Standard tier — model
     kind:
@@ -196,7 +196,7 @@ fields:
       options: ["Low", "Medium", "High", "Max"]
     help: "Effort level for the standard tier (not applicable to Haiku)."
     pointer: /tools/config/claude/model_tiers/standard/effort
-    default: "Medium"
+    default: "High"
   - id: tier_heavy_model
     label: Heavy tier — model
     kind:

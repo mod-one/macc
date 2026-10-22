@@ -76,13 +76,13 @@ performer:
     args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec", "resume", "{session_id}"]
 model_tiers:
   mini:
-    model: gpt-5.4-mini
-    effort: low
+    model: gpt-6-luna
+    effort: xhigh
   standard:
-    model: gpt-5.4
+    model: gpt-6.1-sol
     effort: medium
   heavy:
-    model: gpt-5.5
+    model: gpt-6.1-sol
     effort: high
 defaults:
   approval_policy: never
@@ -115,7 +115,7 @@ fields:
       options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
     help: Codex model id (e.g., gpt-5.5).
     pointer: /tools/config/codex/model
-    default: "gpt-6-sol"
+    default: "gpt-6.1-sol"
   - id: model_reasoning_effort
     label: Reasoning Effort
     kind:
@@ -183,7 +183,7 @@ fields:
       options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
     help: Model for the deep-review profile.
     pointer: /tools/config/codex/profiles/deep-review/model
-    default: "gpt-6-sol"
+    default: "gpt-6.1-sol"
   - id: profile_deep_review_model_reasoning_effort
     label: Profile Deep Review Reasoning
     kind:
@@ -229,7 +229,7 @@ fields:
       options: ["low", "medium", "high", "xhigh"]
     help: "Reasoning effort for the mini tier."
     pointer: /tools/config/codex/model_tiers/mini/effort
-    default: "low"
+    default: "xhigh"
   - id: tier_standard_model
     label: Standard tier — model
     kind:
@@ -237,7 +237,7 @@ fields:
       options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
     help: "Model used when routing tier = standard."
     pointer: /tools/config/codex/model_tiers/standard/model
-    default: "gpt-6-sol"
+    default: "gpt-6.1-sol"
   - id: tier_standard_effort
     label: Standard tier — reasoning effort
     kind:
@@ -253,7 +253,7 @@ fields:
       options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
     help: "Model used when routing tier = heavy (complex work)."
     pointer: /tools/config/codex/model_tiers/heavy/model
-    default: "gpt-6-astra"
+    default: "gpt-6.1-sol"
   - id: tier_heavy_effort
     label: Heavy tier — reasoning effort
     kind:
