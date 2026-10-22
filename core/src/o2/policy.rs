@@ -150,7 +150,7 @@ impl Default for ContextPolicy {
             tuning_alpha: 0.01,
             tuning_min_cost_reduction: 0.05,
             tuning_max_latency_regression: 0.10,
-            enabled: false,
+            enabled: true,
             push_memory_limit_tokens: 1200,
             pull_limit_tokens: 2000,
             output_reduction: true,
@@ -175,7 +175,7 @@ impl Default for CompactionPolicy {
 impl Default for CodePolicy {
     fn default() -> Self {
         Self {
-            native_map_enabled: false,
+            native_map_enabled: true,
             native_incremental: true,
             native_rust: true,
             native_python: true,
@@ -186,7 +186,7 @@ impl Default for CodePolicy {
             native_symbols_per_file: 1000,
             native_parse_timeout_ms: 1000,
             native_build_timeout_ms: 60000,
-            enabled: false,
+            enabled: true,
             routing: "native_only".into(),
             max_files: 10000,
             max_file_bytes: 262144,
@@ -259,9 +259,6 @@ impl Policy {
             return Err(error(
                 "Compaction thresholds require warning < action < guard",
             ));
-        }
-        if self.context_engine.enabled && !self.memory.enabled {
-            return Err(error("Context Engine requires Memory Ledger enabled"));
         }
         Ok(())
     }
@@ -343,3 +340,7 @@ pub fn update(root: &Path, revision: &str, p: Option<Policy>) -> Result<View> {
     )?;
     inspect(root)
 }
+
+#[cfg(test)]
+#[path = "default_tests.rs"]
+mod default_tests;

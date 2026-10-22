@@ -23,9 +23,11 @@ fn request(root: &Path, tool: Option<&str>) -> SkillRunRequest {
     }
 }
 #[test]
-fn normal_execution_reduces_both_streams_preserves_raw_evidence_and_failure_status() {
+fn default_execution_reduces_both_streams_without_memory_and_preserves_raw_failure() {
     let temp = tests::root();
     let root = temp.path();
+    std::fs::write(root.join(".macc/macc.yaml"), "tools:\n  enabled: []\n").unwrap();
+    assert!(!policy::load(root).unwrap().memory.enabled);
     let view = policy::inspect(root).unwrap();
     let mut p = view.policy;
     p.context_engine.pull_limit_tokens = 100;

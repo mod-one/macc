@@ -7,13 +7,17 @@ below remain available for inspection and maintenance.
 P3-B extends the bundled `native` code-intelligence adapter with pinned Tree-sitter
 grammars for Rust, Python, TypeScript and TSX. It runs locally inside MACC: no AI
 provider, external language server, model call, runtime install or network upload
-is needed. The native map is **disabled by default**; ordinary literal search and
-P3-A's Rust evidence fingerprints remain independently available.
+is needed. Native code intelligence and its incremental symbol map are **enabled
+by default**. Apply prepares and verifies the bundled provider and index through
+the same lifecycle port as other providers. Ordinary literal search and P3-A's
+Rust evidence fingerprints remain independently available. Explicit `false`
+settings still disable code intelligence or its symbol map.
 
 ## Enable and use
 
-Enable Code Intelligence and `code_intelligence.native_map_enabled` in the shared
-O2 policy editor. All controls below are available through CLI policy preview/apply,
+Run `macc apply` to prepare the default native provider and index. To restore a
+previous explicit opt-out, enable Code Intelligence and
+`code_intelligence.native_map_enabled` in the shared O2 policy editor. All controls below are available through CLI policy preview/apply,
 **TUI → O2 → 5 Policies**, and **Web → Configure Code Intelligence**. Existing
 revision checks and owner gates apply. Search for `native_` to locate the settings.
 

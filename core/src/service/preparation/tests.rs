@@ -46,14 +46,28 @@ fn disabled_configuration_has_no_preparation() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = ProjectPaths::from_root(tmp.path());
     std::fs::create_dir_all(&paths.macc_dir).unwrap();
-    std::fs::write(&paths.config_path, "tools:\n  enabled: []\n").unwrap();
+    std::fs::write(&paths.config_path, "tools:\n  enabled: []\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n").unwrap();
     assert!(preview(&paths).unwrap().is_none());
 }
 
 #[test]
-fn apply_prepares_native_map_and_run_refreshes_current_sources_without_extra_commands() {
+fn default_apply_prepares_native_map_and_run_refreshes_current_sources_without_extra_commands() {
     let (_temp, paths) = fixture(true);
+    // An ordinary new project needs no O2 policy overrides or provider commands.
+    std::fs::write(&paths.config_path, "tools:\n  enabled: []\n").unwrap();
+    let policy = crate::o2::policy::load(&paths.root).unwrap();
+    assert!(policy.context_engine.enabled && policy.context_engine.output_reduction);
+    assert!(policy.code_intelligence.enabled && policy.code_intelligence.native_map_enabled);
+    assert!(!policy.memory.enabled);
     let mut reviewed = plan(&paths);
+    let preparation = reviewed.preparation.as_ref().unwrap();
+    assert!(!preparation.network);
+    assert_eq!(preparation.providers.len(), 1);
+    assert_eq!(preparation.providers[0].id, "native");
+    assert_eq!(
+        preparation.providers[0].operations,
+        ["install", "deploy", "index"]
+    );
     assert!(!paths.macc_dir.join("memory.db").exists());
     assert!(reviewed
         .preparation

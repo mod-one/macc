@@ -6,7 +6,7 @@ fn project() -> (tempfile::TempDir, crate::ProjectPaths) {
     std::fs::create_dir_all(&paths.macc_dir).unwrap();
     std::fs::write(
         &paths.config_path,
-        "tools:\n  enabled: []\nmemory:\n  enabled: true\n",
+        "tools:\n  enabled: []\nmemory:\n  enabled: true\ncode_intelligence:\n  enabled: false\n",
     )
     .unwrap();
     (tmp, paths)
@@ -113,7 +113,7 @@ fn existing_schema_upgrade_is_backed_up_and_disabled_features_are_untouched() {
             .file_name()
             .to_string_lossy()
             .starts_with("pre-o2-")));
-    std::fs::write(&paths.config_path, "tools:\n  enabled: []\n").unwrap();
+    std::fs::write(&paths.config_path, "tools:\n  enabled: []\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n").unwrap();
     assert!(preview(&paths.root).unwrap().is_none());
 }
 

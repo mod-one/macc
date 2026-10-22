@@ -2234,6 +2234,15 @@ mod tests {
                 enabled: vec!["test".to_string()],
                 ..Default::default()
             },
+            // File planning is independent from reviewed O2 preparation.
+            context_engine: Some(crate::o2::policy::ContextPolicy {
+                enabled: false,
+                ..Default::default()
+            }),
+            code_intelligence: Some(crate::o2::policy::CodePolicy {
+                enabled: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 

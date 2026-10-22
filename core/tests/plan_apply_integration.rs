@@ -14,6 +14,9 @@ fn test_plan_apply_lifecycle() -> Result<()> {
 
     // 1. Create temp project and run init.
     init(&paths, false)?;
+    // Keep the real default O2 lifecycle, using only the deterministic test tool.
+    fs::write(&paths.config_path, "tools:\n  enabled: [test]\n").unwrap();
+    initialize_git_fixture(&temp_dir)?;
 
     // Baseline: .macc/ and .gitignore created.
     assert!(paths.config_path.exists());
@@ -163,6 +166,7 @@ mcp_templates:
         placeholder: ${BRAVE_API_KEY}
 "#;
     fs::write(&paths.config_path, config_content).unwrap();
+    initialize_git_fixture(&temp_dir)?;
 
     // 3. Run apply
     let report = apply(
@@ -212,6 +216,33 @@ mcp_templates:
     // Cleanup
     fs::remove_dir_all(&temp_dir).ok();
 
+    Ok(())
+}
+
+// Native indexing reads tracked project sources; no installed AI account is used.
+fn initialize_git_fixture(root: &std::path::Path) -> Result<()> {
+    fs::write(root.join("contract.rs"), "pub fn current_contract() {}\n").unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["add", "contract.rs"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        let output =
+            macc_core::git::run_git_output_mapped(root, &args, "Initialize default Apply fixture")?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 

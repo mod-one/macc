@@ -31,7 +31,7 @@ fn preview_does_not_write_and_apply_preserves_unrelated_inheritance() {
     assert_eq!(field.field.kind, "bool");
 }
 #[test]
-fn invalid_types_fields_ranges_and_dependencies_never_write() {
+fn invalid_types_fields_and_ranges_never_write() {
     let root = fixture();
     let path = root.path().join(".macc/macc.yaml");
     let before = std::fs::read(&path).unwrap();
@@ -41,7 +41,6 @@ fn invalid_types_fields_ranges_and_dependencies_never_write() {
         ("memory.search_limit", "1.5"),
         ("memory.search_limit", "0"),
         ("memory.semantic_backend", "unknown-provider"),
-        ("context_engine.enabled", "true"),
         ("adaptive_compaction.warning_ratio", "0.99"),
         ("code_intelligence.serena_python", ""),
         ("memory.typo", "true"),

@@ -52,6 +52,13 @@ fn semantic_proofs_use_project_policy_and_the_requested_worktree() {
         "Create scoped proof fixture",
     )
     .unwrap();
+    // This worktree explicitly opts out; proof checks still use project policy.
+    std::fs::create_dir_all(wt.join(".macc")).unwrap();
+    std::fs::write(
+        wt.join(".macc/macc.yaml"),
+        "tools:\n  enabled: []\ncode_intelligence:\n  enabled: false\n",
+    )
+    .unwrap();
     assert!(!policy::load(&wt).unwrap().code_intelligence.enabled);
     let evidence =
         memory::symbol_evidence(r, "contract.rs", "preserve_contract", "native", wt.to_str())

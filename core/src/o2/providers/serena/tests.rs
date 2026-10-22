@@ -164,9 +164,10 @@ fn live_queries_survive_source_changes_and_removal_preserves_user_files() {
         matches!(super::super::query(root,&q).unwrap(),Capability::Supported(QueryResult{provider_id,..}) if provider_id=="serena")
     );
     assert_eq!(apply(root, "disable").state, "disabled");
+    // Disabling Serena retains the default native symbol-query fallback.
     assert!(matches!(
         super::super::query(root, &q).unwrap(),
-        Capability::Unsupported { .. }
+        Capability::Supported(QueryResult { provider_id, .. }) if provider_id == "native"
     ));
     assert_eq!(apply(root, "deploy").state, "healthy");
     let runtime = runtime::owned(

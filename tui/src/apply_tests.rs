@@ -25,6 +25,23 @@ fn preview_does_not_fetch_while_apply_is_preparing_shared_sources() {
 
 fn state_with_plan(scope: Scope, count: usize) -> (tempfile::TempDir, AppState) {
     let (root, mut state) = crate::workspace_tests::fixture();
+    // This synthetic file-only plan tests consent, independently of O2 preparation.
+    let mut config = state.working_copy.clone().unwrap();
+    config.context_engine = Some(macc_core::o2::policy::ContextPolicy {
+        enabled: false,
+        ..Default::default()
+    });
+    config.code_intelligence = Some(macc_core::o2::policy::CodePolicy {
+        enabled: false,
+        ..Default::default()
+    });
+    std::fs::write(
+        root.path().join(".macc/macc.yaml"),
+        config.to_yaml().unwrap(),
+    )
+    .unwrap();
+    state.config = Some(config.clone());
+    state.working_copy = Some(config);
     let mut plan = ActionPlan::new();
     for i in 0..count {
         plan.add_action(Action::WriteFile {

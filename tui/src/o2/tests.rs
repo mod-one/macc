@@ -443,7 +443,7 @@ fn symbol_capture_proposal_and_captured_revalidation_use_the_shared_services() {
 }
 
 #[test]
-fn native_map_opt_in_is_previewed_and_applied_through_the_shared_catalog() {
+fn native_map_default_opt_out_is_previewed_and_applied_through_the_shared_catalog() {
     let t = tempfile::tempdir().unwrap();
     let root = t.path();
     let mut panel = Panel::default();
@@ -458,9 +458,12 @@ fn native_map_opt_in_is_previewed_and_applied_through_the_shared_catalog() {
         .position(|f| f.path == "code_intelligence.native_map_enabled")
         .unwrap();
     panel.key(root, KeyCode::Enter).unwrap();
-    assert_eq!(panel.draft["code_intelligence"]["native_map_enabled"], true);
+    assert_eq!(
+        panel.draft["code_intelligence"]["native_map_enabled"],
+        false
+    );
     assert!(
-        !policy::load(root)
+        policy::load(root)
             .unwrap()
             .code_intelligence
             .native_map_enabled
@@ -469,7 +472,7 @@ fn native_map_opt_in_is_previewed_and_applied_through_the_shared_catalog() {
     panel.key(root, KeyCode::Char('p')).unwrap();
     panel.key(root, KeyCode::Char('s')).unwrap();
     assert!(
-        policy::load(root)
+        !policy::load(root)
             .unwrap()
             .code_intelligence
             .native_map_enabled

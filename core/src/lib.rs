@@ -1948,7 +1948,7 @@ mod tests {
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
         // Isolate file-operation tests from installed AI accounts and inherited profiles.
-        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\n").unwrap();
+        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n").unwrap();
 
         // 1. Create an existing file that will be overwritten by TestAdapter
         let target_file = temp_dir.join("MACC_GENERATED.txt");
@@ -2004,7 +2004,7 @@ mod tests {
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
         // Isolate file-operation tests from installed AI accounts and inherited profiles.
-        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\n").unwrap();
+        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n").unwrap();
 
         // 1. Create a file with same content as TestAdapter produces
         let target_file = temp_dir.join("MACC_GENERATED.txt");
@@ -2050,7 +2050,7 @@ mod tests {
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
         // Isolate file-operation tests from installed AI accounts and inherited profiles.
-        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\n").unwrap();
+        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n").unwrap();
 
         // 1. Create a JSON file with specific formatting
         let target_file = temp_dir.join("test.json");
@@ -2239,7 +2239,7 @@ mod tests {
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
         // Isolate file-operation tests from installed AI accounts and inherited profiles.
-        fs::write(&paths.config_path, "tools:\n  enabled: []\n").unwrap();
+        fs::write(&paths.config_path, "tools:\n  enabled: []\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n").unwrap();
 
         let mut plan = plan::ActionPlan::new();
         // Add actions in "wrong" order
@@ -2301,6 +2301,14 @@ mod tests {
 
         let mut cfg = load_canonical_config(&paths.config_path)?;
         cfg.tools.enabled = vec!["test".to_string()];
+        cfg.context_engine = Some(o2::policy::ContextPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        cfg.code_intelligence = Some(o2::policy::CodePolicy {
+            enabled: false,
+            ..Default::default()
+        });
         cfg.tools.config.insert(
             "test".to_string(),
             serde_json::json!({

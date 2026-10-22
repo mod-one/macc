@@ -23,6 +23,21 @@ merge project code. Existing stop/lease/authority gates still protect storage
 migration and native settings. Restore saved session/O2 history before Apply if
 that history must be recovered from an earlier installation.
 
+## Default local features
+
+With no O2 overrides, Apply prepares native code intelligence, its incremental
+symbol index, Context Engine and bounded output reduction. It reviews any SQLite
+activation/upgrade, uses the bundled native adapter's install/deploy/index
+operations, then verifies readiness. No external provider installation or AI call
+is needed for these defaults. Native partial-index warnings retain the existing
+interactive review flow; success must not hide degraded indexing.
+
+Explicit disabled settings remain disabled. Missing sections or fields inherit
+the current defaults. Memory and its injection/extraction/MCP/semantic features,
+adaptive compaction, policy tuning, Serena and Graphify remain opt-in. Output
+reduction works independently of memory. These defaults and preparation steps are
+shared by CLI, TUI and Web; no additional provider commands are needed.
+
 ## Shared preparation contract
 
 The Engine plan includes a configuration revision, selected ToolSpecs, enabled

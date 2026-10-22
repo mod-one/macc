@@ -41,7 +41,8 @@ pub(crate) fn for_checkpoint(
     prepared: &memory::PreparedFreshness,
 ) -> Result<String> {
     let policy = super::policy::load(root)?;
-    if !policy.context_engine.enabled {
+    // Output reduction may run independently; optional memory injection is opt-in.
+    if !policy.context_engine.enabled || !policy.memory.enabled {
         return Ok(String::new());
     }
     if !super::ready(db)? {
