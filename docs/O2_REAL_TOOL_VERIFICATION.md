@@ -83,6 +83,11 @@ recovery without paying for artificial quota exhaustion.
 
 ## Next controlled O2 experiment
 
+For short reproducible task pairs and actual usage evidence, start with the
+[O2 performance protocol](O2_PERFORMANCE_PROTOCOL.md). Its first experiment
+isolates session reuse through registered adapters; it does not claim that the
+compatibility nonce fixture measures production savings.
+
 After compatibility checks, use the same pinned tasks, source commits, tool versions,
 model/effort and acceptance checks across §23's four arms: safe baseline, reviewed
 memory/checkpoints, native map, and managed Graphify. Include interruption/tool

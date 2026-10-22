@@ -541,6 +541,7 @@ reference_branch_preflight:
 | Canonical config schema | `docs/CONFIG.md` |
 | ToolSpec format | `docs/TOOLSPEC.md` |
 | Adding a new tool | `docs/TOOL_ONBOARDING.md` |
+| Short O2 performance experiments | [O2 performance protocol](docs/O2_PERFORMANCE_PROTOCOL.md) |
 | Web API | `docs/WEB_API_CONTRACT.md` |
 | Error codes | `docs/ERRORS.md` |
 | Security | `SECURITY.md` |

@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check lint test test-tool-runner test-tool-runner-real test-contract web-build web-ci all check check-generic check-version release-bump
+.PHONY: fmt fmt-check lint test test-tool-runner test-tool-runner-real test-o2-benchmark o2-benchmark test-contract web-build web-ci all check check-generic check-version release-bump
 
 all: fmt lint check-version test test-tool-runner web-ci check-generic test-contract
 
@@ -30,6 +30,21 @@ test-tool-runner:
 	bash automat/tests/test_session_resume_flags.sh
 	python3 automat/tests/test_session_isolation.py
 	python3 automat/tests/test_o2_real_tools.py
+	python3 automat/tests/test_o2_benchmark.py
+	python3 automat/tests/test_o2_output_reduction.py
+	python3 automat/tests/test_o2_memory_mcp.py
+	python3 automat/tests/test_o2_provider_navigation.py
+
+# Offline deterministic regression; the future adapter does not call an AI service.
+test-o2-benchmark:
+	python3 automat/tests/test_o2_benchmark.py
+	python3 automat/tests/test_o2_output_reduction.py
+	python3 automat/tests/test_o2_memory_mcp.py
+	python3 automat/tests/test_o2_provider_navigation.py
+
+# Plan by default. O2_BENCHMARK_ARGS must select reviewed settings and a new output.
+o2-benchmark:
+	python3 scripts/o2_benchmark.py $(O2_BENCHMARK_ARGS)
 
 # Explicit opt-in only; O2_REAL_ARGS must select reviewed tool JSONs and a report.
 test-tool-runner-real:

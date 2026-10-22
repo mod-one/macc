@@ -1,0 +1,12 @@
+{
+  "codex": {
+    "model_tiers": {
+      "standard": {"model": "gpt-6.1-sol", "effort": "medium"}
+    }
+  },
+  "claude": {
+    "model_tiers": {
+      "standard": {"model": "sonnet", "effort": "medium"}
+    }
+  }
+}
