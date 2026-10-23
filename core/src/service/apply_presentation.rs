@@ -55,6 +55,18 @@ pub fn review(paths: &ProjectPaths, plan: &ActionPlan, ops: &[PlannedOp]) -> Str
             text.push_str("Network       Declared installers/login may access the network\n");
         }
     }
+    let native: Vec<_> = crate::hooks::native::specs()
+        .into_iter()
+        .filter(|s| {
+            plan.actions.iter().any(
+                |a| matches!(a, crate::plan::Action::WriteFile{path,..} if path == &s.launcher),
+            )
+        })
+        .map(|s| s.tool)
+        .collect();
+    if !native.is_empty() {
+        text.push_str(&format!("Native hooks  {} · local verification; provider trust/runtime still require confirmation\n",native.join(", ")));
+    }
     if let Ok(config) = crate::load_canonical_config(&paths.config_path) {
         match crate::resolve::resolve_fetch_units(
             paths,

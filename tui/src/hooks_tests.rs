@@ -52,3 +52,12 @@ fn dirty_config_is_not_discarded_by_immediate_hook_settings() {
     assert!(state.working_copy.as_ref().unwrap().settings.quiet);
     assert!(state.hooks.modal());
 }
+
+#[test]
+fn hook_activation_is_not_presented_as_native_installation() {
+    let (_temp, mut state) = fixture();
+    handle_key(&mut state, KeyCode::Char('H'));
+    let output = text(&render(&state, 120, 42));
+    assert!(output.contains("[MACC on]"));
+    assert!(output.contains("installation and execution"));
+}

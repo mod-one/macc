@@ -1138,6 +1138,9 @@ pub fn apply_plan(
         }
         let operations = plan::collect_plan_operations(paths, plan);
         let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
+        if paths.config_path.is_file() {
+            hooks::native::verify(paths)?;
+        }
         if let Some(preparation) = &plan.preparation {
             let prepared = service::preparation::execute(paths, preparation)?;
             report.warnings.extend(prepared.warnings);

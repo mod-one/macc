@@ -45,3 +45,10 @@ describe('Hooks management', () => {
     expect(inspectHook).toHaveBeenCalledWith(definition);
   });
 });
+
+it('distinguishes configured files from provider execution and explains trust', async () => {
+  vi.mocked(getHooks).mockResolvedValue({ ...view, native: [{ tool: 'codex', supported: true, configured: true, installed: true, locally_verified: true, execution_observed: false, applied: [], detail: 'Review and trust with /hooks in Codex' }] });
+  render(<Hooks />);
+  expect(await screen.findByRole('region', { name: 'Native hook deployments' })).toHaveTextContent('Execution observed: no');
+  expect(screen.getByText('Review and trust with /hooks in Codex')).toBeInTheDocument();
+});

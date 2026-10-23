@@ -1,6 +1,7 @@
 //! Tool-neutral hook catalogue, activation claims and deterministic execution.
 mod actions;
 mod catalog;
+pub mod native;
 mod runtime;
 mod types;
 pub use actions::{execute, Action};

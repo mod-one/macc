@@ -44,7 +44,8 @@ export default function Hooks() {
   };
   return <section className="p-6 space-y-5">
     <header><h1 className="text-2xl font-semibold">Hooks</h1><p>Manage MACC output processors and their feature dependencies.</p></header>
-    <p>Applied to MACC-owned executions for every adapter. Commands executed inside an AI tool are not intercepted. Raw logs, protocol streams and failed command output remain protected.</p>
+    <p>Enabled means selected in MACC. Native tool installation, local verification and observed execution are separate states. Native shell output requires a supported adapter, Apply, provider trust and an explicit output contract. Internal supervisor evidence hooks need no tool registration.</p>
+    {!!view?.native?.length && <section aria-label="Native hook deployments" className="space-y-3"><h2 className="font-semibold">Native tool integration</h2>{view.native.map(n => <article key={n.tool} className="border rounded p-4"><h3>{n.tool}</h3><p>Supported: {n.supported ? 'yes' : 'no'} · Configured: {n.configured ? 'yes' : 'no'} · Installed: {n.installed ? 'yes' : 'no'} · Local verification: {n.locally_verified ? 'passed' : 'pending'} · Execution observed: {n.execution_observed ? 'yes' : 'no'}</p><p>{n.detail}</p><p>Last event reducers: {n.applied.join(', ') || 'none'}</p></article>)}</section>}
     <div className="flex flex-wrap gap-4 items-center">
       <label>Find hooks <input aria-label="Find hooks" value={query} onChange={e => setQuery(e.target.value)} className="border rounded p-2" /></label>
       <Button onClick={() => void refresh()} disabled={busy}>Refresh</Button>
@@ -55,7 +56,7 @@ export default function Hooks() {
     {view && <><p>Tools: {view.tools.join(', ') || 'No tools selected'}. Importing a snapshot does not enable it.</p>
       <div className="space-y-3">{view.hooks.filter(h => `${h.hook.name} ${h.hook.id} ${h.hook.description}`.toLowerCase().includes(query.toLowerCase())).map(h => <article key={h.hook.id} className="border rounded p-4 space-y-2">
         <h2 className="font-semibold">{h.hook.name}</h2><p>{h.hook.description}</p>
-        <label><input type="checkbox" aria-label={`Enable ${h.hook.name}`} checked={h.enabled} disabled={busy || h.required_by.length > 0} aria-describedby={`${h.hook.id}-owners`} onChange={e => change(h.hook.id, e.target.checked)} /> Enabled</label>
+        <label><input type="checkbox" aria-label={`Enable ${h.hook.name}`} checked={h.enabled} disabled={busy || h.required_by.length > 0} aria-describedby={`${h.hook.id}-owners`} onChange={e => change(h.hook.id, e.target.checked)} /> Enabled in MACC</label>
         <p id={`${h.hook.id}-owners`}>{h.required_by.length ? `Required by ${h.required_by.join(', ')}. Disable the owning feature or output contract first.` : 'User configurable; no active feature claim.'}</p>
         <p>Version {h.hook.version} · {h.hook.event.replaceAll('_', ' ')} · {h.manual === null ? 'Default selection' : 'Manual selection'}</p>
         <details><summary>Integration and source</summary><p>{h.integration}</p><p>{h.hook.source.repository} / {h.hook.source.subpath} · {h.hook.source.distribution}</p><p>Skill contracts: {h.hook.skills.join(', ') || 'Explicit invocation only'}</p></details>

@@ -17,6 +17,14 @@ struct InstalledRemoteContent {
 }
 
 impl ToolAdapter for ClaudeAdapter {
+    fn native_output_hook(&self) -> Option<macc_core::hooks::native::Spec> {
+        Some(macc_core::hooks::native::Spec {
+            tool: "claude".into(),
+            config: ".claude/settings.json".into(),
+            launcher: ".claude/hooks/macc-output.sh".into(),
+            protocol: macc_core::hooks::native::Protocol::Replacement,
+        })
+    }
     fn id(&self) -> String {
         "claude".to_string()
     }

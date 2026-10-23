@@ -31,6 +31,10 @@ pub struct SkillInvocation {
 }
 
 pub trait ToolAdapter: Send + Sync {
+    /// Native lifecycle integration; unsupported adapters keep internal processors only.
+    fn native_output_hook(&self) -> Option<crate::hooks::native::Spec> {
+        None
+    }
     /// Unique identifier for the tool.
     fn id(&self) -> String;
     /// Project directory used for copied catalog skills.

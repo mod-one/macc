@@ -8,6 +8,12 @@ use macc_core::{
 use std::path::PathBuf;
 #[derive(Debug, Clone, Subcommand)]
 pub enum HooksCommand {
+    /// Native lifecycle bridge; reads a bounded JSON event from stdin.
+    #[command(hide = true)]
+    Dispatch {
+        #[arg(long)]
+        tool: String,
+    },
     /// Discover effective hooks, owners and adapter integration.
     List {
         #[arg(long)]
@@ -66,6 +72,32 @@ fn read(path: &std::path::Path) -> Result<Hook> {
 }
 impl Command for Hooks {
     fn run(&self) -> Result<()> {
+        if let HooksCommand::Dispatch { tool } = &self.1 {
+            use std::io::Read;
+            let spec = macc_core::hooks::native::specs()
+                .into_iter()
+                .find(|s| &s.tool == tool)
+                .ok_or_else(|| {
+                    macc_core::MaccError::Validation("Unsupported native hook adapter".into())
+                })?;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take(8 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                return Err(macc_core::MaccError::Validation(
+                    "Native hook event exceeds 8 MiB; preserve original output".into(),
+                ));
+            }
+            let input = serde_json::from_slice(&bytes).map_err(|e| {
+                macc_core::MaccError::Validation(format!("Invalid native hook event: {e}"))
+            })?;
+            let output =
+                macc_core::hooks::native::dispatch(&self.0.project_paths()?.root, &spec, &input)?;
+            println!("{output}");
+            return Ok(());
+        }
         if let HooksCommand::Inspect { manifest } = &self.1 {
             let hook = macc_core::hooks::review(read(manifest)?)?;
             println!("{}", serde_json::json!(hook));
@@ -109,6 +141,7 @@ impl Command for Hooks {
                 revision: revision(r),
             },
             HooksCommand::Inspect { .. } => unreachable!(),
+            HooksCommand::Dispatch { .. } => unreachable!(),
         };
         if action.is_mutation() {
             super::gate_cli_mutation(&paths.root)?;
@@ -122,6 +155,9 @@ impl Command for Hooks {
             );
         } else {
             println!("MACC Hooks · revision {}", view.revision);
+            for native in &view.native {
+                println!("Native {} · supported={} · configured={} · installed={} · local verification={} · execution observed={}\n  {}",native.tool,native.supported,native.configured,native.installed,native.locally_verified,native.execution_observed,native.detail);
+            }
             for h in view.hooks {
                 println!(
                     "[{}] {}{}",

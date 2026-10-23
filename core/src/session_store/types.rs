@@ -44,7 +44,7 @@ pub struct CheckpointPolicy {
 impl Default for CheckpointPolicy {
     fn default() -> Self {
         Self {
-            max_content_bytes: 16384,
+            max_content_bytes: 32768,
             max_finish_content_bytes: 65536,
             rotate_after_uses: 20,
         }

@@ -29,7 +29,7 @@ impl Action {
 pub fn execute(root: &Path, action: Action) -> Result<Status> {
     let paths = ProjectPaths::from_root(root);
     if matches!(action, Action::Status) {
-        return status(&crate::load_canonical_config(&paths.config_path)?);
+        return project_status(root, &crate::load_canonical_config(&paths.config_path)?);
     }
     let revision = match &action {
         Action::Set { revision, .. }
@@ -96,5 +96,10 @@ pub fn execute(root: &Path, action: Action) -> Result<Status> {
         validate(config)
     })?;
     tracing::info!(operation, hook=%hook_id, "Hook configuration updated with revision check");
-    status(&config)
+    project_status(root, &config)
+}
+fn project_status(root: &Path, config: &crate::config::CanonicalConfig) -> Result<Status> {
+    let mut view = status(config)?;
+    view.native = native::inspect(root, config)?;
+    Ok(view)
 }

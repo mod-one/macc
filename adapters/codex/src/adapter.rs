@@ -10,6 +10,14 @@ use std::collections::BTreeSet;
 pub struct CodexAdapter;
 
 impl ToolAdapter for CodexAdapter {
+    fn native_output_hook(&self) -> Option<macc_core::hooks::native::Spec> {
+        Some(macc_core::hooks::native::Spec {
+            tool: "codex".into(),
+            config: ".codex/hooks.json".into(),
+            launcher: ".codex/hooks/macc-output.sh".into(),
+            protocol: macc_core::hooks::native::Protocol::Feedback,
+        })
+    }
     fn id(&self) -> String {
         "codex".to_string()
     }

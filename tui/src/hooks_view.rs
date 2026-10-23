@@ -9,7 +9,7 @@ impl HooksScreen {
                 Constraint::Min(6),
             ])
             .split(area);
-        f.render_widget(wrapped_paragraph(format!("Hooks · MACC execution layer\nBuilt-in and external output processors · all adapters\nFilter: {} · select a hook to see its owners and source",self.query), "Hooks"),parts[0]);
+        f.render_widget(wrapped_paragraph(format!("Hooks · MACC processors and native tool integration\nEnabled means selected; installation and execution are shown separately below.\nFilter: {} · select a hook to inspect deployment",self.query), "Hooks"),parts[0]);
         let items = self.filtered();
         let selected = self.index.min(items.len().saturating_sub(1));
         let mut selection = ListState::default();
@@ -20,7 +20,7 @@ impl HooksScreen {
                     .iter()
                     .map(|h| {
                         ListItem::new(format!(
-                            "[{}] {}{}",
+                            "[MACC {}] {}{}",
                             if h.enabled { "on" } else { "off" },
                             h.hook.name,
                             if h.required_by.is_empty() {
@@ -43,6 +43,12 @@ impl HooksScreen {
         } else {
             "No matching hook. Use [i] to import a reviewed hook.json snapshot.".into()
         };
+        if let Some(view) = &self.view {
+            details.push_str("\n\nNative tool deployments (output hooks only):");
+            for native in &view.native {
+                details.push_str(&format!("\n{}: supported={} | configured={} | installed={} | local verification={} | execution observed={}\n{}\nLast event reducers: {}",native.tool,native.supported,native.configured,native.installed,native.locally_verified,native.execution_observed,native.detail,native.applied.join(", ")));
+            }
+        }
         details.push_str(&format!("\n\n{}", self.message));
         f.render_widget(
             wrapped_paragraph(details, "Hook details").scroll((self.scroll, 0)),

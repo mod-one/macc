@@ -123,6 +123,8 @@ pub struct HookState {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub native: Vec<super::native::Deployment>,
     pub revision: String,
     pub hooks: Vec<HookState>,
     pub tools: Vec<String>,
@@ -175,9 +177,15 @@ pub fn status(config: &CanonicalConfig) -> Result<Status> {
         let required_by = owners(config, &hook.id);
         let manual = config.hooks.as_ref().and_then(|c| c.overrides.get(&hook.id)).copied();
         let enabled = !required_by.is_empty() || manual.unwrap_or(hook.default_enabled);
-        HookState { hook, enabled, manual, required_by, integration: "MACC-owned executions; all adapters; tool-internal commands are not intercepted".into() }
+        let integration = if hook.event == Event::ToolOutput {
+            "MACC processors: all adapters. Native shell output: supported adapters only, after Apply and provider trust. Explicit output contract required; see native deployment status."
+        } else {
+            "MACC evidence processors: all adapters; internal supervisor boundary only. No native provider registration needed."
+        }.into();
+        HookState { hook, enabled, manual, required_by, integration }
     }).collect();
     Ok(Status {
+        native: vec![],
         revision: crate::config::transaction::revision(config)?,
         hooks,
         tools: config.tools.enabled.clone(),

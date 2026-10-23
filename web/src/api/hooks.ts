@@ -7,7 +7,8 @@ export interface HookDefinition {
   skills: string[]; source: { repository: string; subpath: string; distribution: string };
 }
 export interface HookState { hook: HookDefinition; enabled: boolean; manual: boolean | null; required_by: string[]; integration: string }
-export interface HooksView { revision: string; hooks: HookState[]; tools: string[] }
+export interface NativeHookDeployment { tool: string; supported: boolean; configured: boolean; installed: boolean; locally_verified: boolean; execution_observed: boolean; applied: string[]; detail: string }
+export interface HooksView { revision: string; hooks: HookState[]; tools: string[]; native?: NativeHookDeployment[] }
 export interface HookReview { definition: HookDefinition; sha256: string }
 export const getHooks = () => sendJson<HooksView>('/hooks', 'GET');
 export const hookAction = (body: Record<string, unknown>) => sendJson<HooksView, Record<string, unknown>>('/hooks/action', 'POST', {}, body);

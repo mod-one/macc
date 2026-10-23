@@ -38,6 +38,12 @@ pub fn preview(paths: &ProjectPaths) -> Result<Option<Plan>> {
             )
         })
         .collect();
+    if crate::hooks::native::specs()
+        .iter()
+        .any(|s| tools.iter().any(|t| t.spec.id == s.tool))
+    {
+        steps.push("Install native output hooks and verify local files; provider trust and runtime execution are reported separately".into());
+    }
     steps.extend(mcp_cleanup.iter().map(|s| {
         format!(
             "Remove inactive MACC MCP registration from {} (backup retained)",
@@ -102,6 +108,9 @@ pub fn configure(paths: &ProjectPaths, plan: &mut crate::plan::ActionPlan) -> Re
         return Ok(());
     }
     let config = crate::load_canonical_config(&paths.config_path)?;
+    for spec in crate::hooks::native::specs() {
+        crate::hooks::native::plan(paths, plan, &spec)?;
+    }
     let p = crate::o2::policy::load(&paths.root)?;
     if p.memory.enabled && p.memory.mcp_enabled {
         for requirement in tools::requirements(paths, &config)? {
@@ -182,6 +191,17 @@ pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
                 ));
             }
         }
+        for native in crate::hooks::native::verify(paths)? {
+            if native.locally_verified {
+                report.completed.push(format!(
+                    "{} native hooks: local deployment verified",
+                    native.tool
+                ));
+                if !native.execution_observed {
+                    report.warnings.push(native.detail);
+                }
+            }
+        }
         o2::prepare(paths, plan, &mut report)?;
         let current = crate::load_canonical_config(&paths.config_path)?;
         if crate::config::transaction::revision(&current)? != plan.revision {
@@ -229,6 +249,7 @@ pub fn require_ready(root: &Path) -> Result<()> {
         return Ok(());
     };
     crate::o2::activation::require_ready(root)?;
+    crate::hooks::native::verify(&paths)?;
     for tool in &plan.tools {
         if tool.install_needed {
             return Err(MaccError::Validation(format!(
@@ -257,6 +278,7 @@ pub fn verify_enabled(root: &Path) -> Result<()> {
         return Ok(());
     };
     crate::o2::activation::require_ready(root)?;
+    crate::hooks::native::verify(&paths)?;
     // Provider health is reported separately by Doctor. Source drift can be
     // refreshed locally at startup and is not an installation blocker.
     o2::verify(&paths, &plan)

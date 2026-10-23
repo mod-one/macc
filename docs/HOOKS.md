@@ -15,7 +15,8 @@ binary and need no network, account or vendor-specific installation:
 | `performer-log-summary` | Performer evidence sent to supervisor analysis |
 
 The processors run in MACC-owned executions through the common adapter layer.
-Commands executed internally by Codex, Claude or another tool are not intercepted.
+Selected supported adapters also deploy a native shell-output bridge during Apply
+(see Native tool integration below). Other adapters retain MACC-only processing.
 Markdown copied into a vendor hook directory is not an executable registration.
 Existing merge-repair scripts retain their separate adapter lifecycle; this catalogue
 manages output and evidence processors.
@@ -109,7 +110,7 @@ selection only. Evidence processors run at their named supervisor boundary.
 **literal** replacement string (no shell execution or capture expansion). Up to
 16 steps, 128 catalogue entries, 256 KiB per imported manifest and 8 MiB per
 processing input/output are allowed. Regex compilation has an explicit size limit.
-Builtin IDs cannot be shadowed. Arbitrary executable and native vendor hook
+Builtin IDs cannot be shadowed. Arbitrary executable and imported native vendor hook
 plugins are outside this v1 contract.
 
 ## Preservation and failure behavior
@@ -130,3 +131,81 @@ in the skills catalogue remain compatibility aliases; use the Hooks clients for
 activation. MACC embeds its catalogue and implementation, so a release works
 offline. Local package changes become remotely available only after the skills
 repository is committed and published; MACC does not claim an unpublished SHA.
+
+
+## Native tool integration
+
+Apply now deploys native lifecycle bridges through `ToolAdapter::native_output_hook`.
+This capability is optional: unsupported adapters explicitly report unsupported.
+Current implementations cover Unix Claude and Codex:
+
+| Adapter | Registration | Launcher | Result protocol |
+| --- | --- | --- | --- |
+| Claude | `.claude/settings.json` | `.claude/hooks/macc-output.sh` | `PostToolUse.updatedToolOutput`, preserving typed result fields |
+| Codex | `.codex/hooks.json` | `.codex/hooks/macc-output.sh` | `PostToolUse.continue: false` and replacement feedback |
+
+Both register `SessionStart` and `PostToolUse` for `Bash`. Apply preserves unrelated
+settings, events and handlers, replaces its own managed handlers without duplicates,
+and removes only its registrations when no output hooks are enabled or a tool is
+removed from selection. An inactive launcher can remain on disk without a registered
+handler. Reapplying in a worktree rebinds managed registrations to that worktree.
+The launchers call the installed MACC executable; there is no runtime download.
+Supervisor evidence hooks remain internal and do not get native registrations.
+
+### Output contracts and protection
+
+SessionStart tells the AI which output processors are available. The agent declares
+a known output contract on the first line of its Bash command, for example:
+
+```bash
+# macc-hook: log-grep-error-first
+cat application.log
+```
+
+The first line is a shell comment. MACC never executes or rewrites the command.
+The hook operates only on its completed output. Imported enabled declarative hooks
+can be selected by the same ID syntax. Multiple IDs are comma separated.
+O2 output reduction or legacy summarization must be active; per-tool opt-outs apply.
+Unannotated commands are unchanged. No arbitrary shell output is classified by
+content. Native annotations are separate from per-skill contracts used by internal
+MACC executions.
+
+Known failed, interrupted, image, protocol and unknown response shapes pass through.
+A numeric `exit_code`/`exitCode` of zero is accepted. Claude's documented successful
+Bash PostToolUse shape without an exit code is also accepted when its typed flags
+are false and stderr is empty; failures use PostToolUseFailure, which is not
+registered. Unknown Codex result shapes pass through. MCP output is not intercepted.
+Transforms must save at least 128 bytes and produce at most 32,000 bytes.
+Full original events for replaced output are saved with private file permissions
+under `.macc/log/hooks/`, and the replacement includes that raw evidence path.
+Handler failures leave the original output available through provider fail-open
+behavior; no blocking exit code is used. No gain is claimed until measured with
+actual provider versions and output shapes.
+
+### Status and trust
+
+CLI (`macc hooks list --json`), TUI and Web expose these separate native states:
+
+- **Supported**: the adapter and platform have a native bridge.
+- **Configured**: both expected lifecycle handlers are registered.
+- **Installed**: the generated launcher matches the current MACC launcher.
+- **Locally verified**: registration and launcher integrity checks passed after Apply.
+- **Execution observed**: the bridge recorded an event for the current configuration.
+- **Last event reducers**: IDs actually used by the latest observed event.
+
+`[MACC on]` means enabled in MACC, not installed or executed by a provider.
+Local verification does not start a paid model session or establish provider trust.
+Receipts under `.macc/state/native-hooks/` contain revision/event/time/IDs, without
+raw output. They describe bridge invocation, not an independent provider attestation.
+A configuration revision change invalidates observed execution until a new event.
+
+Codex requires explicit review/trust of the exact hook definition using `/hooks`.
+MACC reports this requirement and never writes trust records or bypasses approval.
+New or changed hooks may require review again. Claude policies or older versions
+can also prevent registration or result replacement. Restart the tool session after
+Apply, then refresh Hooks to see observed execution. Existing sessions are not
+silently restarted. Apply reports pending runtime verification as a warning.
+
+Primary protocol references (checked 2026-10-23):
+[Codex hooks](https://learn.chatgpt.com/docs/hooks),
+[Claude hooks](https://code.claude.com/docs/en/hooks).

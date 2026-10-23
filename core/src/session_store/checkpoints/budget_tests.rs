@@ -58,7 +58,9 @@ fn oversized_start_and_invalid_finish_policy_fail_without_truncating_criteria() 
     assert!(policy.validate().is_err());
     policy.checkpoints.max_finish_content_bytes = 262145;
     assert!(policy.validate().is_err());
-    let task = json!({"tasks":[{"id":"A","acceptance_criteria":["required ".repeat(3000)]}]});
+    let max_bytes =
+        usize::try_from(policy::load(root).unwrap().checkpoints.max_content_bytes).unwrap();
+    let task = json!({"tasks":[{"id":"A","acceptance_criteria":["required ".repeat(max_bytes / "required ".len() + 1)]}]});
     std::fs::write(root.join("worktree.prd.json"), task.to_string()).unwrap();
     assert!(
         prepare(root, &context(root, "A", "performer", "future-tool"))
