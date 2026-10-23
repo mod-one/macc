@@ -587,10 +587,20 @@ pub(super) async fn launch_performer(
         source: e,
     })?;
     if !apply_output.status.success() {
-        return Err(MaccError::Coordinator {
-            code: "worktree_apply_failed",
-            message: format!("status={}", apply_output.status),
-        });
+        let error = worktree_apply_error(repo_root, claim, &apply_output);
+        let _ = append_coordinator_event_with_severity(
+            repo_root,
+            "worktree_apply_failed",
+            &claim.task_id,
+            "dispatch",
+            "failed",
+            &error.to_string(),
+            "blocking",
+        );
+        if let Some(log) = logger {
+            let _ = log.note(format!("- {}", error));
+        }
+        return Err(error);
     }
     // Use stale_in_progress_seconds as the per-phase hard kill timeout, matching
     // the FSM path (fsm.rs). Default is 0 (disabled) — consistent with
@@ -914,6 +924,69 @@ fn compute_routing_env(
         ),
         ("MACC_MODEL_ROUTING_MODE", decision.mode.clone()),
     ]
+}
+
+fn worktree_apply_error(
+    repo_root: &Path,
+    claim: &DispatchClaim,
+    output: &std::process::Output,
+) -> MaccError {
+    use std::io::Write;
+    let dir = repo_root.join(".macc/log/coordinator");
+    let path = dir.join(format!("worktree-apply-{}.log", uuid::Uuid::new_v4()));
+    let saved = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        writeln!(
+            file,
+            "task={} worktree={} status={}",
+            claim.task_id,
+            claim.worktree_path.display(),
+            output.status
+        )?;
+        file.write_all(b"\n--- stderr ---\n")?;
+        file.write_all(&output.stderr)?;
+        file.write_all(b"\n--- stdout ---\n")?;
+        file.write_all(&output.stdout)?;
+        Ok(())
+    })();
+    let log = match saved {
+        Ok(()) => format!("log={}", path.display()),
+        Err(error) => format!("could not save diagnostic log: {}", error),
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let mut excerpt: String = detail.chars().take(2048).collect();
+    if detail.chars().count() > 2048 {
+        excerpt.push_str(" … (see full log)");
+    }
+    MaccError::Coordinator {
+        code: "worktree_apply_failed",
+        message: format!(
+            "task={} worktree={} status={}; {}{}",
+            claim.task_id,
+            claim.worktree_path.display(),
+            output.status,
+            log,
+            if excerpt.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", excerpt)
+            },
+        ),
+    }
 }
 
 fn load_task_for_routing(

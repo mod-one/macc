@@ -17,10 +17,13 @@ fn policy_editor_requires_preview_preserves_drafts_and_saves_exact_revision() {
         .unwrap();
     panel.key(root, KeyCode::Enter).unwrap();
     assert_eq!(panel.draft["memory"]["enabled"], true);
-    assert!(panel.key(root, KeyCode::Char('s')).is_err());
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert!(panel.message.contains("Press p"));
+    assert!(!policy::load(root).unwrap().memory.enabled);
     panel.refresh(root).unwrap();
     assert_eq!(panel.draft["memory"]["enabled"], true);
     panel.key(root, KeyCode::Char('p')).unwrap();
+    assert!(panel.message.contains("press s"));
     assert!(panel.mutation(KeyCode::Char('s')));
     panel.key(root, KeyCode::Char('s')).unwrap();
     assert!(policy::load(root).unwrap().memory.enabled);
@@ -55,6 +58,32 @@ fn scope_form_has_all_scopes_and_retains_input_on_errors() {
     panel.key(root, KeyCode::Char('3')).unwrap();
     panel.key(root, KeyCode::Char('c')).unwrap();
     assert!(panel.mutation(KeyCode::Enter));
+}
+
+#[test]
+fn editing_after_preview_clears_evidence_and_guides_without_saving() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.key(root, KeyCode::Enter).unwrap();
+    panel.key(root, KeyCode::Char('p')).unwrap();
+    assert!(panel.preview);
+    assert!(!panel.details.is_empty());
+    panel.key(root, KeyCode::Enter).unwrap();
+    panel.key(root, KeyCode::Enter).unwrap();
+    assert!(!panel.preview);
+    assert!(panel.details.is_empty());
+    assert!(panel.message.contains("Unsaved changes"));
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert!(panel.message.contains("Press p"));
+    assert!(!policy::load(root).unwrap().memory.enabled);
+    panel.key(root, KeyCode::Char('p')).unwrap();
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert!(policy::load(root).unwrap().memory.enabled);
+    assert!(panel.details.is_empty());
+    assert!(panel.message.contains("Settings saved"));
 }
 
 #[test]
@@ -133,7 +162,8 @@ fn graphify_executable_editor_keeps_typed_paths_and_requires_a_new_preview() {
         "/usr/bin/python3"
     );
     assert!(!panel.preview);
-    assert!(panel.key(root, KeyCode::Char('s')).is_err());
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert!(panel.message.contains("Press p"));
     panel.key(root, KeyCode::Char('p')).unwrap();
     panel.key(root, KeyCode::Char('s')).unwrap();
     assert_eq!(
@@ -469,7 +499,8 @@ fn native_map_default_opt_out_is_previewed_and_applied_through_the_shared_catalo
             .code_intelligence
             .native_map_enabled
     );
-    assert!(panel.key(root, KeyCode::Char('s')).is_err());
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert!(panel.message.contains("Press p"));
     panel.key(root, KeyCode::Char('p')).unwrap();
     panel.key(root, KeyCode::Char('s')).unwrap();
     assert!(

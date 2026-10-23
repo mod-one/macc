@@ -3,6 +3,24 @@ use super::*;
 use crate::workspace_tests::{fixture, render, text};
 
 #[test]
+fn o2_settings_footer_shows_preview_save_and_discard_at_terminal_widths() {
+    let (_t, mut state) = fixture();
+    session_navigation::open(&mut state, true);
+    handle_key(&mut state, KeyCode::Char('5'));
+    for width in [80, 120, 190] {
+        let buffer = render(&state, width, 36);
+        let footer = text(&buffer)
+            .lines()
+            .skip(32)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(footer.contains("[p] Preview"), "{width}: {footer}");
+        assert!(footer.contains("[s] Save"), "{width}: {footer}");
+        assert!(footer.contains("[x] Discard"), "{width}: {footer}");
+    }
+}
+
+#[test]
 fn every_page_has_visible_commands_and_opens_the_same_palette() {
     let (_t, mut state) = fixture();
     for screen in [

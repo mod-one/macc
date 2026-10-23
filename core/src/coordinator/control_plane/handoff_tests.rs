@@ -7,6 +7,47 @@ use crate::coordinator::rate_limit::ToolThrottleState;
 use crate::coordinator::task_selector::{select_next_ready_task, TaskSelectorConfig};
 use serde_json::json;
 
+#[cfg(unix)]
+#[test]
+fn failed_worktree_apply_keeps_task_context_and_complete_child_output() {
+    use std::os::unix::process::ExitStatusExt;
+    let root = tempfile::tempdir().unwrap();
+    let claim = DispatchClaim {
+        task_id: "TASK-002".into(),
+        worktree_path: root.path().join("worker"),
+        branch: "ai/worker".into(),
+        tool: "claude".into(),
+        base_branch: "main".into(),
+        active_session_id: None,
+        claim_id: "claim".into(),
+        resume_attempt: 0,
+    };
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(13 << 8),
+        stdout: b"preparation output".to_vec(),
+        stderr: format!(
+            "MACC-SKILL-3001: locally modified skill\n{}",
+            "é".repeat(3000)
+        )
+        .into_bytes(),
+    };
+    let message = worktree_apply_error(root.path(), &claim, &output).to_string();
+    assert!(message.contains("TASK-002"));
+    assert!(message.contains("MACC-SKILL-3001"));
+    assert!(message.contains("status=exit status: 13"));
+    assert!(message.contains("see full log"));
+    let log = std::fs::read_dir(root.path().join(".macc/log/coordinator"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(message.contains(&log.display().to_string()));
+    let saved = std::fs::read_to_string(log).unwrap();
+    assert!(saved.contains(&String::from_utf8(output.stderr).unwrap()));
+    assert!(saved.contains("preparation output"));
+}
+
 fn git(path: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")

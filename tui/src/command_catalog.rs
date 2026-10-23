@@ -215,7 +215,12 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
                 .iter()
                 .position(|existing| existing.shortcut == c.shortcut)
             {
-                unique[index] = c;
+                if matches!(unique[index].label.as_str(), "Preview" | "Save" | "Discard") {
+                    let label = format!("{} — {}", unique[index].label, c.label);
+                    unique[index] = Command { label, ..c };
+                } else {
+                    unique[index] = c;
+                }
             } else {
                 unique.push(c);
             }

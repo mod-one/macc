@@ -2,6 +2,10 @@
 use super::*;
 use crate::workspace_ui::Command;
 impl Panel {
+    pub(crate) fn settings_open(&self) -> bool {
+        self.tab == 4
+    }
+
     pub(crate) fn has_horizontal_controls(&self) -> bool {
         matches!(self.tab, 4 | 6)
     }

@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Metadata such as backup and consent requirements associated with a planned operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PlannedOpMetadata {
+    /// Copy reviewed asset bytes without structured configuration merging.
+    #[serde(default)]
+    pub preserve_bytes: bool,
     pub backup_required: bool,
     pub consent_required: bool,
     pub set_executable: bool,
@@ -114,6 +117,7 @@ impl OperationAccumulator {
             consent_required,
             kind,
             metadata: PlannedOpMetadata {
+                preserve_bytes: false,
                 backup_required: self.backup_required,
                 consent_required,
                 set_executable: self.set_executable,
@@ -174,6 +178,10 @@ pub fn collect_plan_operations(paths: &ProjectPaths, plan: &ActionPlan) -> Vec<P
     let mut ops: Vec<PlannedOp> = accumulator
         .into_iter()
         .filter_map(|(path, entry)| entry.into_planned_op(paths, path))
+        .map(|mut op| {
+            op.metadata.preserve_bytes = plan.skill_file_paths.contains(&op.path);
+            op
+        })
         .collect();
 
     if let Some(activation) = &plan.o2_activation {

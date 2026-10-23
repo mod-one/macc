@@ -42,6 +42,19 @@ pub fn plan_files(
                     &std::path::Path::new(root).join(&selection.id),
                 )
                 .map_err(MaccError::Validation)?;
+                let prefix = format!("{root}/{}/", selection.id);
+                for action in &plan.actions {
+                    if let Action::WriteFile {
+                        path,
+                        scope: Scope::Project,
+                        ..
+                    } = action
+                    {
+                        if path.starts_with(&prefix) {
+                            plan.skill_file_paths.insert(path.clone());
+                        }
+                    }
+                }
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -134,6 +147,8 @@ pub fn plan_lock(
                     .collect();
                 targets.sort_by(|a, b| a.dest.cmp(&b.dest));
                 targets.dedup_by(|a, b| a.dest == b.dest);
+                plan.skill_file_paths
+                    .extend(targets.iter().map(|t| t.dest.clone()));
                 if targets.is_empty() {
                     continue;
                 }
@@ -171,7 +186,26 @@ pub fn plan_lock(
                                     t.dest == target.dest && t.digest.as_ref() != Some(&actual)
                                 })
                             {
-                                return Err(MaccError::Catalog{operation:"install".into(),message:format!("{}: locally modified skill file {}; preserve or restore it before updating",MACC_SKILL_3001,target.dest)});
+                                let proposed =
+                                    plan.actions.iter().find_map(|action| match action {
+                                        Action::WriteFile { path, content, .. }
+                                            if path == &target.dest =>
+                                        {
+                                            Some(content.as_slice())
+                                        }
+                                        _ => None,
+                                    });
+                                if !proposed.is_some_and(|content| {
+                                    locking::is_legacy_rewrite(
+                                        paths,
+                                        &target.dest,
+                                        expected,
+                                        &actual,
+                                        content,
+                                    )
+                                }) {
+                                    return Err(MaccError::Catalog{operation:"install".into(),message:format!("{}: locally modified skill file {}; preserve or restore it before updating",MACC_SKILL_3001,target.dest)});
+                                }
                             }
                         }
                     }

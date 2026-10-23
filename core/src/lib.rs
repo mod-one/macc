@@ -1249,15 +1249,16 @@ where
                     continue;
                 }
                 let status = if let Some(content) = &op.after {
-                    let effective_content = if op.kind == plan::PlannedOpKind::Write {
-                        structured_merge_policy.merge_bytes_for_path(
-                            &path,
-                            existing.bytes.as_deref(),
-                            content,
-                        )
-                    } else {
-                        content.clone()
-                    };
+                    let effective_content =
+                        if op.kind == plan::PlannedOpKind::Write && !op.metadata.preserve_bytes {
+                            structured_merge_policy.merge_bytes_for_path(
+                                &path,
+                                existing.bytes.as_deref(),
+                                content,
+                            )
+                        } else {
+                            content.clone()
+                        };
                     let findings = security::scan_bytes(&path, &effective_content);
                     for finding in &findings {
                         if finding.severity == security::Severity::Warning {

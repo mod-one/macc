@@ -20,6 +20,9 @@ pub enum Scope {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct ActionPlan {
+    /// Skill assets are copied verbatim, including structured files.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub skill_file_paths: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_lock_revision: Option<String>,
     pub actions: Vec<Action>,

@@ -126,6 +126,27 @@ pub fn inherit(repo: &ProjectPaths, worker: &ProjectPaths) -> Result<()> {
     Ok(())
 }
 
+/// Older Apply versions reserialized structured skill assets after recording
+/// their source digest. Recover only that exact transformation of the same
+/// locked source; arbitrary local edits and source updates remain protected.
+pub(super) fn is_legacy_rewrite(
+    paths: &ProjectPaths,
+    path: &str,
+    expected: &str,
+    actual: &str,
+    proposed: &[u8],
+) -> bool {
+    if super::sha256_digest(proposed) != expected {
+        return false;
+    }
+    let merged = crate::StructuredToolMergePolicy::from_project(paths).merge_bytes_for_path(
+        path,
+        Some(proposed),
+        proposed,
+    );
+    merged != proposed && super::sha256_digest(&merged) == actual
+}
+
 fn validate_local_files(paths: &ProjectPaths, plan: &ActionPlan) -> Result<()> {
     let lock = SkillsLockFile::load(&paths.skills_lock_path())?;
     for entry in &lock.skills {
@@ -142,7 +163,15 @@ fn validate_local_files(paths: &ProjectPaths, plan: &ActionPlan) -> Result<()> {
                 }
                 match super::file_digest(&paths.root.join(&target.dest)) {
                     Ok(actual)
-                        if &actual != expected && actual != super::sha256_digest(proposed) =>
+                        if &actual != expected
+                            && actual != super::sha256_digest(proposed)
+                            && !is_legacy_rewrite(
+                                paths,
+                                &target.dest,
+                                expected,
+                                &actual,
+                                proposed,
+                            ) =>
                     {
                         return Err(MaccError::Validation(format!(
                             "Locally modified skill file {}; refresh the review before overwriting",

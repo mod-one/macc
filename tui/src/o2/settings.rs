@@ -1,5 +1,12 @@
 use super::*;
 impl Panel {
+    pub(super) fn settings_edited(&mut self) {
+        self.preview = false;
+        self.details.clear();
+        self.scroll = 0;
+        self.message = "Unsaved changes. Press p to preview, then s to save.".into();
+    }
+
     pub(super) fn setting_indices(&self) -> Vec<usize> {
         let Some(view) = &self.view else {
             return vec![];
@@ -88,7 +95,7 @@ impl Panel {
                 if f.kind == "bool" {
                     *self.draft.pointer_mut(&pointer).unwrap() =
                         json!(!value.as_bool().unwrap_or(false));
-                    self.preview = false;
+                    self.settings_edited();
                     self.inherit = false;
                 } else if f.kind == "enum" {
                     let pos = f
@@ -98,7 +105,7 @@ impl Panel {
                         .unwrap_or(0);
                     *self.draft.pointer_mut(&pointer).unwrap() =
                         json!(f.choices[(pos + 1) % f.choices.len()]);
-                    self.preview = false;
+                    self.settings_edited();
                     self.inherit = false;
                 } else if f.kind == "string" {
                     self.start(
@@ -132,12 +139,12 @@ impl Panel {
                 )?;
                 self.preview = true;
                 self.result(result);
+                self.message = "Preview ready. Review the changes, then press s to save. Further edits require a new preview.".into();
             }
             KeyCode::Char('s') => {
                 if !self.preview {
-                    return Err(MaccError::Validation(
-                        "Preview the current draft with p before applying".into(),
-                    ));
+                    self.message = "Settings not saved yet. Press p to preview your changes, then s to save. Any further edit requires a new preview.".into();
+                    return Ok(true);
                 }
                 let p = if self.inherit {
                     None
@@ -160,8 +167,10 @@ impl Panel {
                 self.view = Some(view);
                 self.inherit = false;
                 self.preview = false;
+                self.details.clear();
+                self.scroll = 0;
                 self.message =
-                    "Policy saved; next invocation/query. Deployment remains separate.".into();
+                    "Settings saved. New invocations and queries will use these values.".into();
             }
             KeyCode::Char('x') => {
                 let view = policy::inspect(root)?;
@@ -170,16 +179,18 @@ impl Panel {
                 self.view = Some(view);
                 self.inherit = false;
                 self.preview = false;
+                self.details.clear();
+                self.scroll = 0;
                 self.message = "Draft discarded.".into();
             }
             KeyCode::Char('b') => {
                 self.draft = serde_json::to_value(policy::Policy::default()).unwrap();
-                self.preview = false;
+                self.settings_edited();
                 self.inherit = false;
             }
             KeyCode::Char('i') => {
                 self.inherit = true;
-                self.preview = false;
+                self.settings_edited();
             }
             _ => return Ok(false),
         }

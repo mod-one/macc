@@ -39,7 +39,12 @@ impl SessionsScreen {
                 ("Esc", "Back"),
             ];
         }
-        let mut bindings = vec![
+        let mut bindings = if self.o2.open && self.o2.settings_open() {
+            vec![("p", "Preview"), ("s", "Save"), ("x", "Discard")]
+        } else {
+            vec![]
+        };
+        bindings.extend(vec![
             ("Tab", "Next section"),
             ("Shift+Tab", "Previous section"),
             ("↑↓", "Select"),
@@ -49,7 +54,7 @@ impl SessionsScreen {
             ("O", "O2 workspace"),
             ("J", "Sessions"),
             ("Esc", "Back"),
-        ];
+        ]);
         if self.o2.open && self.o2.has_horizontal_controls() {
             bindings.push(("←→", "Setting group / trial field"));
         }

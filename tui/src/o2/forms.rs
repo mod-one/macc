@@ -100,7 +100,7 @@ impl Panel {
                 let f = &self.view.as_ref().unwrap().fields[self.selected];
                 let pointer = format!("/{}", f.path.replace('.', "/"));
                 *self.draft.pointer_mut(&pointer).unwrap() = json!(v[0]);
-                self.preview = false;
+                self.settings_edited();
                 self.inherit = false;
                 return Ok(());
             }
@@ -125,7 +125,7 @@ impl Panel {
                     ));
                 }
                 *self.draft.pointer_mut(&pointer).unwrap() = value;
-                self.preview = false;
+                self.settings_edited();
                 self.inherit = false;
                 return Ok(());
             }

@@ -71,6 +71,91 @@ fn reviewed_lock_records_actual_sha_and_bytes_and_is_stable_on_reapply() {
     changed.save(&paths.skills_lock_path()).unwrap();
     assert!(locking::guard(&paths, &again).is_err());
 }
+
+#[test]
+fn structured_skill_assets_keep_exact_bytes_across_repeated_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = ProjectPaths::from_root(dir.path());
+    let (unit, _) = fixture(dir.path(), "claude", &"a".repeat(40), "skill");
+    let roots = BTreeMap::from([("claude".into(), ".claude/skills".into())]);
+    for (name, bytes) in [
+        (
+            "agent.yaml",
+            "interface:\n  display_name: \"MACC Auditor\"\n",
+        ),
+        ("config.json", "{\"label\":\"original formatting\"}\n"),
+        ("config.toml", "label='original formatting'\n"),
+    ] {
+        std::fs::write(unit.source_root_path.join(name), bytes).unwrap();
+    }
+    for _ in 0..3 {
+        let mut plan = ActionPlan::new();
+        lifecycle::plan_files(&mut plan, std::slice::from_ref(&unit), &roots).unwrap();
+        lifecycle::plan_lock(&paths, &mut plan, std::slice::from_ref(&unit), &roots).unwrap();
+        crate::apply_plan(&paths, &mut plan, false).unwrap();
+        let lock = SkillsLockFile::load(&paths.skills_lock_path()).unwrap();
+        for target in &lock.find("fixture", "claude").unwrap().installed.targets {
+            assert_eq!(
+                Some(file_digest(&paths.root.join(&target.dest)).unwrap()),
+                target.digest
+            );
+            assert_eq!(
+                std::fs::read(paths.root.join(&target.dest)).unwrap(),
+                std::fs::read(
+                    unit.source_root_path
+                        .join(target.dest.rsplit('/').next().unwrap())
+                )
+                .unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_yaml_rewrite_is_repaired_but_user_changes_remain_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = ProjectPaths::from_root(dir.path());
+    let (unit, _) = fixture(dir.path(), "claude", &"a".repeat(40), "skill");
+    let roots = BTreeMap::from([("claude".into(), ".claude/skills".into())]);
+    let original = b"interface:\n  display_name: \"MACC Auditor\"\n";
+    std::fs::write(unit.source_root_path.join("agent.yaml"), original).unwrap();
+    let make_plan = || {
+        let mut plan = ActionPlan::new();
+        lifecycle::plan_files(&mut plan, std::slice::from_ref(&unit), &roots).unwrap();
+        plan
+    };
+    let mut plan = make_plan();
+    lifecycle::plan_lock(&paths, &mut plan, std::slice::from_ref(&unit), &roots).unwrap();
+    crate::apply_plan(&paths, &mut plan, false).unwrap();
+    let dest = ".claude/skills/fixture/agent.yaml";
+    let legacy = crate::StructuredToolMergePolicy::from_project(&paths).merge_bytes_for_path(
+        dest,
+        Some(original),
+        original,
+    );
+    assert_ne!(legacy, original);
+    std::fs::write(paths.root.join(dest), &legacy).unwrap();
+    let mut repair = make_plan();
+    lifecycle::plan_lock(&paths, &mut repair, std::slice::from_ref(&unit), &roots).unwrap();
+    // Apply must recheck local edits made after preview, even during recovery.
+    let edited = b"interface:\n  display_name: User customization\n";
+    std::fs::write(paths.root.join(dest), edited).unwrap();
+    assert!(crate::apply_plan(&paths, &mut repair, false).is_err());
+    assert!(lifecycle::plan_lock(
+        &paths,
+        &mut make_plan(),
+        std::slice::from_ref(&unit),
+        &roots
+    )
+    .is_err());
+    assert_eq!(std::fs::read(paths.root.join(dest)).unwrap(), edited);
+    std::fs::write(paths.root.join(dest), legacy).unwrap();
+    crate::apply_plan(&paths, &mut repair, false).unwrap();
+    assert_eq!(std::fs::read(paths.root.join(dest)).unwrap(), original);
+    let mut again = make_plan();
+    lifecycle::plan_lock(&paths, &mut again, &[unit.clone()], &roots).unwrap();
+    crate::apply_plan(&paths, &mut again, false).unwrap();
+}
 #[test]
 fn local_edits_are_preserved_and_workers_keep_their_existing_pins() {
     let dir = tempfile::tempdir().unwrap();

@@ -15,7 +15,8 @@ fn semantic_policy_opt_in_requires_a_reviewed_preview() {
         .position(|f| f.path == "memory.semantic_enabled")
         .unwrap();
     panel.key(r, KeyCode::Enter).unwrap();
-    assert!(panel.key(r, KeyCode::Char('s')).is_err());
+    panel.key(r, KeyCode::Char('s')).unwrap();
+    assert!(panel.message.contains("Press p"));
     assert!(!policy::load(r).unwrap().memory.semantic_enabled);
     panel.key(r, KeyCode::Char('p')).unwrap();
     panel.key(r, KeyCode::Char('s')).unwrap();
