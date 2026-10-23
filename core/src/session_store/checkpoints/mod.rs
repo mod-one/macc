@@ -6,6 +6,8 @@ mod lifecycle;
 mod memory_context;
 pub mod merge_repair;
 mod model;
+#[cfg(test)]
+mod resume_tests;
 mod schema;
 #[cfg(test)]
 mod tests;
@@ -222,10 +224,12 @@ pub(super) fn fingerprint(c: &Checkpoint) -> String {
     )
 }
 pub(super) fn same_source(a: &Checkpoint, b: &Checkpoint) -> bool {
+    same_task_sources(a, b) && a.branch == b.branch
+}
+pub(super) fn same_task_sources(a: &Checkpoint, b: &Checkpoint) -> bool {
     a.project_id == b.project_id
         && a.task_id == b.task_id
         && a.worktree == b.worktree
-        && a.branch == b.branch
         && a.source_hashes == b.source_hashes
 }
 

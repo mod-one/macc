@@ -32,24 +32,44 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
     c.validation["max_finish_content_bytes"] = json!(policy.checkpoints.max_finish_content_bytes);
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     idle(&tx, &c.worktree)?;
+    let mut content_limit = policy.checkpoints.max_content_bytes;
     if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {
         let prior_validation: String = sql(tx.query_row(
             "SELECT validation_state FROM task_checkpoints WHERE id=?1",
             [&previous.id],
             |r| r.get(0),
         ))?;
-        if prior_validation == "needs_reconciliation"
-            || !same_source(&previous, &c)
-            || !git_state::descends_from(Path::new(&c.worktree), &previous.source_revision)
+        let mut reasons = Vec::new();
+        if prior_validation == "needs_reconciliation" {
+            reasons.push("a prior checkpoint still requires reviewed reconciliation");
+        }
+        if previous.project_id != c.project_id
+            || previous.task_id != c.task_id
+            || previous.worktree != c.worktree
         {
+            reasons.push("project, task or execution worktree changed");
+        }
+        if previous.source_hashes != c.source_hashes {
+            reasons.push("mandatory PRD or specification sources changed");
+        }
+        if !git_state::descends_from(Path::new(&c.worktree), &previous.source_revision) {
+            reasons.push("current Git HEAD does not descend from the checkpoint revision");
+        }
+        if !reasons.is_empty() {
             sql(tx.execute(
                 "UPDATE task_checkpoints SET validation_state='needs_reconciliation' WHERE id=?1",
                 [&previous.id],
             ))?;
             sql(tx.commit())?;
-            return Err(error(format!("Checkpoint {} needs reconciliation: PRD, specification, branch or worktree changed; inspect before dispatch",previous.id)));
+            return Err(error(format!("Checkpoint {} needs reconciliation: {}. Inspect with `macc session-store reconcile {}` before dispatch",previous.id, reasons.join("; "), previous.id)));
         }
-        if previous.source_revision != c.source_revision
+        schema::check_mandatory_size(&c, policy.checkpoints.max_content_bytes)?;
+        content_limit = policy.checkpoints.max_finish_content_bytes;
+        c.validation["max_content_bytes"] = json!(content_limit);
+        c.validation["content_budget_setting"] = json!("max_finish_content_bytes");
+        let branch_changed = previous.branch != c.branch;
+        if branch_changed
+            || previous.source_revision != c.source_revision
             || previous.worktree_dirty_digest != c.worktree_dirty_digest
         {
             // No active provider owns the slot. Reconcile current Git evidence,
@@ -62,9 +82,9 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
                 &tx,
                 &previous.id,
                 "checkpoint_reconciled",
-                json!({"task":c.task_id,"reason":"retained worktree changed; current Git evidence recaptured; completion not inferred"}),
+                json!({"task":c.task_id,"reason":"retained worktree changed; current Git evidence recaptured; completion not inferred","previous_branch":previous.branch,"current_branch":c.branch,"branch_changed":branch_changed}),
             )?;
-            if previous.worktree_content_digest != c.worktree_content_digest {
+            if branch_changed || previous.worktree_content_digest != c.worktree_content_digest {
                 sql(tx.execute("UPDATE logical_sessions SET status='rotated' WHERE project_id=?1 AND task_id=?2 AND role=?3 AND status='available'",params![a.project_id,c.task_id,c.role]))?;
             }
             c.blocking_issues.push("Retained Git state changed since prior checkpoint; revalidate all acceptance criteria and outstanding review findings".into());
@@ -74,8 +94,10 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         }
         c.blocking_issues.extend(previous.blocking_issues);
     }
+    c.blocking_issues.sort();
+    c.blocking_issues.dedup();
     let optional_context = crate::o2::context::for_checkpoint(&tx, root, &c, &freshness)?;
-    schema::insert(&tx, &c, policy.checkpoints.max_content_bytes)?;
+    schema::insert(&tx, &c, content_limit)?;
     sql(tx.commit())?;
     let acknowledgement = format!(
         "MACC_CHECKPOINT_ACK: {} task={} phase={}",
@@ -276,6 +298,8 @@ pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value>
     current.source_hashes = hashes;
     current.reason = "operator_reconciliation".into();
     current.blocking_issues.push("Operator accepted current sources; all criteria and existing objections require revalidation".into());
+    current.blocking_issues.sort();
+    current.blocking_issues.dedup();
     current.acceptance_criteria_ids = current.mandatory_task["tasks"][0]["acceptance_criteria"]
         .as_array()
         .map(|rows| {
@@ -293,6 +317,17 @@ pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value>
     let mut value = serde_json::to_value(&current).map_err(|e| error(e.to_string()))?;
     redact_evidence(&mut value);
     current = serde_json::from_value(value).map_err(|e| error(e.to_string()))?;
+    let policy = policy::load(root)?;
+    schema::check_mandatory_size(&current, policy.checkpoints.max_content_bytes)?;
+    current.validation["max_content_bytes"] = json!(policy.checkpoints.max_finish_content_bytes);
+    current.validation["max_finish_content_bytes"] =
+        json!(policy.checkpoints.max_finish_content_bytes);
+    current.validation["content_budget_setting"] = json!("max_finish_content_bytes");
+    schema::check_size(
+        &current,
+        policy.checkpoints.max_finish_content_bytes,
+        "max_finish_content_bytes",
+    )?;
     let sha = fingerprint(&current);
     if expected.is_none() {
         return Ok(
@@ -303,11 +338,7 @@ pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value>
         return Err(error("Reconciliation source changed; preview again"));
     }
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
-    schema::insert(
-        &tx,
-        &current,
-        policy::load(root)?.checkpoints.max_content_bytes,
-    )?;
+    schema::insert(&tx, &current, policy.checkpoints.max_finish_content_bytes)?;
     sql(tx.execute(
         "UPDATE task_checkpoints SET validation_state='reconciled' WHERE id=?1",
         [id],

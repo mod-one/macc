@@ -21,8 +21,10 @@ work stays on the same task branch. See [usage telemetry](USAGE_TELEMETRY.md).
 
 ## Checkpoint size and finalization
 
-Starting checkpoints retain the existing strict `max_content_bytes` bound and
-fail before provider execution when mandatory criteria cannot fit. The separate
+Initial checkpoints retain the strict `max_content_bytes` bound and fail before
+provider execution when mandatory criteria cannot fit. Resumed checkpoints also
+validate their mandatory context against that limit, while retained execution
+evidence uses the current finish budget. The separate
 `session_management.checkpoints.max_finish_content_bytes` defaults to 65536 bytes,
 allows 2048..262144 and must be at least the start limit. It reserves space for
 changed paths, retained objections and outcome evidence accumulated during work.

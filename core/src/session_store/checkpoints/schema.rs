@@ -80,11 +80,17 @@ pub fn upgrade(root: &Path, apply: bool, expected: Option<&str>) -> Result<Migra
 }
 pub(super) fn insert(db: &rusqlite::Connection, c: &super::Checkpoint, limit: u64) -> Result<()> {
     let raw = serde_json::to_string(c).map_err(|e| error(e.to_string()))?;
-    if raw.len() as u64 > limit {
-        return Err(error(
-            "Checkpoint exceeds configured size; mandatory criteria were not truncated",
-        ));
-    }
+    check_size(
+        c,
+        limit,
+        c.validation["content_budget_setting"].as_str().unwrap_or(
+            if c.reason == "invocation_finished" {
+                "max_finish_content_bytes"
+            } else {
+                "max_content_bytes"
+            },
+        ),
+    )?;
     sql(db.execute(
         "INSERT INTO task_checkpoints VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'verified',?10,?11)",
         params![
@@ -107,4 +113,35 @@ pub(super) fn insert(db: &rusqlite::Connection, c: &super::Checkpoint, limit: u6
         "checkpoint_created",
         serde_json::json!({"task":c.task_id,"phase":c.phase,"reason":c.reason}),
     )
+}
+
+pub(super) fn check_size(c: &super::Checkpoint, limit: u64, setting: &str) -> Result<()> {
+    let bytes = serde_json::to_vec(c)
+        .map_err(|e| error(e.to_string()))?
+        .len();
+    if bytes as u64 > limit {
+        let mandatory = serde_json::to_vec(&c.mandatory_task)
+            .map_err(|e| error(e.to_string()))?
+            .len();
+        return Err(error(format!(
+            "Checkpoint exceeds configured size: task={} size={} bytes, limit={} bytes, mandatory_task={} bytes; mandatory criteria were not truncated. Review session_management.checkpoints.{} before retrying",
+            c.task_id, bytes, limit, mandatory, setting
+        )));
+    }
+    Ok(())
+}
+
+/// Retained evidence can grow up to the finish budget, but it must never let
+/// an oversized mandatory specification bypass the configured starting limit.
+pub(super) fn check_mandatory_size(c: &super::Checkpoint, limit: u64) -> Result<()> {
+    let mut mandatory = c.clone();
+    mandatory.changed_files.clear();
+    mandatory.completed_steps.clear();
+    mandatory.remaining_steps.clear();
+    mandatory.decisions.clear();
+    mandatory.test_results.clear();
+    mandatory.memory_refs.clear();
+    mandatory.blocking_issues.clear();
+    mandatory.review_objections = serde_json::Value::Null;
+    check_size(&mandatory, limit, "max_content_bytes")
 }

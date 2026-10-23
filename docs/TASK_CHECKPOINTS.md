@@ -197,5 +197,17 @@ remain compatible.
 `session_management.checkpoints.max_finish_content_bytes` defaults to 65536 and
 is configurable in the shared Sessions catalog (2048..262144; at least the start
 limit). The starting checkpoint pins this separate allowance for evidence added
-during execution. Starting checkpoints still obey `max_content_bytes`; mandatory
-criteria are never truncated. See [runner reliability](COORDINATOR_RUN_RELIABILITY.md).
+during execution. Initial checkpoints obey `max_content_bytes`. On resumption,
+mandatory task context must still fit that limit, while changed paths, retained
+objections and outcome evidence use the current `max_finish_content_bytes` budget.
+No acceptance criteria or retained evidence are truncated to make a resume fit.
+Size errors include actual bytes, the budget and the setting to inspect.
+
+A branch change in the same idle execution worktree is recaptured automatically
+when the task/specification hashes are unchanged and the current HEAD descends
+from the checkpoint revision. MACC records the old/new branches, rotates the
+provider session, retains objections and requires acceptance criteria to be
+revalidated. Different worktrees, changed specifications and divergent Git
+histories still require reviewed reconciliation. Existing checkpoints already
+marked `needs_reconciliation` are not silently cleared, including legacy records
+whose original reason cannot be established. See [runner reliability](COORDINATOR_RUN_RELIABILITY.md).
