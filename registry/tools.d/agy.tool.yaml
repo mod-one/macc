@@ -19,11 +19,7 @@ performer:
     servers_key: mcpServers
   runner: adapters/agy/agy.performer.sh
   command: agy
-  args: ["--dangerously-skip-permissions", "--mode", "accept-edits"]
-  model_config:
-    path: ".agents/settings.json"
-    format: json
-    key: model
+  args: ["--model", "{model}", "--dangerously-skip-permissions", "--mode", "accept-edits"]
   prompt:
     mode: arg
     arg: "-p"
@@ -34,10 +30,10 @@ performer:
     extract_regex: "([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})"
     resume:
       command: agy
-      args: ["--conversation", "{session_id}", "--dangerously-skip-permissions"]
+      args: ["--model", "{model}", "--conversation", "{session_id}", "--dangerously-skip-permissions"]
   retry:
     command: agy
-    args: ["--conversation", "{session_id}", "--dangerously-skip-permissions"]
+    args: ["--model", "{model}", "--conversation", "{session_id}", "--dangerously-skip-permissions"]
 model_tiers:
   mini:
     model: "Gemini 3.8 Flash (Low)"

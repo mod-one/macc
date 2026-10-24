@@ -345,4 +345,45 @@ performer:
         );
         assert_eq!(render_args(&args, "", "").unwrap(), vec!["--yolo", "exec"]);
     }
+    #[tokio::test]
+    async fn agy_receives_supervisor_model_as_argument() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let capture = temp.path().join("argv.txt");
+        let fake = temp.path().join("fake-agy.sh");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", capture.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (specs, _) = ToolSpecLoader::new(vec![]).load_all_with_embedded();
+        let mut performer = specs
+            .into_iter()
+            .find(|s| s.id == "agy")
+            .and_then(|s| s.performer)
+            .unwrap();
+        assert!(performer.model_config.is_none());
+        performer.command = fake.display().to_string();
+        let mut config = SupervisorConfig::default();
+        config.model = Some("Gemini 3.8 Flash (Medium)".into());
+        let agent = Agent {
+            root: temp.path().into(),
+            config,
+            id: "agy".into(),
+            performer,
+            model: "Gemini 3.8 Flash (Medium)".into(),
+            effort: String::new(),
+            timeout: Duration::from_secs(10),
+        };
+        agent
+            .run(temp.path(), "hello", &temp.path().join("log"), "t")
+            .await
+            .unwrap();
+        let argv = std::fs::read_to_string(&capture).unwrap();
+        let argv: Vec<&str> = argv.lines().collect();
+        let pos = argv.iter().position(|a| *a == "--model").unwrap();
+        assert_eq!(argv[pos + 1], "Gemini 3.8 Flash (Medium)");
+        assert!(!temp.path().join(".agents/settings.json").exists());
+    }
 }
