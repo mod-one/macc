@@ -2188,8 +2188,15 @@ pub async fn run_native_control_plane(
         "coordinator PRD queue",
     )?;
     if env_cfg.prd.is_some() || coordinator.is_none_or(|c| c.prd_files.is_empty()) {
-        return run_single_prd_control_plane(repo_root, canonical, coordinator, env_cfg, logger)
-            .await;
+        return run_single_prd_control_plane(
+            repo_root,
+            canonical,
+            coordinator,
+            env_cfg,
+            logger,
+            true,
+        )
+        .await;
     }
     crate::prd_queue::run(repo_root, canonical, coordinator.unwrap(), env_cfg, logger).await
 }
@@ -2200,6 +2207,7 @@ pub(crate) async fn run_single_prd_control_plane(
     coordinator: Option<&CoordinatorConfig>,
     env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
+    emit_run_footer: bool,
 ) -> Result<()> {
     crate::o2::activation::require_ready(repo_root)?;
     crate::service::preparation::require_ready(repo_root)?;
@@ -2646,11 +2654,19 @@ pub(crate) async fn run_single_prd_control_plane(
     };
 
     if let Some(log) = logger {
-        let _ = log.note(format!(
-            "\n# Run footer\n- ended_at: {}\n- result: {}\n",
-            crate::coordinator::helpers::now_iso_coordinator(),
-            result_label
-        ));
+        // Queue delivery checks run after this function returns. Only the
+        // queue can publish its final result; this is an intermediate status.
+        let _ = if emit_run_footer {
+            log.note(format!(
+                "\n# Run footer\n- ended_at: {}\n- result: {}\n",
+                crate::coordinator::helpers::now_iso_coordinator(),
+                result_label
+            ))
+        } else {
+            log.note(format!(
+                "- PRD execution status: {result_label}; queue delivery validation follows"
+            ))
+        };
     }
 
     // Use this run's dispatch state: draining jobs can produce more than twenty

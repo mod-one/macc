@@ -331,10 +331,21 @@ fn parse_coordinator_result(footer: &[String]) -> (Option<String>, Option<String
     for line in footer.iter().rev() {
         let l = line.trim().to_lowercase();
         if result.is_none() {
-            if l.contains("result: failed") || l.contains("\"result\":\"failed\"") {
-                result = Some("failed".to_string());
-            } else if l.contains("result: success") || l.contains("\"result\":\"success\"") {
-                result = Some("success".to_string());
+            let json = serde_json::from_str::<serde_json::Value>(line).ok();
+            let value = json
+                .as_ref()
+                .and_then(|v| v.get("result"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    l.strip_prefix("- ")
+                        .unwrap_or(&l)
+                        .strip_prefix("result:")
+                        .map(str::trim)
+                });
+            if let Some(value @ ("success" | "failed" | "blocked" | "paused" | "stopped_by_user")) =
+                value
+            {
+                result = Some(value.to_string());
             }
         }
         if exit_reason.is_none() {
@@ -903,6 +914,22 @@ mod tests {
         let (result, reason) = parse_coordinator_result(&footer);
         assert!(result.is_none());
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn final_queue_status_overrides_an_earlier_success() {
+        for status in ["blocked", "paused", "stopped_by_user", "failed"] {
+            for final_line in [
+                format!("- result: {status}"),
+                format!(r#"{{"result": "{status}"}}"#),
+            ] {
+                let footer = vec!["- result: success".into(), final_line];
+                assert_eq!(parse_coordinator_result(&footer).0.as_deref(), Some(status));
+            }
+        }
+        let footer =
+            vec!["- PRD execution status: success; queue delivery validation follows".into()];
+        assert_eq!(parse_coordinator_result(&footer).0, None);
     }
 
     // ── Supervisor process registration guard ─────────────────────────────────

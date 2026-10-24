@@ -924,8 +924,8 @@ impl AppState {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.
                     // Keep it out of live-active rendering to avoid a misleading "still running" signal.
                 }
-                "blocked" => snapshot.blocked += 1,
-                "merged" => snapshot.merged += 1,
+                "blocked" | "rejected" => snapshot.blocked += 1,
+                "merged" | "approved" => snapshot.merged += 1,
                 _ => {}
             }
         }
@@ -7707,6 +7707,34 @@ mod tests {
             missing_roles: vec!["PRODUCT_OWNER".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn live_task_counts_include_approved_and_rejected_gates() {
+        let state = AppState::with_engine(Arc::new(NoopEngine::default()));
+        let registry =
+            macc_core::coordinator::model::TaskRegistry::from_value(&serde_json::json!({"tasks":[
+                {"id":"WORK","state":"merged"},
+                {"id":"APPROVED","state":"approved","gate":{"kind":"human_approval"}},
+                {"id":"REJECTED","state":"rejected","gate":{"kind":"human_approval"}},
+                {"id":"WAITING","state":"waiting_approval","gate":{"kind":"human_approval"}},
+                {"id":"EXPIRED","state":"expired","gate":{"kind":"human_approval"}}
+            ]}))
+            .unwrap();
+        let snapshot = state.read_registry_snapshot(&registry).unwrap();
+        assert_eq!(
+            (
+                snapshot.total,
+                snapshot.todo,
+                snapshot.active,
+                snapshot.blocked,
+                snapshot.merged
+            ),
+            registry.counts()
+        );
+        assert_eq!(snapshot.merged, 2);
+        assert_eq!(snapshot.blocked, 1);
+        assert!(snapshot.active_tasks.is_empty());
     }
 
     #[test]

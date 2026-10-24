@@ -1,5 +1,6 @@
 //! Ordered PRD inputs shared by the coordinator and its terminal clients.
 mod budget;
+mod logging;
 pub mod readiness;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
@@ -276,13 +277,73 @@ fn incomplete_tasks(
         .filter(|id| {
             registry
                 .find_task(id)
-                .is_none_or(|task| !task.is_merged() || !task.gate_verdict_satisfies_dependencies())
+                .is_none_or(|task| !task.satisfies_dependants())
         })
         .cloned()
         .collect()
 }
 
+fn prepare_registry_transition(
+    paths: &crate::ProjectPaths,
+    storage: &crate::coordinator_storage::SqliteStorage,
+    progress: &mut Progress,
+    entry: &Entry,
+) -> Result<()> {
+    use crate::coordinator_storage::CoordinatorStorage;
+    // Preserve completed registry tasks for diagnostics before the next PRD sync replaces them.
+    if let Ok(mut snapshot) = storage.load_snapshot() {
+        let unsafe_tasks: Vec<_> = snapshot
+            .registry
+            .tasks
+            .iter()
+            .filter(|task| {
+                !entry.task_ids.contains(&task.id)
+                    && !task.satisfies_dependants()
+                    && (task.state != "todo" || task.worktree.is_some())
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        if !unsafe_tasks.is_empty() {
+            progress.status = "blocked".into();
+            progress.reason = Some(format!("Cannot replace registry with {}: unfinished work outside this PRD: {}. Resolve it before switching inputs.", entry.path, unsafe_tasks.join(", ")));
+            save(&paths.root, progress)?;
+            return Err(invalid(progress.reason.clone().unwrap()));
+        }
+        let archive = paths.root.join(format!(
+            ".macc/state/prd-queue-registry-{}.json",
+            progress.next
+        ));
+        crate::atomic_write(
+            paths,
+            &archive,
+            &serde_json::to_vec_pretty(&snapshot.registry).map_err(|e| invalid(e.to_string()))?,
+        )?;
+        for task in &snapshot.registry.tasks {
+            if task.satisfies_dependants() {
+                snapshot
+                    .registry
+                    .external_merged_task_ids
+                    .insert(task.id.clone());
+            }
+        }
+        storage.save_snapshot(&snapshot)?;
+    }
+    Ok(())
+}
+
 pub async fn run(
+    root: &Path,
+    canonical: &crate::config::CanonicalConfig,
+    config: &crate::config::CoordinatorConfig,
+    env: &crate::coordinator::types::CoordinatorEnvConfig,
+    logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
+) -> Result<()> {
+    let result = run_queue(root, canonical, config, env, logger).await;
+    logging::finish(root, logger, &result);
+    result
+}
+
+async fn run_queue(
     root: &Path,
     canonical: &crate::config::CanonicalConfig,
     config: &crate::config::CoordinatorConfig,
@@ -312,45 +373,7 @@ pub async fn run(
             save(root, &progress)?;
             return Err(invalid(reason));
         }
-        // Preserve completed registry tasks for diagnostics before the next PRD sync replaces them.
-        if let Ok(mut snapshot) = storage.load_snapshot() {
-            let unsafe_tasks: Vec<_> = snapshot
-                .registry
-                .tasks
-                .iter()
-                .filter(|task| {
-                    !entry.task_ids.contains(&task.id)
-                        && !task.is_merged()
-                        && (task.state != "todo" || task.worktree.is_some())
-                })
-                .map(|task| task.id.clone())
-                .collect();
-            if !unsafe_tasks.is_empty() {
-                progress.status = "blocked".into();
-                progress.reason = Some(format!("Cannot replace registry with {}: unfinished work outside this PRD: {}. Resolve it before switching inputs.", entry.path, unsafe_tasks.join(", ")));
-                save(root, &progress)?;
-                return Err(invalid(progress.reason.clone().unwrap()));
-            }
-            let archive = root.join(format!(
-                ".macc/state/prd-queue-registry-{}.json",
-                progress.next
-            ));
-            crate::atomic_write(
-                &paths,
-                &archive,
-                &serde_json::to_vec_pretty(&snapshot.registry)
-                    .map_err(|e| invalid(e.to_string()))?,
-            )?;
-            for task in &snapshot.registry.tasks {
-                if task.is_merged() && task.gate_verdict_satisfies_dependencies() {
-                    snapshot
-                        .registry
-                        .external_merged_task_ids
-                        .insert(task.id.clone());
-                }
-            }
-            storage.save_snapshot(&snapshot)?;
-        }
+        prepare_registry_transition(&paths, &storage, &mut progress, &entry)?;
         progress.status = "running".into();
         progress.reason = None;
         save(root, &progress)?;
@@ -386,6 +409,7 @@ pub async fn run(
             Some(config),
             &current_env,
             logger,
+            false,
         )
         .await;
         let outcome = result.and_then(|_| {
@@ -594,6 +618,132 @@ mod tests {
         assert_eq!(incomplete_tasks(&entry, &registry), vec!["G"]);
         registry.tasks.clear();
         assert_eq!(incomplete_tasks(&entry, &registry), vec!["G"]);
+    }
+
+    #[test]
+    fn approved_human_gate_completes_the_prd_but_pending_and_negative_gates_do_not() {
+        use crate::coordinator::model::TaskRegistry;
+        let entry = Entry {
+            path: "fleet.json".into(),
+            fingerprint: String::new(),
+            task_ids: vec!["FLT-CR-001".into(), "FLT-APP-001".into()],
+        };
+        let mut registry = TaskRegistry::from_value(&serde_json::json!({"tasks":[
+            {"id":"FLT-CR-001","state":"merged"},
+            {"id":"FLT-APP-001","state":"approved","gate":{"kind":"human_approval"}}
+        ]}))
+        .unwrap();
+        assert!(incomplete_tasks(&entry, &registry).is_empty());
+        for state in ["waiting_approval", "rejected", "expired", "todo", "blocked"] {
+            registry.tasks[1].state = state.into();
+            assert_eq!(
+                incomplete_tasks(&entry, &registry),
+                vec!["FLT-APP-001"],
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_prds_archives_approved_gates_and_preserves_their_dependencies() {
+        use crate::coordinator::model::TaskRegistry;
+        use crate::coordinator_storage::{
+            CoordinatorStorage, CoordinatorStoragePaths, SqliteStorage,
+        };
+        use std::collections::BTreeMap;
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::ProjectPaths::from_root(root.path());
+        let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        let original = serde_json::json!({"tasks":[
+            {"id":"CONTRACT","state":"merged"},
+            {"id":"APPROVAL","state":"approved","gate":{"kind":"human_approval"}}
+        ]});
+        crate::coordinator::state::coordinator_state_registry_save(
+            root.path(),
+            &BTreeMap::new(),
+            &original,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("next.json"),
+            r#"{"tasks":[{"id":"NEXT","dependencies":["APPROVAL"]}]}"#,
+        )
+        .unwrap();
+        let entry = Entry {
+            path: "next.json".into(),
+            fingerprint: String::new(),
+            task_ids: vec!["NEXT".into()],
+        };
+        let mut progress = Progress {
+            next: 1,
+            ..Default::default()
+        };
+        prepare_registry_transition(&paths, &storage, &mut progress, &entry).unwrap();
+        let archive: TaskRegistry = serde_json::from_slice(
+            &std::fs::read(root.path().join(".macc/state/prd-queue-registry-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(archive.find_task("APPROVAL").unwrap().state, "approved");
+        let registry = storage.load_snapshot().unwrap().registry;
+        assert!(registry.external_merged_task_ids.contains("CONTRACT"));
+        assert!(registry.external_merged_task_ids.contains("APPROVAL"));
+        // Sync the next PRD without relying on the queue cursor fallback: the
+        // approved gate must survive through the persisted dependency set.
+        crate::coordinator::control_plane::sync_registry_from_prd_native(
+            root.path(),
+            &root.path().join("next.json"),
+            None,
+        )
+        .unwrap();
+        let registry = storage.load_snapshot().unwrap().registry;
+        assert_eq!(registry.tasks.len(), 1);
+        assert!(registry.external_merged_task_ids.contains("APPROVAL"));
+
+        for (state, gate, verdict) in [
+            (
+                "waiting_approval",
+                serde_json::json!({"kind":"human_approval"}),
+                serde_json::Value::Null,
+            ),
+            (
+                "rejected",
+                serde_json::json!({"kind":"human_approval"}),
+                serde_json::Value::Null,
+            ),
+            (
+                "expired",
+                serde_json::json!({"kind":"human_approval"}),
+                serde_json::Value::Null,
+            ),
+            (
+                "merged",
+                serde_json::json!({}),
+                serde_json::json!("rejected"),
+            ),
+        ] {
+            let blocked = serde_json::json!({"tasks":[{"id":"GATE","state":state,"gate":gate,"task_runtime":{"gate_verdict":verdict}}]});
+            crate::coordinator::state::coordinator_state_registry_save(
+                root.path(),
+                &BTreeMap::new(),
+                &blocked,
+            )
+            .unwrap();
+            let error =
+                prepare_registry_transition(&paths, &storage, &mut progress, &entry).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("unfinished work outside this PRD: GATE"),
+                "{state}: {error}"
+            );
+            assert_eq!(load(root.path()).unwrap().status, "blocked");
+            assert!(!storage
+                .load_snapshot()
+                .unwrap()
+                .registry
+                .external_merged_task_ids
+                .contains("GATE"));
+        }
     }
 
     #[test]
