@@ -25,9 +25,14 @@ pub fn run(app: &AppContext, command: &ConfigCommand) -> Result<()> {
             for f in settings::FIELDS {
                 println!("{}: {}", f.key, f.help);
             }
+            if config.validation_commands.is_empty() {
+                println!(
+                    "Tests disabled: validation_commands is empty. Add a command to enable tests."
+                );
+            }
         }
         ConfigCommand::Set { key, value } => {
-            macc_core::config::transaction::update(&paths, None, |canonical| {
+            let saved = macc_core::config::transaction::update(&paths, None, |canonical| {
                 let config = canonical
                     .automation
                     .supervisor
@@ -35,6 +40,16 @@ pub fn run(app: &AppContext, command: &ConfigCommand) -> Result<()> {
                 settings::set(config, key, value)
             })?;
             println!("Saved automation.supervisor.{key}");
+            if key == "validation_commands" {
+                println!(
+                    "Supervisor tests_enabled={}",
+                    saved
+                        .automation
+                        .supervisor
+                        .unwrap_or_default()
+                        .tests_enabled
+                );
+            }
         }
         ConfigCommand::Check => {
             config.validate()?;
@@ -43,6 +58,16 @@ pub fn run(app: &AppContext, command: &ConfigCommand) -> Result<()> {
             println!("AI tool: {tool}");
             if config.repair_enabled {
                 let commands = validation::commands(&paths.root, &config)?;
+                if !config.tests_enabled {
+                    println!(
+                        "Tests disabled; {}",
+                        if config.validation_commands.is_empty() {
+                            "validation_commands is empty. Add a command to enable tests."
+                        } else {
+                            "configured commands are retained."
+                        }
+                    );
+                }
                 for command in commands {
                     println!("Check: {command}");
                 }

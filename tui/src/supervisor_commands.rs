@@ -118,8 +118,7 @@ impl AppState {
         ];
         if editor.commands.is_empty() {
             lines.push(
-                "Empty list: discover the root test workflow. Press a to add a subproject command."
-                    .into(),
+                "Empty list: tests are disabled. Press a to add a command and enable tests.".into(),
             );
         }
         for (i, command) in editor.commands.iter().enumerate() {
@@ -155,6 +154,17 @@ mod tests {
         state.supervisor_commands_key(KeyCode::Enter);
         state.supervisor_commands_key(KeyCode::Char('s'));
         assert!(!state.supervisor_commands_active());
+        assert!(
+            state
+                .working_copy
+                .as_ref()
+                .unwrap()
+                .automation
+                .supervisor
+                .as_ref()
+                .unwrap()
+                .tests_enabled
+        );
         assert_eq!(
             state
                 .working_copy
@@ -183,5 +193,19 @@ mod tests {
                 .len(),
             1
         );
+        state.open_supervisor_commands();
+        state.supervisor_commands_key(KeyCode::Char('d'));
+        state.supervisor_commands_key(KeyCode::Char('s'));
+        let config = state
+            .working_copy
+            .as_ref()
+            .unwrap()
+            .automation
+            .supervisor
+            .as_ref()
+            .unwrap();
+        assert!(!config.tests_enabled);
+        assert!(config.validation_commands.is_empty());
+        assert!(config.ai_verification_enabled);
     }
 }

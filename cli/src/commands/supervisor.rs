@@ -59,6 +59,9 @@ impl<'a> SupervisorCommand<'a> {
         let canonical = self.app.canonical_config()?;
         let settings = canonical.automation.supervisor.clone().unwrap_or_default();
         settings.validate()?;
+        if settings.validation_commands.is_empty() {
+            eprintln!("Supervisor tests disabled: validation_commands is empty. Add at least one validation command to enable tests; AI verification keeps its configured setting.");
+        }
         if settings.repair_enabled {
             if let Err(error) = macc_core::supervisor::validation::commands(&paths.root, &settings)
             {

@@ -100,7 +100,9 @@ impl AppState {
                     return "Diagnosis only; automatic repair disabled".into();
                 }
                 match macc_core::supervisor::validation::commands(&p.root, &config) {
-                    Ok(commands) if commands.is_empty() => "Tests disabled".into(),
+                    Ok(commands) if commands.is_empty() => if config.validation_commands.is_empty() {
+                        "Tests disabled: validation_commands is empty. Add a command to enable tests.".into()
+                    } else { "Tests disabled".into() },
                     Ok(commands) => format!("Checks (not executed):\n{}", commands.join("\n")),
                     Err(error) => format!("Repair not ready: {error}"),
                 }
@@ -135,7 +137,15 @@ impl AppState {
         if let Some(error) = warning {
             self.set_status(UiStatusLevel::Warning, format!("Draft updated; repair not ready: {error}. Configure Validation commands, then save."), None);
         } else {
-            self.set_status(UiStatusLevel::Info, "Supervisor draft updated. Save configuration to apply; active interventions keep their current settings.", Some(Duration::from_secs(5)));
+            let message = if field.key == "validation_commands" {
+                format!(
+                    "Validation commands updated; tests_enabled={}. Save configuration to apply.",
+                    config.tests_enabled
+                )
+            } else {
+                "Supervisor draft updated. Save configuration to apply; active interventions keep their current settings.".into()
+            };
+            self.set_status(UiStatusLevel::Info, message, Some(Duration::from_secs(5)));
         }
         true
     }
@@ -181,6 +191,7 @@ mod tests {
         assert_eq!(AppState::config_tab_fields(6).len(), settings::FIELDS.len());
         state.toggle_current_config_field();
         assert_eq!(state.supervisor_config().tool.as_deref(), Some("fake"));
+        let edits_before_rejected_toggle = state.undo_stack.len();
         let tests_index = settings::FIELDS
             .iter()
             .position(|f| f.key == "tests_enabled")
@@ -188,6 +199,11 @@ mod tests {
         state.config_view_index = tests_index;
         state.toggle_current_config_field();
         assert!(!state.supervisor_config().tests_enabled);
+        assert_eq!(state.undo_stack.len(), edits_before_rejected_toggle);
+        assert!(state
+            .ui_status
+            .as_ref()
+            .is_some_and(|status| status.message.contains("validation command")));
         let rounds_index = settings::FIELDS
             .iter()
             .position(|f| f.key == "max_repair_rounds")
@@ -205,6 +221,8 @@ mod tests {
         state.commit_config_edit();
         assert!(!state.settings_field_editing);
         assert_eq!(state.supervisor_config().max_repair_rounds, 2);
-        assert_eq!(state.undo_stack.len(), 3);
+        assert_eq!(state.undo_stack.len(), edits_before_rejected_toggle + 1);
+        state.undo_config_change();
+        assert_eq!(state.supervisor_config().max_repair_rounds, 3);
     }
 }

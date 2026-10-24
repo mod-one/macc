@@ -240,6 +240,9 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
             time.to_rfc3339()
         )
     } else if report.detail.contains("requires validation_commands")
+        || report
+            .detail
+            .contains("Tests cannot be enabled without validation_commands")
         || report.detail.contains("No project validation scripts")
         || report.detail.contains("requires a test command")
     {

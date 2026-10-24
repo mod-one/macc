@@ -22,10 +22,10 @@ fields![
     ("model", "Model override", "optional", "Empty: inherit the selected tool model."),
     ("effort", "Effort override", "optional", "Empty: inherit the selected tool effort. Use a value supported by that tool."),
     ("repair_enabled", "Automatic repair", "bool", "Off: diagnose only; keep the incident waiting without editing source."),
-    ("tests_enabled", "Tests and checks", "bool", "Off: skip command detection and execution; integration may proceed without test evidence."),
+    ("tests_enabled", "Tests and checks", "bool", "Adding validation commands enables tests; clearing them disables tests. Enabling tests manually requires at least one command. Off: integration may proceed without test evidence."),
     ("ai_verification_enabled", "AI verification", "bool", "Off: skip the separate AI review; integration relies on the remaining enabled checks."),
     ("auto_restart", "Automatic restart", "bool", "Off: integrate a successful repair and requeue tasks, but leave the coordinator stopped. Also disables restart-only recovery."),
-    ("validation_commands", "Validation commands", "commands", "Commands run from the isolated worktree root. Use relative subproject paths. Empty: detect root workflow. TUI: separate commands with ;; ."),
+    ("validation_commands", "Validation commands", "commands", "Commands run from the isolated worktree root. Adding commands enables tests; an empty list disables tests. Use relative subproject paths. TUI: separate commands with ;; ."),
     ("intervention_timeout_seconds", "AI call timeout (seconds)", "number", "Positive timeout per AI invocation."),
     ("validation_timeout_seconds", "Check timeout (seconds)", "number", "Positive timeout per validation command."),
     ("max_repair_rounds", "Repair rounds", "number", "Maximum repair/check/review rounds per attempt; at least 1."),
@@ -36,6 +36,8 @@ fields![
     ("crash_debounce_checks", "Legacy crash debounce", "number", "Compatibility setting for legacy supervisors; unused by the canonical incident loop."),
     ("events_log_path", "Legacy events path", "path", "Compatibility path; unused by the canonical SQLite incident loop."),
 ];
+
+pub const MISSING_TEST_COMMANDS: &str = "Tests cannot be enabled without validation_commands. Add at least one validation command, or leave tests_enabled=false.";
 
 impl SupervisorConfig {
     pub fn validate(&self) -> Result<()> {
@@ -95,9 +97,17 @@ pub fn merge(config: &mut SupervisorConfig, patch: &Value) -> Result<()> {
         }
         draft[key] = value.clone();
     }
+    if object.contains_key("validation_commands") && !object.contains_key("tests_enabled") {
+        if let Some(commands) = draft["validation_commands"].as_array() {
+            draft["tests_enabled"] = json!(!commands.is_empty());
+        }
+    }
     let next: SupervisorConfig = serde_json::from_value(draft)
         .map_err(|e| MaccError::Validation(format!("Invalid supervisor settings: {e}")))?;
     next.validate()?;
+    if object.get("tests_enabled") == Some(&json!(true)) && next.validation_commands.is_empty() {
+        return Err(MaccError::Validation(MISSING_TEST_COMMANDS.into()));
+    }
     *config = next;
     Ok(())
 }
@@ -125,22 +135,34 @@ pub fn set(config: &mut SupervisorConfig, key: &str, input: &str) -> Result<()> 
         }),
         _ => json!(input),
     };
-    let mut draft = serde_json::to_value(&*config).map_err(|_| error())?;
-    draft[key] = value;
-    let next: SupervisorConfig = serde_json::from_value(draft).map_err(|_| error())?;
-    next.validate()?;
-    *config = next;
-    Ok(())
+    merge(config, &json!({(key): value}))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn old_configs_keep_checks_enabled() {
+    fn old_configs_infer_tests_from_commands_and_preserve_explicit_choices() {
         let c: SupervisorConfig = serde_json::from_str("{}").unwrap();
-        assert!(c.tests_enabled && c.ai_verification_enabled && c.repair_enabled && c.auto_restart);
+        assert!(!c.tests_enabled);
+        assert!(c.ai_verification_enabled && c.repair_enabled && c.auto_restart);
         c.validate().unwrap();
+        let c: SupervisorConfig =
+            serde_yaml::from_str("validation_commands: ['npm test']").unwrap();
+        assert!(c.tests_enabled);
+        let c: SupervisorConfig =
+            serde_yaml::from_str("validation_commands: ['npm test']\ntests_enabled: false")
+                .unwrap();
+        assert!(!c.tests_enabled);
+        assert_eq!(
+            c,
+            serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap()
+        );
+        let c: SupervisorConfig = serde_yaml::from_str("tests_enabled: true").unwrap();
+        assert!(!c.tests_enabled);
+        assert!(super::super::validation::commands(Path::new("."), &c)
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn editing_is_atomic_and_supports_subprojects() {
@@ -164,5 +186,32 @@ mod tests {
         }
         set(&mut c, "tool", "").unwrap();
         assert_eq!(c.tool, None);
+    }
+
+    #[test]
+    fn command_edits_toggle_tests_and_manual_activation_requires_commands() {
+        let mut c = SupervisorConfig::default();
+        let before = c.clone();
+        let message = set(&mut c, "tests_enabled", "true")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("Add at least one validation command"));
+        assert_eq!(c, before);
+        set(&mut c, "validation_commands", "npm test").unwrap();
+        assert!(c.tests_enabled);
+        set(&mut c, "tests_enabled", "false").unwrap();
+        assert!(!c.tests_enabled);
+        merge(&mut c, &json!({"validation_commands":["npm run check"]})).unwrap();
+        assert!(c.tests_enabled);
+        merge(&mut c, &json!({"validation_commands":[]})).unwrap();
+        assert!(!c.tests_enabled);
+        let before = c.clone();
+        assert!(merge(
+            &mut c,
+            &json!({"tests_enabled":true,"validation_commands":[]})
+        )
+        .is_err());
+        assert_eq!(c, before);
+        assert!(c.ai_verification_enabled && c.repair_enabled && c.auto_restart);
     }
 }

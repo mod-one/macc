@@ -36,6 +36,9 @@ pub mod validation;
 
 /// Configuration for the supervisor watchdog process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// Generate the wire codec once; the trait implementation below supplies the
+// command-dependent default without duplicating this configuration schema.
+#[serde(remote = "SupervisorConfig")]
 pub struct SupervisorConfig {
     /// Tool selection falls back to the coordinator tool, then the first enabled tool.
     #[serde(default)]
@@ -54,7 +57,7 @@ pub struct SupervisorConfig {
     #[serde(default = "default_enabled")]
     pub repair_enabled: bool,
     /// Run project tests/checks before integration.
-    #[serde(default = "default_enabled")]
+    #[serde(default)]
     pub tests_enabled: bool,
     /// Review the repair with a separate AI invocation before integration.
     #[serde(default = "default_enabled")]
@@ -65,7 +68,7 @@ pub struct SupervisorConfig {
     /// Maximum duration of each validation command, separately from AI calls.
     #[serde(default = "default_intervention_timeout")]
     pub validation_timeout_seconds: u64,
-    /// Explicit validation commands; otherwise the project validation workflow is detected.
+    /// Explicit validation commands. An empty list disables automatic tests.
     #[serde(default)]
     pub validation_commands: Vec<String>,
     /// How often the supervisor checks coordinator health (seconds).
@@ -91,6 +94,38 @@ pub struct SupervisorConfig {
     /// Path to the coordinator events log file to tail.
     #[serde(default = "default_events_log_path")]
     pub events_log_path: PathBuf,
+}
+
+impl serde::Serialize for SupervisorConfig {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SupervisorConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(fields) = value.as_object_mut() {
+            let enabled = fields
+                .get("validation_commands")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|commands| !commands.is_empty());
+            let invalid_activation = fields
+                .get("tests_enabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && !enabled;
+            if !fields.contains_key("tests_enabled") || invalid_activation {
+                fields.insert("tests_enabled".into(), serde_json::json!(enabled));
+            }
+        }
+        Self::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }
 
 fn default_enabled() -> bool {
@@ -130,7 +165,7 @@ impl Default for SupervisorConfig {
             intervention_timeout_seconds: default_intervention_timeout(),
             max_repair_rounds: default_max_repair_rounds(),
             repair_enabled: true,
-            tests_enabled: true,
+            tests_enabled: false,
             ai_verification_enabled: true,
             auto_restart: true,
             validation_timeout_seconds: default_intervention_timeout(),

@@ -164,9 +164,13 @@ automation:
     report_output_path: .macc/log/supervisor/report.json
 ```
 
-When validation commands are omitted, the supervisor detects `make check`, Rust
-workspace tests, or supported package scripts including a test command. Projects
-without a detectable test workflow require explicit validation commands.
+When validation commands are omitted or empty, supervisor tests are disabled.
+Adding commands through CLI, TUI or Web enables tests automatically; clearing the
+list disables them. A manual activation without commands is rejected with a
+message explaining how to add them. Legacy YAML with `tests_enabled: true` and
+no commands loads with tests disabled; supervisor startup and configuration
+readiness explain that commands are missing, so missing test
+configuration does not block repairs. Other supervisor checks remain enabled.
 `log_analysis_window_seconds` also sets the stalled-tick threshold (minimum 30s).
 Legacy `events_log_path` and `crash_debounce_checks` do not control the new
 canonical incident loop; JSON-only registry compatibility remains supported.
@@ -206,14 +210,15 @@ deterministic AI tool double. They do not call paid AI services. Run
 ## Configure from CLI, TUI or Web
 
 All clients persist the same `automation.supervisor` contract in `.macc/macc.yaml`.
-Existing configurations keep automatic repair, tests, AI verification and restart
-**enabled**. These settings are independent from coordinator phase overrides.
+Automatic repair, AI verification and restart default to **enabled**. Tests default
+to **disabled** without commands and **enabled** when commands are present unless
+explicitly disabled. These settings are independent from coordinator phase overrides.
 
 - **CLI:** `macc supervisor config show` lists effective values and field help.
   `macc supervisor config set <field> <value>` updates one field transactionally;
   unknown fields and invalid values are rejected without changing the file.
   `macc supervisor config check` checks the configuration, resolves its ToolSpec
-  and discovers validation commands without executing tests or calling AI.
+  and inspects configured validation commands without executing tests or calling AI.
 - **TUI:** Configuration → **Supervisor** (tab **7**). Enter/Space toggles
   booleans and cycles enabled tools. Left/Right adjusts positive numeric values.
   Use `e` for exact text entry, confirm with Enter, cancel with Esc. Optional overrides
@@ -224,7 +229,7 @@ Existing configurations keep automatic repair, tests, AI verification and restar
 - **Web:** Settings → **Supervisor**. Tool selection, independent phase toggles,
   numeric bounds, model/effort suggestions from tool descriptors, and command
   rows with add/remove/reorder avoid editing YAML. Empty command rows prevent
-  saving. The last saved readiness lists detected checks or missing configuration.
+  saving. The last saved readiness lists configured checks or missing configuration.
 
 ```bash
 macc supervisor config set tool codex
@@ -239,15 +244,15 @@ manager and scripts in your repository. Commands run sequentially with `sh -c`
 from the **isolated repair worktree root**, not the operator checkout. Use
 relative paths to subprojects; an absolute path to the operator checkout would
 validate different source. Dependencies and external test services must be
-available in the repair environment. An empty command list requests root-only
-discovery; the supervisor does not recursively guess monorepo test workflows.
+available in the repair environment. An empty command list disables tests; MACC
+does not automatically substitute a root workflow for the configured list.
 
 ### Repair policy switches
 
 | Setting | Default | Effect when disabled |
 | --- | --- | --- |
 | `repair_enabled` | `true` | Diagnose and wait without editing or integrating source. Restart-only recovery is governed separately by `auto_restart`. |
-| `tests_enabled` | `true` | Skip validation discovery and execution; configured commands remain saved. |
+| `tests_enabled` | Commands present: `true`; empty: `false` | Skip command execution; configured commands remain saved. Editing commands enables tests again. |
 | `ai_verification_enabled` | `true` | Skip the separate AI verification invocation. |
 | `auto_restart` | `true` | A successful repair is committed, integrated and requeued, but the coordinator stays stopped; restart-only recovery waits. |
 
@@ -286,7 +291,7 @@ macc supervisor start --daemon --retry
 
 The core supervisor settings catalogue owns field names, types, help and bounds;
 CLI and TUI editors use it directly, and the Web API publishes the same metadata.
-Validation discovery also lives in core so readiness and runtime agree. The Web
+Validation command readiness also lives in core so readiness and runtime agree. The Web
 API accepts a partial `supervisor` object and merges it transactionally; unrelated
 coordinator settings and omitted supervisor fields are preserved. Runtime phase
 policy stays in the supervisor recovery module; AI execution continues to use

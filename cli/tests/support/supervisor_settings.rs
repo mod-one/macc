@@ -32,35 +32,20 @@ fn checks_can_be_disabled_and_repair_integrated_without_restarting() {
 }
 
 #[test]
-fn missing_checks_wait_then_reuse_diagnosis_after_configuration() {
+fn missing_commands_disable_tests_and_do_not_block_repairs() {
     let temp = fixture(false);
     let root = temp.path();
     edit_config(
         root,
         "    validation_commands:\n      - \"test $(cat defect.txt) = fixed\"",
-        "    auto_restart: false",
+        "    auto_restart: false\n    tests_enabled: true",
     );
     let supervisor = start(root);
-    let first = settled(root, "escalated");
-    assert!(first["intervention"]["detail"]
-        .as_str()
-        .unwrap()
-        .contains("requires validation_commands"));
-    assert!(first["intervention"]["next_action"]
-        .as_str()
-        .unwrap()
-        .contains("supervisor config check"));
-    let first_dir = first["intervention"]["log_dir"].as_str().unwrap();
-    assert!(!Path::new(first_dir).join("repair-prompt.txt").exists());
-    edit_config(root, "    auto_restart: false", "    auto_restart: false\n    validation_commands:\n      - \"test $(cat defect.txt) = fixed\"");
     let r = settled(root, "repair_integrated");
-    assert!(r["intervention"]["attempt"].as_u64().unwrap() > 1);
+    assert_eq!(r["phase_policy"]["tests_enabled"], false);
     let dir = Path::new(r["intervention"]["log_dir"].as_str().unwrap());
     assert!(dir.join("repair-prompt.txt").exists());
-    assert!(
-        !dir.join("diagnosis-prompt.txt").exists(),
-        "settings-only retry must reuse the diagnostic"
-    );
+    assert!(!dir.join("validation-0.log").exists());
     assert!(dir.join("verification-prompt.txt").exists());
     drop(supervisor);
 }
@@ -125,6 +110,26 @@ fn cli_settings_roundtrip_rejects_invalid_edits_atomically() {
     assert!(run(&["set", "tests_enabled", "false"]).status.success());
     let path = root.join(".macc/macc.yaml");
     let before = std::fs::read_to_string(&path).unwrap();
+    assert!(run(&["set", "validation_commands", "[]"]).status.success());
+    let before_empty = std::fs::read_to_string(&path).unwrap();
+    let invalid = run(&["set", "tests_enabled", "true"]);
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("Add at least one validation command")
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before_empty);
+    assert!(run(&["set", "validation_commands", "[\"npm test\"]"])
+        .status
+        .success());
+    assert!(
+        macc_core::load_canonical_config(&path)
+            .unwrap()
+            .automation
+            .supervisor
+            .unwrap()
+            .tests_enabled
+    );
+    std::fs::write(&path, &before).unwrap();
     assert!(!run(&["set", "max_repair_rounds", "0"]).status.success());
     assert!(!run(&["set", "typo", "true"]).status.success());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -161,7 +166,7 @@ fn tests_can_be_disabled_while_ai_verification_still_runs() {
     assert!(dir.join("verification-prompt.txt").exists());
     assert!(std::fs::read_to_string(dir.join("verification-prompt.txt"))
         .unwrap()
-        .contains("validation was explicitly disabled"));
+        .contains("validation is disabled by supervisor settings"));
     drop(supervisor);
 }
 

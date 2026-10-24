@@ -6,7 +6,7 @@ import SupervisorSettings from './SupervisorSettings';
 import { supervisorErrors } from './supervisorValidation';
 vi.mock('../../api/client', () => ({ getToolDescriptors: vi.fn().mockResolvedValue([{ id: 'fake', fields: [{ id: 'model', kind: { type: 'enum', options: ['small', 'large'] } }] }]) }));
 const config: SupervisorConfig = {
-  tool: null, model: null, effort: null, repair_enabled: true, tests_enabled: true,
+  tool: null, model: null, effort: null, repair_enabled: true, tests_enabled: false,
   ai_verification_enabled: true, auto_restart: true, validation_commands: [],
   intervention_timeout_seconds: 3600, validation_timeout_seconds: 3600, max_repair_rounds: 3,
   max_restart_attempts: 3, watchdog_interval_seconds: 30, log_analysis_window_seconds: 300,
@@ -30,6 +30,7 @@ describe('Supervisor settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add validation command' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Remove or fill empty validation commands');
     fireEvent.change(screen.getByLabelText('Validation command 1'), { target: { value: 'cd web && npm test' } });
+    expect(screen.getByLabelText('Tests and checks')).toBeChecked();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Tests and checks'));
     expect(screen.getByLabelText('Validation command 1')).toBeEnabled();
@@ -41,5 +42,19 @@ describe('Supervisor settings', () => {
   it('rejects invalid bounds and paths without accepting empty commands', () => {
     expect(supervisorErrors({ ...config, max_repair_rounds: 0, report_output_path: '../outside.json', validation_commands: [''] })).toHaveLength(3);
     expect(supervisorErrors(config)).toEqual([]);
+  });
+  it('explains manual activation without commands and disables tests when the list is cleared', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getByText(/Effective tool: fake/)).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText('Tests and checks'));
+    expect(screen.getByRole('alert')).toHaveTextContent('Add at least one validation command');
+    fireEvent.click(screen.getByRole('button', { name: 'Add validation command' }));
+    fireEvent.change(screen.getByLabelText('Validation command 1'), { target: { value: 'npm test' } });
+    expect(screen.getByLabelText('Tests and checks')).toBeChecked();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove validation command 1' }));
+    expect(screen.getByLabelText('Tests and checks')).not.toBeChecked();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('AI verification')).toBeChecked();
   });
 });

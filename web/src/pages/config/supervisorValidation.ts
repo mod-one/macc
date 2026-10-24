@@ -8,6 +8,7 @@ export function supervisorErrors(config?: SupervisorConfig): string[] {
     if (key.endsWith('_path') && typeof value === 'string' && (!value.trim() || value.split('/').includes('..'))) errors.push(`${key} must name a file without parent traversal`);
   }
   if (config.validation_commands.some(c => !c.trim())) errors.push('Remove or fill empty validation commands');
+  if (config.tests_enabled && !config.validation_commands.some(c => c.trim())) errors.push('Tests cannot be enabled without validation_commands. Add at least one validation command, or leave tests disabled.');
   return errors;
 }
 

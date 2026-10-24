@@ -316,7 +316,7 @@ async fn repair_round(
         )));
     }
     let baseline_note = if !progress.config.tests_enabled {
-        " Project validation was explicitly disabled by the operator; no validation logs are expected. Review the source and regression tests without claiming commands ran.".to_string()
+        " Project validation is disabled by supervisor settings (including an empty validation command list); no validation logs are expected. Review the source and regression tests without claiming commands ran.".to_string()
     } else if preexisting.is_empty() {
         String::new()
     } else {
@@ -480,15 +480,19 @@ mod tests {
             r#"{"scripts":{"lint":"lint"}}"#,
         )
         .unwrap();
-        assert!(validation_commands(d.path(), &SupervisorConfig::default()).is_err());
+        let config = SupervisorConfig {
+            tests_enabled: true,
+            ..Default::default()
+        };
+        assert!(validation_commands(d.path(), &config).is_err());
     }
     #[test]
-    fn detects_rust_validation() {
+    fn empty_commands_disable_tests_even_for_rust_projects() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("Cargo.toml"), "").unwrap();
         assert_eq!(
             validation_commands(d.path(), &SupervisorConfig::default()).unwrap(),
-            vec!["cargo test --workspace --locked"]
+            Vec::<String>::new()
         );
     }
 }

@@ -20,7 +20,11 @@ export default function SupervisorSettings({ draft, update }: {
   }, []);
   const config = draft.supervisor;
   if (!config) return <p>Supervisor configuration is unavailable. Reload with a current MACC server.</p>;
-  const set = (patch: Partial<SupervisorConfig>) => update({ supervisor: { ...config, ...patch } });
+  const set = (patch: Partial<SupervisorConfig>) => update({ supervisor: {
+    ...config,
+    ...patch,
+    ...(patch.validation_commands ? { tests_enabled: patch.validation_commands.some(c => c.trim().length > 0) } : {}),
+  } });
   const issues = supervisorErrors(config);
   const selectedTool = config.tool ?? draft.coordinatorTool ?? draft.enabledTools[0];
   const descriptor = tools.find(t => t.id === selectedTool);
@@ -52,9 +56,9 @@ export default function SupervisorSettings({ draft, update }: {
       </div>;
     })}
     <fieldset>
-      {!config.tests_enabled && <p>Commands stay editable for later use; they will not run while tests are disabled.</p>}
+      {!config.tests_enabled && <p>Tests are disabled. Enter a validation command to enable them automatically.</p>}
       <legend>Validation commands</legend>
-      <p>Run from the isolated worktree root. Use relative subproject paths, for example: cd web &amp;&amp; npm test. An empty list enables root workflow detection.</p>
+      <p>Run from the isolated worktree root. Use relative subproject paths, for example: cd web &amp;&amp; npm test. Adding commands enables tests; removing all commands disables them.</p>
       {config.validation_commands.map((command, index) => <div key={index} style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
         <input aria-label={`Validation command ${index + 1}`} style={inputStyle} value={command} onChange={e => set({ validation_commands: config.validation_commands.map((c, i) => i === index ? e.target.value : c) })} />
         <button type="button" aria-label={`Remove validation command ${index + 1}`} onClick={() => set({ validation_commands: config.validation_commands.filter((_, i) => i !== index) })}>Remove</button>
@@ -68,7 +72,7 @@ export default function SupervisorSettings({ draft, update }: {
     </fieldset>
     <details><summary>Last saved readiness (commands are not executed)</summary>
       <ul>{(draft.supervisorReadiness ?? []).map(message => <li key={message}>{message}</li>)}</ul>
-      <p>Save to refresh discovery. CLI: macc supervisor config check</p>
+      <p>Save to refresh readiness. CLI: macc supervisor config check</p>
     </details>
   </section>;
 }
