@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "type": "skills",
-  "updated_at": "2026-06-01",
+  "updated_at": "2026-10-25",
   "entries": [
     {
       "id": "macc-reviewer",
@@ -84,7 +84,7 @@
       "mandatory": true
     },
     {
-      "id": "dfigma-implement-designc",
+      "id": "figma-implement-design",
       "name": "figma implement design",
       "description": "This skill provides a structured workflow for translating Figma designs into production-ready code with pixel-perfect accuracy.",
       "tags": [
@@ -92,7 +92,7 @@
         "figma"
       ],
       "selector": {
-        "subpath": "skills/.curated/dfigma-implement-designc"
+        "subpath": "skills/.curated/figma-implement-design"
       },
       "source": {
         "kind": "git",
@@ -130,25 +130,6 @@
       ],
       "selector": {
         "subpath": "skills/.curated/figma"
-      },
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/openai/skills.git",
-        "ref": "main",
-        "checksum": null
-      }
-    },
-    {
-      "id": "fdevelop-web-gamea",
-      "name": "develop web game",
-      "description": "Build games in small steps and validate every change. Treat each iteration as: implement \u2192 act \u2192 pause \u2192 observe \u2192 adjust.",
-      "tags": [
-        "develop",
-        "web",
-        "game"
-      ],
-      "selector": {
-        "subpath": "skills/.curated/fdevelop-web-gamea"
       },
       "source": {
         "kind": "git",
@@ -198,19 +179,21 @@
       }
     },
     {
-      "id": "python-expert",
-      "name": "python expert",
-      "description": "Senior Python developer expertise for writing clean, efficient, and well-documented code.",
+      "id": "python-pro",
+      "name": "python pro",
+      "description": "Master Python 3.12+ with modern features, async programming, performance optimization, and production-ready practices using uv, ruff, pydantic, and FastAPI.",
       "tags": [
-        "Python",
-        "expert"
+        "python",
+        "expert",
+        "backend",
+        "async"
       ],
       "selector": {
-        "subpath": "awesome_agent_skills/python-expert"
+        "subpath": "cli-tool/components/skills/development/python-pro"
       },
       "source": {
         "kind": "git",
-        "url": "https://github.com/Shubhamsaboo/awesome-llm-apps.git",
+        "url": "https://github.com/davila7/claude-code-templates.git",
         "ref": "main",
         "checksum": null
       }
@@ -376,54 +359,24 @@
       }
     },
     {
-      "id": "fullstack-developer",
-      "name": "Full-Stack Developer",
-      "description": "Provides comprehensive expertise in modern full-stack web development, covering frontend frameworks like React and Next.js, backend services with Node.js, and database management with PostgreSQL or MongoDB.",
+      "id": "senior-fullstack",
+      "name": "Senior Full-Stack Developer",
+      "description": "Comprehensive fullstack development skill for building complete web applications with React, Next.js, Node.js, GraphQL, and PostgreSQL.",
       "tags": [
         "react",
         "node.js",
         "typescript",
         "next.js",
-        "full-stack",
-        "web-development",
-        "api-design",
-        "postgresql",
-        "mongodb",
-        "prisma",
-        "tailwind-css"
+        "fullstack",
+        "graphql",
+        "postgresql"
       ],
       "selector": {
-        "subpath": "awesome_agent_skills/fullstack-developer"
+        "subpath": "cli-tool/components/skills/development/senior-fullstack"
       },
       "source": {
         "kind": "git",
-        "url": "https://github.com/Shubhamsaboo/awesome-llm-apps.git",
-        "ref": "main",
-        "checksum": null
-      }
-    },
-    {
-      "id": "neo-app-mode",
-      "name": "Neo App Mode",
-      "description": "Scaffolds production-ready full-stack applications with a React/Vite/Tailwind frontend and Node/Express/MongoDB backend using a structured requirement intake and MVC architecture.",
-      "tags": [
-        "full-stack",
-        "scaffolding",
-        "react",
-        "nodejs",
-        "express",
-        "mongodb",
-        "mvc",
-        "tailwind",
-        "vite",
-        "boilerplate"
-      ],
-      "selector": {
-        "subpath": "skills/chinmayagit/webappbuilder"
-      },
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/openclaw/skills.git",
+        "url": "https://github.com/davila7/claude-code-templates.git",
         "ref": "main",
         "checksum": null
       }
