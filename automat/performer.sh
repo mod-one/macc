@@ -1193,6 +1193,38 @@ run_tool() {
   return "$status"
 }
 
+get_active_model() {
+  local m=""
+  if [[ -f "$tool_json" ]]; then
+    if [[ -n "${MACC_MODEL_TIER:-}" && "${MACC_MODEL_ROUTING_MODE:-auto}" == "auto" ]]; then
+      m="$(jq -r --arg t "$MACC_MODEL_TIER" '.model_tiers[$t].model // empty' "$tool_json" 2>/dev/null || true)"
+    fi
+    if [[ -z "$m" ]]; then
+      m="$(jq -r '.model // empty' "$tool_json" 2>/dev/null || true)"
+    fi
+    if [[ -z "$m" ]]; then
+      m="$(jq -r '.defaults.model // empty' "$tool_json" 2>/dev/null || true)"
+    fi
+  fi
+  echo "$m"
+}
+
+get_active_effort() {
+  local e=""
+  if [[ -f "$tool_json" ]]; then
+    if [[ -n "${MACC_MODEL_TIER:-}" && "${MACC_MODEL_ROUTING_MODE:-auto}" == "auto" ]]; then
+      e="$(jq -r --arg t "$MACC_MODEL_TIER" '.model_tiers[$t].effort // empty' "$tool_json" 2>/dev/null || true)"
+    fi
+    if [[ -z "$e" ]]; then
+      e="$(jq -r '.effort // empty' "$tool_json" 2>/dev/null || true)"
+    fi
+    if [[ -z "$e" ]]; then
+      e="$(jq -r '.defaults.effort // empty' "$tool_json" 2>/dev/null || true)"
+    fi
+  fi
+  echo "$e"
+}
+
 commit_changes() {
   local last_id="$1"
   local last_title="$2"
@@ -1230,6 +1262,27 @@ commit_changes() {
     if [[ -n "$tool" ]]; then
       trailer="${trailer}
 [macc:tool ${tool}]"
+    fi
+    local model
+    model="$(get_active_model)"
+    if [[ -n "$model" ]]; then
+      trailer="${trailer}
+[macc:model ${model}]"
+    fi
+    local effort
+    effort="$(get_active_effort)"
+    if [[ -n "$effort" ]]; then
+      trailer="${trailer}
+[macc:effort ${effort}]"
+    fi
+    if [[ -z "$task_duration_seconds" && -n "$task_start_seconds" ]]; then
+      local now_sec
+      now_sec="$(date +%s)"
+      task_duration_seconds=$(( now_sec - task_start_seconds ))
+    fi
+    if [[ -n "$task_duration_seconds" ]]; then
+      trailer="${trailer}
+[macc:duration ${task_duration_seconds}s]"
     fi
     if ! git_commit_output="$(git commit -m "$subject" -m "" -m "$trailer" 2>&1)"; then
       git_commit_output="${git_commit_output//$'\n'/ }"
@@ -1320,6 +1373,8 @@ fi
 
 last_id=""
 last_title=""
+task_start_seconds=""
+task_duration_seconds=""
 task_log_file="$(task_log_path "$task_id")"
 log_task_header_if_needed "$task_log_file" "$task_id" "$task_id"
 log_task_line "## Performer session"
@@ -1369,6 +1424,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   log_task_line ""
   log_task_line "- Title: ${next_title}"
   log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  task_start_seconds="$(date +%s)"
   log_task_line ""
   echo "Performer: task ${next_id} (${tool})"
   soft_emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg task "$next_id" --arg title "$next_title" '{task_id:$task, title:$title}')"
@@ -1434,6 +1490,10 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   mark_task_passed "$next_id"
   log_task_line "- Marked as passed in worktree PRD: ${next_id}"
   log_task_line "- Completed: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  task_end_seconds="$(date +%s)"
+  if [[ -n "$task_start_seconds" ]]; then
+    task_duration_seconds=$(( task_end_seconds - task_start_seconds ))
+  fi
   log_task_line ""
 
   last_id="$next_id"

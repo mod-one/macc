@@ -27,6 +27,28 @@ fn read_tool_id_from_tool_json(worktree: &std::path::Path) -> Option<String> {
         .map(|id| id.to_string())
 }
 
+/// Read model and effort currently stored in a worktree's `.macc/tool.json`.
+fn read_tool_meta_from_tool_json(worktree: &std::path::Path) -> (Option<String>, Option<String>) {
+    let tool_json = worktree.join(".macc").join("tool.json");
+    let raw = match std::fs::read_to_string(&tool_json) {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let model = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(|s| s.to_string());
+    let effort = value
+        .get("effort")
+        .and_then(serde_json::Value::as_str)
+        .map(|s| s.to_string());
+    (model, effort)
+}
+
 /// A phase fallback is local to its task; configured coordinator tools remain defaults.
 pub(super) fn phase_tool_for_task<'a>(
     task: &'a crate::coordinator::model::Task,
@@ -451,14 +473,25 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     } else {
                         crate::commit_message::CommitType::Feat
                     };
-                    let commit_msg = crate::commit_message::task_commit(
+                    let elapsed = chrono::Utc::now()
+                        .signed_duration_since(phase_started_at)
+                        .num_seconds();
+                    let (tool_model, tool_effort) = read_tool_meta_from_tool_json(&worktree);
+                    let mut commit_builder = crate::commit_message::task_commit(
                         commit_type,
                         task_id,
                         task.title.as_deref(),
                         Some(mode),
                     )
                     .with_tool(&phase_tool)
-                    .format();
+                    .with_duration(format!("{}s", elapsed.max(0)));
+                    if let Some(m) = tool_model {
+                        commit_builder = commit_builder.with_model(m);
+                    }
+                    if let Some(e) = tool_effort {
+                        commit_builder = commit_builder.with_effort(e);
+                    }
+                    let commit_msg = commit_builder.format();
                     let commit_out = crate::git::run_git_output_mapped(
                         &worktree,
                         &["commit", "-m", &commit_msg],

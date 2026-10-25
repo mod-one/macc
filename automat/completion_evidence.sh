@@ -60,7 +60,14 @@ record_completion_evidence() {
   {
     printf 'chore: %s - Validate completed task\n\n' "$id"
     printf 'Verified task: %s\nResult: %s\nReference: %s\n\nVerification evidence:\n%s\n\n' "$title" "$result" "$base_ref" "$evidence"
-    printf '[macc:task %s]\n[macc:phase dev]\n[macc:tool %s]\n[macc:result %s]\n[macc:validation true]\n[macc:spec %s]\n' "$id" "$tool" "$result" "$expected_spec"
+    local model effort
+    model="$(get_active_model 2>/dev/null || true)"
+    effort="$(get_active_effort 2>/dev/null || true)"
+    printf '[macc:task %s]\n[macc:phase dev]\n[macc:tool %s]\n' "$id" "$tool"
+    if [[ -n "$model" ]]; then printf '[macc:model %s]\n' "$model"; fi
+    if [[ -n "$effort" ]]; then printf '[macc:effort %s]\n' "$effort"; fi
+    if [[ -n "${task_duration_seconds:-}" ]]; then printf '[macc:duration %ss]\n' "$task_duration_seconds"; fi
+    printf '[macc:result %s]\n[macc:validation true]\n[macc:spec %s]\n' "$result" "$expected_spec"
     if [[ -n "$verdict" ]]; then printf '[macc:gate_verdict %s]\n' "$verdict"; fi
   } > "$message"
   if ! output="$(git commit --allow-empty --only --file "$message" 2>&1)"; then

@@ -93,6 +93,9 @@ pub const TAG_PHASE: &str = "phase";
 pub const TAG_MERGE: &str = "merge";
 pub const TAG_TOOL: &str = "tool";
 pub const TAG_RUN_ID: &str = "run_id";
+pub const TAG_MODEL: &str = "model";
+pub const TAG_EFFORT: &str = "effort";
+pub const TAG_DURATION: &str = "duration";
 
 /// A single `[macc:<key> <value>]` trailer tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +177,24 @@ impl CommitMessage {
         self
     }
 
+    /// Add a model tag.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.tags.push(MaccTag::new(TAG_MODEL, model));
+        self
+    }
+
+    /// Add an effort tag.
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.tags.push(MaccTag::new(TAG_EFFORT, effort));
+        self
+    }
+
+    /// Add a duration tag.
+    pub fn with_duration(mut self, duration: impl Into<String>) -> Self {
+        self.tags.push(MaccTag::new(TAG_DURATION, duration));
+        self
+    }
+
     /// Add an arbitrary tag.
     pub fn with_tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.tags.push(MaccTag::new(key, value));
@@ -216,6 +237,21 @@ impl CommitMessage {
     /// Check whether this is a merge commit.
     pub fn is_merge(&self) -> bool {
         self.tag_value(TAG_MERGE).is_some()
+    }
+
+    /// Get the configured model (if present).
+    pub fn model(&self) -> Option<&str> {
+        self.tag_value(TAG_MODEL)
+    }
+
+    /// Get the configured effort (if present).
+    pub fn effort(&self) -> Option<&str> {
+        self.tag_value(TAG_EFFORT)
+    }
+
+    /// Get the execution duration (if present).
+    pub fn duration(&self) -> Option<&str> {
+        self.tag_value(TAG_DURATION)
     }
 }
 
@@ -345,6 +381,28 @@ pub fn parse(raw: &str) -> ParsedCommit {
         task_id,
         tags,
         subject,
+    }
+}
+
+impl ParsedCommit {
+    /// Get the model specified in commit tags.
+    pub fn model(&self) -> Option<&str> {
+        self.tags.get(TAG_MODEL).map(|s| s.as_str())
+    }
+
+    /// Get the effort specified in commit tags.
+    pub fn effort(&self) -> Option<&str> {
+        self.tags.get(TAG_EFFORT).map(|s| s.as_str())
+    }
+
+    /// Get the execution duration string specified in commit tags (e.g. "42s").
+    pub fn duration(&self) -> Option<&str> {
+        self.tags.get(TAG_DURATION).map(|s| s.as_str())
+    }
+
+    /// Parse duration into seconds if present.
+    pub fn duration_seconds(&self) -> Option<u64> {
+        self.duration().map(crate::save::logs::parse_duration_to_seconds)
     }
 }
 
@@ -537,5 +595,24 @@ mod tests {
         let parsed = parse(&formatted);
         assert_eq!(parsed.task_id, Some("WEB-001".into()));
         assert_eq!(parsed.tags.get("merge"), Some(&"true".into()));
+    }
+
+    #[test]
+    fn task_commit_with_model_effort_duration() {
+        let msg = task_commit(CommitType::Feat, "TASK-123", Some("Add auth"), Some("dev"))
+            .with_tool("claude")
+            .with_model("claude-3-7-sonnet")
+            .with_effort("high")
+            .with_duration("42s");
+        let formatted = msg.format();
+        assert!(formatted.contains("[macc:model claude-3-7-sonnet]"));
+        assert!(formatted.contains("[macc:effort high]"));
+        assert!(formatted.contains("[macc:duration 42s]"));
+
+        let parsed = parse(&formatted);
+        assert_eq!(parsed.model(), Some("claude-3-7-sonnet"));
+        assert_eq!(parsed.effort(), Some("high"));
+        assert_eq!(parsed.duration(), Some("42s"));
+        assert_eq!(parsed.duration_seconds(), Some(42));
     }
 }

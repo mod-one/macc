@@ -210,6 +210,8 @@ pub fn write_tool_json(repo_root: &Path, worktree_path: &Path, tool_id: &str) ->
     let canonical = load_tool_runtime_config(repo_root, worktree_path)?;
     let placeholders = resolve_runtime_placeholders(&spec, &canonical);
     apply_runtime_placeholders(&mut runtime, &placeholders);
+    runtime.model = placeholders.get("model").cloned();
+    runtime.effort = placeholders.get("effort").cloned();
     // Merge user model_tiers overrides from macc.yaml on top of spec defaults.
     apply_user_model_tiers(&mut runtime, &canonical, &spec.id);
 
@@ -281,7 +283,11 @@ pub(crate) fn resolve_tool_effort(
         .fields
         .iter()
         .find(|field| Some(&field.id) == key.as_ref())
-        .or_else(|| spec.fields.iter().find(|field| field.id == "effort"));
+        .or_else(|| {
+            spec.fields
+                .iter()
+                .find(|field| field.id == "effort" || field.id == "effortLevel" || field.id == "model_reasoning_effort")
+        });
     if let Some(field) = field {
         if let Some(value) = field
             .pointer
@@ -916,6 +922,8 @@ mod tests {
                 effort_config: None,
             },
             defaults: None,
+            model: None,
+            effort: None,
             model_tiers: Default::default(),
         };
         let placeholders = BTreeMap::from([("model".to_string(), "gpt-5.2-codex".to_string())]);
@@ -949,5 +957,38 @@ mod tests {
                 "{session_id}".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn write_tool_json_populates_model_and_effort_for_all_tools() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let tools = ["agy", "claude", "codex", "gemini", "vibe"];
+        for tool_id in tools {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let paths = ProjectPaths::from_root(temp_dir.path());
+            crate::save_canonical_config(&paths, &CanonicalConfig::default()).unwrap();
+            let json_path = write_tool_json(repo_root, temp_dir.path(), tool_id).unwrap();
+            let content = std::fs::read_to_string(json_path).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+            assert_eq!(parsed["id"], tool_id);
+            // Every tool must have an active resolved model
+            let model = parsed.get("model").and_then(|v| v.as_str());
+            assert!(
+                model.is_some() && !model.unwrap().is_empty(),
+                "tool {} missing resolved model in tool.json",
+                tool_id
+            );
+            if tool_id == "claude" || tool_id == "codex" {
+                let effort = parsed.get("effort").and_then(|v| v.as_str());
+                assert!(
+                    effort.is_some() && !effort.unwrap().is_empty(),
+                    "tool {} missing resolved effort in tool.json",
+                    tool_id
+                );
+            }
+        }
     }
 }

@@ -163,5 +163,10 @@ fn is_allowed_occurrence(file: &Path, token: &str, line: &str) -> bool {
         }
     }
 
+    // Native output hooks integrate directly with specific tools (e.g. Claude and Codex).
+    if path.contains("core/src/hooks/native") {
+        return true;
+    }
+
     false
 }

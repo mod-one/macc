@@ -178,6 +178,12 @@ pub struct ToolRuntimeConfig {
     pub performer: ToolPerformerSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defaults: Option<serde_json::Value>,
+    /// Configured model for this tool (before tier routing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Configured effort for this tool (before tier routing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Tier-to-model mapping written by write_tool_json.
     /// Spec provides defaults; users override via `tools.config.<tool>.model_tiers` in macc.yaml.
     /// performer_lib.sh reads this when `MACC_MODEL_TIER` is set to select the concrete model.
@@ -343,6 +349,8 @@ impl ToolSpec {
             display_name: self.display_name.clone(),
             performer: performer.clone(),
             defaults: self.defaults.clone(),
+            model: None,
+            effort: None,
             model_tiers: self.model_tiers.clone(),
         })
     }
