@@ -636,6 +636,321 @@
           ".claude/hooks/performer-log-summary.md"
         ]
       }
+    },
+    {
+      "id": "animate",
+      "name": "animate",
+      "description": "Build web animations that feel right \u2014 deciding if it should animate, which library (CSS, Motion, plain JS), composite properties, springs vs curves, layout animations, and interruptibility.",
+      "tags": [
+        "animation",
+        "ui",
+        "motion",
+        "framer-motion",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/animate"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "animate-expo",
+      "name": "animate-expo",
+      "description": "Build animations in React Native and Expo \u2014 thread selection, springs or timing, gesture handoffs, and performance degradation strategies.",
+      "tags": [
+        "animation",
+        "react-native",
+        "expo",
+        "mobile",
+        "motion"
+      ],
+      "selector": {
+        "subpath": "skills/animate-expo"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "animation-performance",
+      "name": "animation-performance",
+      "description": "Keep web animations inside the frame budget \u2014 animate composite-only properties, off-main-thread motion, layout/paint/composite pipeline, and dropped frame diagnosis.",
+      "tags": [
+        "animation",
+        "performance",
+        "fps",
+        "composite",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/animation-performance"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "animation-vocabulary",
+      "name": "animation-vocabulary",
+      "description": "Reverse-lookup glossary turning vague descriptions of web animations or motion effects into their exact industry terms.",
+      "tags": [
+        "animation",
+        "glossary",
+        "vocabulary",
+        "motion",
+        "design"
+      ],
+      "selector": {
+        "subpath": "skills/animation-vocabulary"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "apple-design",
+      "name": "apple-design",
+      "description": "Apple's approach to interface design and fluid, physical motion translated for the web \u2014 gestures, spring animations, depth, translucency, and typography.",
+      "tags": [
+        "apple",
+        "design",
+        "ui",
+        "springs",
+        "fluid-interfaces"
+      ],
+      "selector": {
+        "subpath": "skills/apple-design"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "ask-sonner",
+      "name": "ask-sonner",
+      "description": "Guide to Sonner, the React toast library \u2014 install, toaster setup, promise and loading toasts, updating, dismissing, styling, theming, and troubleshooting.",
+      "tags": [
+        "react",
+        "sonner",
+        "toast",
+        "notifications",
+        "ui"
+      ],
+      "selector": {
+        "subpath": "skills/ask-sonner"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "break-ui",
+      "name": "break-ui",
+      "description": "Stress-test UI by feeding it worst-case data (extreme lengths, empty states, missing fields, emoji, extreme numbers) with a demo data toggle and fixes.",
+      "tags": [
+        "ui",
+        "testing",
+        "edge-cases",
+        "qa",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/break-ui"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "emil-design-eng",
+      "name": "emil-design-eng",
+      "description": "Emil Kowalski's philosophy on UI polish, component design, animation decisions, and the invisible details that make software feel great.",
+      "tags": [
+        "design-engineering",
+        "ui",
+        "polish",
+        "frontend",
+        "craft"
+      ],
+      "selector": {
+        "subpath": "skills/emil-design-eng"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "find-animation-opportunities",
+      "name": "find-animation-opportunities",
+      "description": "Search a codebase or UI for places that don't animate but should, proposing exact motion values and rejecting unnecessary animations.",
+      "tags": [
+        "animation",
+        "motion",
+        "ui-audit",
+        "design",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/find-animation-opportunities"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "improve-animations",
+      "name": "improve-animations",
+      "description": "Survey a codebase's animation code as a senior motion advisor and produce a prioritized audit and actionable implementation roadmap.",
+      "tags": [
+        "animation",
+        "motion",
+        "audit",
+        "roadmap",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/improve-animations"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "mobile-native",
+      "name": "mobile-native",
+      "description": "Make a web app feel native on a mobile device \u2014 CSS fixes, viewport fixes, touch interactions, safe areas, status bars, and gestures.",
+      "tags": [
+        "mobile",
+        "pwa",
+        "responsive",
+        "css",
+        "touch"
+      ],
+      "selector": {
+        "subpath": "skills/mobile-native"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "pick-ui-library",
+      "name": "pick-ui-library",
+      "description": "Curated, opinionated recommendation engine for frontend UI libraries (charts, command menus, virtualization, dnd, toasts, state, styling).",
+      "tags": [
+        "frontend",
+        "libraries",
+        "ui",
+        "react",
+        "components"
+      ],
+      "selector": {
+        "subpath": "skills/pick-ui-library"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "prototype",
+      "name": "prototype",
+      "description": "Build multiple genuinely different versions of a UI component behind a visual picker for live comparison and rapid selection.",
+      "tags": [
+        "prototyping",
+        "ui",
+        "design",
+        "experimentation",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/prototype"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "review-animations",
+      "name": "review-animations",
+      "description": "Review animation and motion code against a high craft bar derived from Emil Kowalski's design engineering philosophy.",
+      "tags": [
+        "animation",
+        "code-review",
+        "motion",
+        "quality",
+        "frontend"
+      ],
+      "selector": {
+        "subpath": "skills/review-animations"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "write-swift",
+      "name": "write-swift",
+      "description": "Modern Swift development guide \u2014 value types, Swift 6 data-race safety, concurrency (@concurrent, actors, task groups), protocols, and performance.",
+      "tags": [
+        "swift",
+        "ios",
+        "macos",
+        "concurrency",
+        "apple"
+      ],
+      "selector": {
+        "subpath": "skills/write-swift"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
     }
   ]
 }
