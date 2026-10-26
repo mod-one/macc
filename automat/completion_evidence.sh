@@ -63,9 +63,16 @@ record_completion_evidence() {
     local model effort
     model="$(get_active_model 2>/dev/null || true)"
     effort="$(get_active_effort 2>/dev/null || true)"
-    printf '[macc:task %s]\n[macc:phase dev]\n[macc:tool %s]\n' "$id" "$tool"
-    if [[ -n "$model" ]]; then printf '[macc:model %s]\n' "$model"; fi
-    if [[ -n "$effort" ]]; then printf '[macc:effort %s]\n' "$effort"; fi
+    
+    if [[ -n "$model" && -n "$effort" ]]; then
+      tool_meta=" ($model - $effort)"
+    elif [[ -n "$model" ]]; then
+      tool_meta=" ($model)"
+    elif [[ -n "$effort" ]]; then
+      tool_meta=" ($effort)"
+    fi
+
+    printf '[macc:task %s]\n[macc:phase dev]\n[macc:tool %s%s]\n' "$id" "$tool" "$tool_meta"
     if [[ -n "${task_duration_seconds:-}" ]]; then printf '[macc:duration %ss]\n' "$task_duration_seconds"; fi
     printf '[macc:result %s]\n[macc:validation true]\n[macc:spec %s]\n' "$result" "$expected_spec"
     if [[ -n "$verdict" ]]; then printf '[macc:gate_verdict %s]\n' "$verdict"; fi
