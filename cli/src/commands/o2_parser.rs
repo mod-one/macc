@@ -82,11 +82,12 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(crate::Commands::O2 {
-                command: O2Command::Tuning(TuningCommand::Apply { confirm: true, .. })
+                command: O2Command::Tuning(TuningCommand::Apply { confirm: true, .. }),
+                ..
             })
         ));
         let cli = crate::Cli::try_parse_from(["macc", "o2", "mcp"]).unwrap();
-        assert!(matches!(cli.command,Some(crate::Commands::O2{command}) if command.is_mcp()));
+        assert!(matches!(cli.command,Some(crate::Commands::O2{command, ..}) if command.is_mcp()));
         assert!(crate::Cli::try_parse_from(["macc", "o2", "tuning"]).is_err());
     }
 }

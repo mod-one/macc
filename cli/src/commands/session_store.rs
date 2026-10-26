@@ -66,10 +66,11 @@ pub enum SessionStoreCommands {
 pub struct SessionStoreCommand {
     app: AppContext,
     command: SessionStoreCommands,
+    json: bool,
 }
 impl SessionStoreCommand {
-    pub fn new(app: AppContext, command: SessionStoreCommands) -> Self {
-        Self { app, command }
+    pub fn new(app: AppContext, command: SessionStoreCommands, json: bool) -> Self {
+        Self { app, command, json }
     }
 }
 fn input<T: DeserializeOwned>() -> Result<T> {
@@ -106,8 +107,13 @@ struct Release {
 impl Command for SessionStoreCommand {
     fn run(&self) -> Result<()> {
         let root = &self.app.project_paths()?.root;
+        let out = |kind: &str, val: serde_json::Value| {
+            super::o2_format::emit_session_store(kind, val, self.json)
+        };
         match &self.command {
-            SessionStoreCommands::Usage => emit(store::usage::inspect(root)?),
+            SessionStoreCommands::Usage => {
+                super::o2_format::emit_session_store("usage", store::usage::inspect(root)?, self.json)
+            }
             SessionStoreCommands::CompactionOptions => emit(
                 macc_core::o2::compaction::execution_options(root, &input()?)?,
             ),
@@ -120,21 +126,25 @@ impl Command for SessionStoreCommand {
                 if *apply {
                     super::gate_cli_mutation(root)?;
                 }
-                emit(store::usage::upgrade(
-                    root,
-                    *apply,
-                    expected_sha256.as_deref(),
-                )?)
+                super::o2_format::emit_session_store(
+                    "usage_upgrade",
+                    store::usage::upgrade(root, *apply, expected_sha256.as_deref())?,
+                    self.json,
+                )
             }
             SessionStoreCommands::McpOptions => {
                 emit(macc_core::o2::agent::options(root, &input()?)?)
             }
-            SessionStoreCommands::Status => emit(store::inspect(root)?),
+            SessionStoreCommands::Status => {
+                super::o2_format::emit_session_store("status", store::inspect(root)?, self.json)
+            }
             SessionStoreCommands::Backup => {
                 super::gate_cli_mutation(root)?;
-                emit(store::backup(root)?)
+                super::o2_format::emit_session_store("backup", store::backup(root)?, self.json)
             }
-            SessionStoreCommands::Events { id } => emit(store::events(root, id)?),
+            SessionStoreCommands::Events { id } => {
+                super::o2_format::emit_session_store("events", store::events(root, id)?, self.json)
+            }
             SessionStoreCommands::Migrate {
                 apply,
                 expected_sha256,
@@ -142,7 +152,11 @@ impl Command for SessionStoreCommand {
                 if *apply {
                     super::gate_cli_mutation(root)?;
                 }
-                emit(store::migrate(root, *apply, expected_sha256.as_deref())?)
+                super::o2_format::emit_session_store(
+                    "migrate",
+                    store::migrate(root, *apply, expected_sha256.as_deref())?,
+                    self.json,
+                )
             }
             SessionStoreCommands::Rollback {
                 apply,
@@ -151,7 +165,11 @@ impl Command for SessionStoreCommand {
                 if *apply {
                     super::gate_cli_mutation(root)?;
                 }
-                emit(store::rollback(root, *apply, expected_sha256.as_deref())?)
+                super::o2_format::emit_session_store(
+                    "rollback",
+                    store::rollback(root, *apply, expected_sha256.as_deref())?,
+                    self.json,
+                )
             }
             SessionStoreCommands::MergeRepairPrepare => {
                 emit(store::checkpoints::merge_repair::capture(root, &input()?)?)
@@ -162,7 +180,11 @@ impl Command for SessionStoreCommand {
             SessionStoreCommands::CheckpointFinish => {
                 emit(store::checkpoints::finish(root, &input()?)?)
             }
-            SessionStoreCommands::Checkpoint { id } => emit(store::checkpoints::get(root, id)?),
+            SessionStoreCommands::Checkpoint { id } => super::o2_format::emit_session_store(
+                "checkpoint",
+                store::checkpoints::get(root, id)?,
+                self.json,
+            ),
             SessionStoreCommands::Reconcile {
                 id,
                 expected_sha256,
@@ -170,11 +192,10 @@ impl Command for SessionStoreCommand {
                 if expected_sha256.is_some() {
                     super::gate_cli_mutation(root)?;
                 }
-                emit(store::checkpoints::reconcile(
-                    root,
-                    id,
-                    expected_sha256.as_deref(),
-                )?)
+                out(
+                    "reconcile",
+                    store::checkpoints::reconcile(root, id, expected_sha256.as_deref())?,
+                )
             }
             SessionStoreCommands::Upgrade {
                 apply,
@@ -183,11 +204,11 @@ impl Command for SessionStoreCommand {
                 if *apply {
                     super::gate_cli_mutation(root)?;
                 }
-                emit(store::checkpoints::upgrade(
-                    root,
-                    *apply,
-                    expected_sha256.as_deref(),
-                )?)
+                super::o2_format::emit_session_store(
+                    "upgrade",
+                    store::checkpoints::upgrade(root, *apply, expected_sha256.as_deref())?,
+                    self.json,
+                )
             }
             SessionStoreCommands::Acquire => emit(store::acquire(root, &input()?)?),
             SessionStoreCommands::Bind => {
@@ -206,20 +227,24 @@ impl Command for SessionStoreCommand {
             }
             SessionStoreCommands::Recover => {
                 super::gate_cli_mutation(root)?;
-                emit(store::recover(root)?)
+                super::o2_format::emit_session_store("recover", store::recover(root)?, self.json)
             }
             SessionStoreCommands::Close { id } => {
                 super::gate_cli_mutation(root)?;
                 store::close(root, id)?;
-                emit(serde_json::json!({"ok":true}))
+                out("close", serde_json::json!({"ok":true}))
             }
             SessionStoreCommands::Policy { revision } => {
                 super::gate_cli_mutation(root)?;
                 let policy: Option<store::SessionPolicy> = input()?;
-                emit(match policy {
-                    Some(p) => store::update_policy(root, revision, &p)?,
-                    None => store::remove_policy_override(root, revision)?,
-                })
+                super::o2_format::emit_session_store(
+                    "policy",
+                    match policy {
+                        Some(p) => store::update_policy(root, revision, &p)?,
+                        None => store::remove_policy_override(root, revision)?,
+                    },
+                    self.json,
+                )
             }
         }
     }

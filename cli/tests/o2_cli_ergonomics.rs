@@ -387,3 +387,92 @@ fn terminal_confirmation_defaults_to_cancel_and_accepts_explicit_yes() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn interactive_terminal_formats_o2_and_session_store_human_readably_while_json_flag_outputs_json() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::{io::Read, sync::mpsc, time::Duration};
+
+    let run_pty = |root: &Path, args: &[&str]| -> String {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_macc"));
+        command.args(["--cwd", root.to_str().unwrap()]);
+        command.args(args);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            let mut b = [0; 4096];
+            loop {
+                match reader.read(&mut b) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.extend_from_slice(&b[..n]),
+                }
+            }
+            let _ = tx.send(all);
+        });
+        let output = rx.recv_timeout(Duration::from_secs(15)).unwrap();
+        assert!(child.wait().unwrap().success());
+        String::from_utf8_lossy(&output).to_string()
+    };
+
+    let t = fixture();
+    let root = t.path();
+    let migration = value(cli(root, &["session-store", "migrate"], None));
+    value(cli(
+        root,
+        &[
+            "session-store",
+            "migrate",
+            "--apply",
+            "--expected-sha256",
+            migration["source_sha256"].as_str().unwrap(),
+        ],
+        None,
+    ));
+
+    // 1. Human-readable `macc session-store status` in a TTY
+    let ss_human = run_pty(root, &["session-store", "status"]);
+    assert!(ss_human.contains("MACC Session Store"), "{ss_human}");
+    assert!(ss_human.contains("Effective Policy:"), "{ss_human}");
+    assert!(ss_human.contains("Sessions (0):"), "{ss_human}");
+    assert!(!ss_human.trim_start().starts_with('{'), "{ss_human}");
+
+    // 2. `--json` in a TTY returns valid raw JSON
+    let ss_json = run_pty(root, &["session-store", "status", "--json"]);
+    let parsed_ss: Value = serde_json::from_str(ss_json.trim()).unwrap();
+    assert_eq!(parsed_ss["backend"], "sqlite");
+
+    // 3. Human-readable `macc o2 status` in a TTY
+    let o2_human = run_pty(root, &["o2", "status"]);
+    assert!(o2_human.contains("MACC O2 Status"), "{o2_human}");
+    assert!(o2_human.contains("Modules & Key Settings:"), "{o2_human}");
+    assert!(o2_human.contains("Memory Ledger"), "{o2_human}");
+    assert!(!o2_human.trim_start().starts_with('{'), "{o2_human}");
+
+    // 4. `--json` in a TTY returns valid raw JSON
+    let o2_json = run_pty(root, &["o2", "status", "--json"]);
+    let parsed_o2: Value = serde_json::from_str(o2_json.trim()).unwrap();
+    assert_eq!(parsed_o2["sqlite"], true);
+
+    // 5. Human-readable `macc o2 provider-plan native deploy` in a TTY
+    let plan_human = run_pty(root, &["o2", "provider-plan", "native", "deploy"]);
+    assert!(
+        plan_human.contains("MACC Provider Plan: native (deploy)"),
+        "{plan_human}"
+    );
+    assert!(
+        plan_human.contains("macc o2 provider-apply"),
+        "{plan_human}"
+    );
+}

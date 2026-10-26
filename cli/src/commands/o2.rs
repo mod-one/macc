@@ -196,10 +196,11 @@ pub(super) fn stdin() -> Result<String> {
 pub struct O2 {
     app: AppContext,
     command: O2Command,
+    json: bool,
 }
 impl O2 {
-    pub fn new(app: AppContext, command: O2Command) -> Self {
-        Self { app, command }
+    pub fn new(app: AppContext, command: O2Command, json: bool) -> Self {
+        Self { app, command, json }
     }
 }
 impl Command for O2 {
@@ -208,7 +209,7 @@ impl Command for O2 {
             return super::o2_mcp::run();
         }
         if let O2Command::Policy(command) = &self.command {
-            return super::o2_policy::run(&self.app, command);
+            return super::o2_policy::run(&self.app, command, self.json);
         }
         let action = match &self.command {
             O2Command::Policy(_) => unreachable!("policy transport handled above"),
@@ -454,8 +455,8 @@ impl Command for O2 {
         if action.is_mutation() {
             super::gate_cli_mutation(&paths.root)?;
         }
-        let result = execute(&paths.root, action)?;
-        print!("{}", macc_core::context::payload::json_line(&result)?);
+        let result = execute(&paths.root, action.clone())?;
+        super::o2_format::emit_o2(&action, &result, self.json)?;
         Ok(())
     }
 }
