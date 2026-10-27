@@ -542,7 +542,7 @@ detect_tool_limit_exit() {
   # date parsing which is fragile across distros.
   local retry_hint=""
   retry_hint="$(grep -oiE \
-      "(try again at [A-Za-z]+ [0-9]+[a-z]*, [0-9]+ [0-9]+:[0-9]+ [AaPp][Mm]([^.]*)?|resets in ([0-9]+[dhms])+|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
+      "(try again at ([A-Za-z]+ [0-9]+[a-z]*, [0-9]+ )?[0-9]+:[0-9]+[[:space:]]*[AaPp][Mm]([^.]*)?|resets in ([0-9]+[dhms])+|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
       "$output_capture" 2>/dev/null | head -1 || true)"
 
   # Emit a structured notification that appears in the performer log and is

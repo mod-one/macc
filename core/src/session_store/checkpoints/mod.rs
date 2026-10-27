@@ -111,7 +111,22 @@ pub(super) fn make(
         );
         let registry = storage.load_registry()?;
         if let Some(task) = registry.tasks.iter().find(|t| t.id == c.task_id) {
-            c.review_objections = json!({"review_cycles":task.task_runtime.review_cycles,"review_feedback":task.review,"last_error":task.task_runtime.last_error_message,"workflow_state":task.state});
+            let sanitized_error = task.task_runtime.last_error_message.as_deref().map(|msg| {
+                if task.task_runtime.last_error_code.as_deref() == Some("E602")
+                    || msg.contains("quota exhausted")
+                    || msg.contains("usage limit")
+                {
+                    "provider quota limit reached (E602); work preserved".to_string()
+                } else {
+                    msg.to_string()
+                }
+            });
+            c.review_objections = json!({
+                "review_cycles": task.task_runtime.review_cycles,
+                "review_feedback": task.review,
+                "last_error": sanitized_error,
+                "workflow_state": task.state
+            });
         }
     }
     let mut value = serde_json::to_value(c).map_err(|e| error(e.to_string()))?;

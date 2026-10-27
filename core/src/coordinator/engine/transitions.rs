@@ -304,7 +304,7 @@ pub(super) fn apply_state_transitions(
                 runtime.set_last_error_details(
                     error.code.clone(),
                     error.origin.clone(),
-                    error.message.clone(),
+                    format!("Tool unavailable due to quota exhaustion (E602); cooldown {}s", cooldown),
                 );
                 runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
                 // Availability belongs to the tool; another tool can run the task now.

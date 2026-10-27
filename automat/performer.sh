@@ -679,6 +679,9 @@ build_continuation_section() {
   local task_id="$1"
   local prior_exp prior_work
   prior_exp="$(previous_result_explanation "$task_id")"
+  if [[ "$prior_exp" =~ (quota|usage[[:space:]]+limit|session[[:space:]]+limit) ]]; then
+    prior_exp="Previous attempt stopped due to provider quota limit (E602); retained work preserved."
+  fi
   prior_work="$(build_prior_work_summary "$base_ref")"
 
   cat <<CONT
@@ -1143,8 +1146,10 @@ run_tool() {
       set_last_error "$runner_code" "runner" "checkpoint/output finalization failed; retained work requires inspection"
     fi
     local result_exp=""
-    if [[ "$LAST_ERROR_CODE" == E601 || "$LAST_ERROR_CODE" == E602 ]]; then
-      result_exp="$LAST_ERROR_MESSAGE"
+    if [[ "$LAST_ERROR_CODE" == E602 ]]; then
+      result_exp="provider quota exhausted (E602); retained work preserved"
+    elif [[ "$LAST_ERROR_CODE" == E601 ]]; then
+      result_exp="provider rate limited (E601); retry later"
     else
       result_exp="$(resolve_task_result_exp "$output_capture" "error_runner_exit")"
     fi

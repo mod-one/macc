@@ -123,6 +123,17 @@ check_contains "feature.txt"                                   "changed files ar
 check_contains "Do not re-derive the implementation"           "instructs against redoing the work"
 check_contains "unsalvageable"                                 "provides an escape hatch for bad prior work"
 check_contains "MACC_TASK_RESULT: error_without_changes"       "escape hatch names the marker to emit"
+
+# Verify that raw quota / usage limit strings are sanitized in continuation prompts
+printf -- '- Result kind: error_runner_exit\n- Explanation: quota exhausted; ERROR: You'\''ve hit your usage limit. Upgrade to Pro, try again at 5:14 PM.\n' \
+  >"$wt/.macc/log/performer/T_QUOTA.md"
+section_quota="$(run_harness "$wt" 1 main "build_continuation_section T_QUOTA" 2>/dev/null)"
+if [[ "$section_quota" != *"hit your usage limit"* && "$section_quota" == *"Previous attempt stopped due to provider quota limit (E602)"* ]]; then
+  pass "raw quota exhaustion message is sanitized in continuation section"
+else
+  fail "raw quota exhaustion message is sanitized in continuation section" "got: $section_quota"
+fi
+
 if grep -q 'MACC_TASK_RESULT: precondition_unmet' "$PERFORMER"; then
   pass "prompt documents correct terminal precondition result"
 else

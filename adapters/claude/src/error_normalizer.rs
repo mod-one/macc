@@ -123,43 +123,64 @@ fn resets_time_regex() -> &'static Regex {
     })
 }
 
-/// Regex for the absolute-timestamp "try again at <Month> <Day>, <Year>
-/// <HH>:<MM> [AP]M" form, which `detect_tool_limit_exit()` may embed in the
-/// MACC_TOOL_LIMIT line when the underlying tool emits this format.
+/// Regex for the absolute-timestamp "try again at <Month> <Day>, <Year> <HH>:<MM> [AP]M"
+/// or short "try again at <HH>:<MM> [AP]M" form, which `detect_tool_limit_exit()`
+/// may embed in the MACC_TOOL_LIMIT line when the underlying tool emits this format.
 fn try_again_at_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)try again at (?P<month>[A-Za-z]+) (?P<day>\d+)[a-z]*, (?P<year>\d{4}) (?P<hour>\d{1,2}):(?P<min>\d{2}) (?P<ampm>[AaPp][Mm])",
+            r"(?i)try again at (?:(?P<month>[A-Za-z]+) (?P<day>\d+)[a-z]*, (?P<year>\d{4}) )?(?P<hour>\d{1,2}):(?P<min>\d{2})\s*(?P<ampm>[AaPp][Mm])",
         )
         .unwrap()
     })
 }
 
+/// Tolerance in seconds for considering a past reset timestamp as near-current
+/// (to account for clock skew between remote server and local host).
+const STALE_TIMESTAMP_TOLERANCE_SECONDS: i64 = 300; // 5 minutes
+
 /// Parse an absolute "try again at …" timestamp into seconds from now.
 fn parse_try_again_at_seconds(text: &str) -> Option<u64> {
+    parse_try_again_at_seconds_at(text, chrono::Utc::now())
+}
+
+fn parse_try_again_at_seconds_at(
+    text: &str,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Option<u64> {
     let caps = try_again_at_regex().captures(text)?;
-    let month_str = caps.name("month")?.as_str();
-    let day: u32 = caps.name("day")?.as_str().parse().ok()?;
-    let year: i32 = caps.name("year")?.as_str().parse().ok()?;
     let hour_raw: u32 = caps.name("hour")?.as_str().parse().ok()?;
     let min: u32 = caps.name("min")?.as_str().parse().ok()?;
     let ampm = caps.name("ampm")?.as_str().to_ascii_uppercase();
 
-    let month = match month_str.to_ascii_lowercase().as_str() {
-        "january" | "jan" => 1,
-        "february" | "feb" => 2,
-        "march" | "mar" => 3,
-        "april" | "apr" => 4,
-        "may" => 5,
-        "june" | "jun" => 6,
-        "july" | "jul" => 7,
-        "august" | "aug" => 8,
-        "september" | "sep" | "sept" => 9,
-        "october" | "oct" => 10,
-        "november" | "nov" => 11,
-        "december" | "dec" => 12,
-        _ => return None,
+    use chrono::{Datelike, TimeZone as _};
+
+    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) = (
+        caps.name("month"),
+        caps.name("day"),
+        caps.name("year"),
+    ) {
+        let month = match m_str.as_str().to_ascii_lowercase().as_str() {
+            "january" | "jan" => 1,
+            "february" | "feb" => 2,
+            "march" | "mar" => 3,
+            "april" | "apr" => 4,
+            "may" => 5,
+            "june" | "jun" => 6,
+            "july" | "jul" => 7,
+            "august" | "aug" => 8,
+            "september" | "sep" | "sept" => 9,
+            "october" | "oct" => 10,
+            "november" | "nov" => 11,
+            "december" | "dec" => 12,
+            _ => return None,
+        };
+        let day: u32 = d_str.as_str().parse().ok()?;
+        let year: i32 = y_str.as_str().parse().ok()?;
+        (year, month, day)
+    } else {
+        (now_utc.year(), now_utc.month(), now_utc.day())
     };
 
     let hour = match ampm.as_str() {
@@ -170,16 +191,111 @@ fn parse_try_again_at_seconds(text: &str) -> Option<u64> {
         _ => return None,
     };
 
-    use chrono::{TimeZone as _, Utc};
-    let retry_dt = Utc
+    use chrono::Utc;
+    let mut retry_dt = Utc
         .with_ymd_and_hms(year, month, day, hour, min, 0)
         .single()?;
-    let now_ts = Utc::now().timestamp();
-    let retry_ts = retry_dt.timestamp();
+    let now_ts = now_utc.timestamp();
+    let mut retry_ts = retry_dt.timestamp();
+
+    if caps.name("month").is_none() && retry_ts < now_ts - 3600 * 12 {
+        if let Some(next_day_dt) = retry_dt.checked_add_signed(chrono::Duration::days(1)) {
+            if next_day_dt.timestamp() > now_ts {
+                retry_dt = next_day_dt;
+                retry_ts = retry_dt.timestamp();
+            }
+        }
+    }
+
     if retry_ts <= now_ts {
+        let past_seconds = now_ts - retry_ts;
+        if past_seconds > STALE_TIMESTAMP_TOLERANCE_SECONDS {
+            return None;
+        }
         return Some(60);
     }
     Some((retry_ts - now_ts) as u64)
+}
+
+fn is_try_again_at_significantly_in_past(text: &str) -> bool {
+    is_try_again_at_significantly_in_past_at(text, chrono::Utc::now())
+}
+
+fn is_try_again_at_significantly_in_past_at(
+    text: &str,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(caps) = try_again_at_regex().captures(text) else {
+        return false;
+    };
+    let Some(hour_raw) = caps.name("hour").and_then(|m| m.as_str().parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(min) = caps.name("min").and_then(|m| m.as_str().parse::<u32>().ok()) else {
+        return false;
+    };
+    let ampm = match caps.name("ampm") {
+        Some(m) => m.as_str().to_ascii_uppercase(),
+        None => return false,
+    };
+
+    use chrono::{Datelike, TimeZone as _};
+
+    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) = (
+        caps.name("month"),
+        caps.name("day"),
+        caps.name("year"),
+    ) {
+        let month = match m_str.as_str().to_ascii_lowercase().as_str() {
+            "january" | "jan" => 1,
+            "february" | "feb" => 2,
+            "march" | "mar" => 3,
+            "april" | "apr" => 4,
+            "may" => 5,
+            "june" | "jun" => 6,
+            "july" | "jul" => 7,
+            "august" | "aug" => 8,
+            "september" | "sep" | "sept" => 9,
+            "october" | "oct" => 10,
+            "november" | "nov" => 11,
+            "december" | "dec" => 12,
+            _ => return false,
+        };
+        let Some(day) = d_str.as_str().parse::<u32>().ok() else { return false; };
+        let Some(year) = y_str.as_str().parse::<i32>().ok() else { return false; };
+        (year, month, day)
+    } else {
+        (now_utc.year(), now_utc.month(), now_utc.day())
+    };
+
+    let hour = match ampm.as_str() {
+        "AM" if hour_raw == 12 => 0,
+        "AM" => hour_raw,
+        "PM" if hour_raw == 12 => 12,
+        "PM" => hour_raw + 12,
+        _ => return false,
+    };
+
+    use chrono::Utc;
+    let Some(mut retry_dt) = Utc
+        .with_ymd_and_hms(year, month, day, hour, min, 0)
+        .single() else {
+        return false;
+    };
+
+    let now_ts = now_utc.timestamp();
+    let mut retry_ts = retry_dt.timestamp();
+
+    if caps.name("month").is_none() && retry_ts < now_ts - 3600 * 12 {
+        if let Some(next_day_dt) = retry_dt.checked_add_signed(chrono::Duration::days(1)) {
+            if next_day_dt.timestamp() > now_ts {
+                retry_dt = next_day_dt;
+                retry_ts = retry_dt.timestamp();
+            }
+        }
+    }
+
+    retry_ts < now_ts - STALE_TIMESTAMP_TOLERANCE_SECONDS
 }
 
 /// Parse "resets X[:MM]am/pm (UTC)" until the next occurrence of that time.
@@ -241,6 +357,13 @@ impl ErrorNormalizer for ClaudeErrorNormalizer {
         let mut matched_class: Option<CanonicalClass> = None;
         for pat in patterns() {
             if pat.regex.is_match(&combined) {
+                // Reject quota exhaustion if the extracted "try again at" timestamp
+                // is significantly in the past (historical error from prompt/log).
+                if pat.class == CanonicalClass::QuotaExhausted
+                    && is_try_again_at_significantly_in_past(&combined)
+                {
+                    continue;
+                }
                 matched_class = Some(pat.class.clone());
                 break;
             }
