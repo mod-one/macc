@@ -41,22 +41,92 @@ impl Default for HeartbeatConfig {
     }
 }
 
+/// Grace window (in milliseconds) for the current owner to automatically
+/// respond with `heartbeat` after a takeover request is emitted. If the owner
+/// does not answer within this window, it is considered absent and loses
+/// ownership immediately.
+pub const OWNER_HEARTBEAT_VERIFY_MS: i64 = 1500;
+
+pub fn owner_responded_to_takeover(
+    owner: &ClientIdentity,
+    request: &super::TakeoverRequest,
+) -> bool {
+    match (
+        parse_timestamp(&owner.last_heartbeat),
+        parse_timestamp(&request.requested_at),
+    ) {
+        (Some(hb), Some(req)) => hb > req,
+        _ => false,
+    }
+}
+
 pub fn evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig) {
     let now = Utc::now();
     let cutoff = now - Duration::seconds(config.ttl_seconds.min(i64::MAX as u64) as i64);
+    let verify_cutoff = now - Duration::milliseconds(OWNER_HEARTBEAT_VERIFY_MS);
 
     for record in &mut store.records {
-        // L6-OWN-007: resolve stale takeover requests per configured policy.
-        if config.takeover_timeout_seconds > 0 {
-            let takeover_cutoff = now
-                - Duration::seconds(config.takeover_timeout_seconds.min(i64::MAX as u64) as i64);
-            if let Some(req) = record.takeover_request.as_ref() {
-                let requested_at = parse_timestamp(&req.requested_at);
+        // 1. Evict viewers that are stale or belong to a verified dead local PID.
+        record
+            .viewers
+            .retain(|viewer| !is_dead_local_client(viewer) && !is_stale_client(viewer, cutoff));
+
+        // 2. If the current owner is a verified dead local PID, evict it in 0ms.
+        if record
+            .owner
+            .as_ref()
+            .is_some_and(is_dead_local_client)
+        {
+            if let Some(dead_owner) = record.owner.take() {
+                emit_owner_stale(record, &dead_owner);
+            }
+            if let Some(req) = record.takeover_request.take() {
+                record
+                    .viewers
+                    .retain(|v| v.client_id != req.requester.client_id);
+                record.owner = Some(req.requester);
+            } else if let Some(next_owner) = promote_oldest_viewer(record) {
+                record.owner = Some(next_owner);
+            }
+        }
+
+        // 3. Check pending takeover requests:
+        //    - First, verify whether the current owner responded automatically via
+        //      `heartbeat` (`owner.last_heartbeat > req.requested_at`). If the
+        //      owner failed to respond within `OWNER_HEARTBEAT_VERIFY_MS`, the
+        //      owner is considered absent and loses ownership immediately.
+        //    - Otherwise, if the owner did respond with a heartbeat, apply the
+        //      configured `takeover_timeout_seconds` policy for user decision.
+        if let Some(req) = record.takeover_request.clone() {
+            let requested_at = parse_timestamp(&req.requested_at);
+            let owner_responded = record
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner_responded_to_takeover(owner, &req));
+
+            if !owner_responded {
+                let verify_expired = requested_at.map(|ts| ts < verify_cutoff).unwrap_or(true);
+                if verify_expired {
+                    if let Some(absent_owner) = record.owner.take() {
+                        emit_owner_stale(record, &absent_owner);
+                    }
+                    let requester = req.requester.clone();
+                    record
+                        .viewers
+                        .retain(|v| v.client_id != requester.client_id);
+                    record.owner = Some(requester);
+                    record.takeover_request = None;
+                }
+            } else if config.takeover_timeout_seconds > 0 {
+                let takeover_cutoff = now
+                    - Duration::seconds(
+                        config.takeover_timeout_seconds.min(i64::MAX as u64) as i64,
+                    );
                 let expired = requested_at.map(|ts| ts < takeover_cutoff).unwrap_or(true);
                 if expired {
                     match config.takeover_default_response {
                         TakeoverDefaultResponse::Deny => {
-                            emit_takeover_timeout(record, req, "deny");
+                            emit_takeover_timeout(record, &req, "deny");
                             record.takeover_request = None;
                         }
                         TakeoverDefaultResponse::AutoAccept
@@ -69,7 +139,7 @@ pub fn evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig)
                             } else {
                                 "admin_takeover"
                             };
-                            emit_takeover_timeout(record, req, policy);
+                            emit_takeover_timeout(record, &req, policy);
                             let requester = req.requester.clone();
                             record
                                 .viewers
@@ -82,26 +152,52 @@ pub fn evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig)
             }
         }
 
-        record
-            .viewers
-            .retain(|viewer| !is_stale_client(viewer, cutoff));
-
+        // 4. Evict stale owner (TTL exceeded) and promote highest-priority oldest viewer.
         let stale_owner = record
             .owner
             .as_ref()
             .is_some_and(|owner| is_stale_client(owner, cutoff));
-        if !stale_owner {
-            continue;
-        }
-
-        if let Some(owner) = record.owner.take() {
-            emit_owner_stale(record, &owner);
-        }
-
-        if let Some(next_owner) = promote_oldest_viewer(record) {
-            record.owner = Some(next_owner);
+        if stale_owner {
+            if let Some(owner) = record.owner.take() {
+                emit_owner_stale(record, &owner);
+            }
+            if let Some(next_owner) = promote_oldest_viewer(record) {
+                record.owner = Some(next_owner);
+            }
+        } else if record
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.kind == super::ClientKind::Cli)
+            && record
+                .viewers
+                .iter()
+                .any(|viewer| viewer.kind.is_interactive_ui())
+        {
+            // 5. TUI and Web clients have priority over CLI clients.
+            if let Some(interactive_owner) = promote_oldest_viewer(record) {
+                if let Some(displaced_cli) = record.owner.replace(interactive_owner) {
+                    if !record
+                        .viewers
+                        .iter()
+                        .any(|v| v.client_id == displaced_cli.client_id)
+                    {
+                        record.viewers.push(displaced_cli);
+                    }
+                }
+            }
         }
     }
+}
+
+fn is_dead_local_client(client: &ClientIdentity) -> bool {
+    if let Some(rest) = client.client_id.strip_prefix("tui-pid-") {
+        if let Some(pid_str) = rest.split('-').next() {
+            if let Ok(pid) = pid_str.parse::<i64>() {
+                return !crate::coordinator::helpers::is_pid_running(pid);
+            }
+        }
+    }
+    false
 }
 
 fn is_stale_client(client: &ClientIdentity, cutoff: DateTime<Utc>) -> bool {
@@ -110,13 +206,20 @@ fn is_stale_client(client: &ClientIdentity, cutoff: DateTime<Utc>) -> bool {
         .unwrap_or(true)
 }
 
-fn promote_oldest_viewer(record: &mut OwnershipRecord) -> Option<ClientIdentity> {
+pub(crate) fn promote_oldest_viewer(record: &mut OwnershipRecord) -> Option<ClientIdentity> {
     let next_index = record
         .viewers
         .iter()
         .enumerate()
         .min_by_key(|(_, viewer)| {
-            parse_timestamp(&viewer.connected_at).unwrap_or(DateTime::<Utc>::MAX_UTC)
+            let tier = if viewer.kind.is_interactive_ui() {
+                0u8
+            } else {
+                1u8
+            };
+            let connected =
+                parse_timestamp(&viewer.connected_at).unwrap_or(DateTime::<Utc>::MAX_UTC);
+            (tier, connected)
         })
         .map(|(index, _)| index)?;
 
@@ -129,9 +232,12 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .map(|ts| ts.with_timezone(&Utc))
 }
 
-pub(crate) fn emit_owner_stale(_record: &OwnershipRecord, _owner: &ClientIdentity) {
+pub(crate) fn emit_owner_stale(record: &OwnershipRecord, owner: &ClientIdentity) {
+    if record.process.project_root.exists() {
+        super::events::emit_owner_stale(&record.process.project_root, &record.process, owner);
+    }
     #[cfg(test)]
-    test_support::record_owner_stale(_record, _owner);
+    test_support::record_owner_stale(record, owner);
 }
 
 pub(crate) fn emit_takeover_timeout(

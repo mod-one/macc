@@ -283,6 +283,7 @@ pub struct AppState {
     viewer_guards: Vec<ProcessViewerGuard>,
     pub client_context: ClientContext,
     last_ownership_refresh: Option<Instant>,
+    last_ownership_change_token: Option<u64>,
     /// L6-TUI-002: ownership state for Coordinator process (banner/modal/gate input).
     pub coordinator_ownership: crate::ownership::TuiOwnershipState,
     coordinator_ownership_last_heartbeat: Option<Instant>,
@@ -458,6 +459,7 @@ impl AppState {
                 project_root: PathBuf::new(),
             },
             last_ownership_refresh: None,
+            last_ownership_change_token: None,
             coordinator_ownership: crate::ownership::TuiOwnershipState::new(),
             coordinator_ownership_last_heartbeat: None,
             coordinator_ownership_last_refresh: None,
@@ -482,7 +484,7 @@ impl AppState {
     fn new_client_identity() -> ClientIdentity {
         let now = chrono::Utc::now().to_rfc3339();
         ClientIdentity {
-            client_id: format!("tui-{}", Self::uuid_v4_like()),
+            client_id: format!("tui-pid-{}-{}", std::process::id(), Self::uuid_v4_like()),
             kind: ClientKind::Tui,
             connected_at: now.clone(),
             last_heartbeat: now,
@@ -2099,31 +2101,16 @@ impl AppState {
         self.viewer_guards.clear();
     }
 
-    /// Release only the lease this TUI acquired for the coordinator lifecycle.
-    /// `release_owner` checks the client id, so a concurrent takeover remains
-    /// authoritative and cannot be undone by a late coordinator-exit event.
+    /// Detach coordinator-specific registration tracking when a coordinator run
+    /// finishes or is stopped. While the TUI remains open, it keeps the
+    /// project-wide ownership lease (`ProcessKind::Project`); project ownership
+    /// is only released when the TUI exits or transfers control via takeover.
     fn release_coordinator_ownership(&mut self) {
         if !self.coordinator_ownership_attached {
             return;
         }
         self.coordinator_ownership_attached = false;
         self.coordinator_registration_observed = false;
-
-        let Some(paths) = self.project_paths.clone() else {
-            self.ownership_guard = None;
-            return;
-        };
-        let Some(handle) = self.coordinator_handle() else {
-            self.ownership_guard = None;
-            return;
-        };
-
-        self.ownership_guard = None;
-        let _ = self.engine.process_ownership_release(
-            &paths.root,
-            &handle,
-            &self.coordinator_client_id,
-        );
         self.refresh_ownership_state();
     }
 
@@ -2139,12 +2126,20 @@ impl AppState {
 
         self.cleanup_ownership_guards();
 
+        let mut claimed_any = false;
         if let Ok(records) = self.engine.process_list_running(&paths.root) {
             for record in records {
                 if matches!(record.process.kind, ProcessKind::Project) {
                     continue;
                 }
                 self.claim_process_ownership(record.process);
+                claimed_any = true;
+            }
+        }
+
+        if !claimed_any {
+            if let Some(project_handle) = self.project_handle() {
+                self.claim_process_ownership(project_handle);
             }
         }
 
@@ -2179,11 +2174,71 @@ impl AppState {
             });
         }
 
+        // If no owner currently holds the project lease (or a CLI client holds
+        // it), this active TUI automatically claims ownership.
+        let should_auto_claim = match record.as_ref().and_then(|r| r.owner.as_ref()) {
+            None => true,
+            Some(owner) => owner.kind == ClientKind::Cli,
+        };
+        if should_auto_claim {
+            if let Some(handle) = self.project_handle() {
+                self.claim_process_ownership(handle.clone());
+                record = self
+                    .engine
+                    .process_ownership_status(&paths.root, &handle)
+                    .ok()
+                    .flatten();
+            }
+        }
+
         let is_owner = record
             .as_ref()
             .and_then(|r| r.owner.as_ref())
             .map(|o| o.client_id == self.client_identity.client_id)
             .unwrap_or(false);
+
+        if is_owner {
+            self.viewer_guards.clear();
+            if self.ownership_guard.is_none() {
+                if let Some(handle) = self.project_handle() {
+                    self.ownership_guard = Some(ProcessOwnershipGuard::new(
+                        &paths.root,
+                        handle,
+                        self.client_identity.client_id.clone(),
+                    ));
+                }
+            }
+        }
+
+        // If a takeover request is pending and this TUI is the current owner,
+        // automatically answer the presence verification using `heartbeat`
+        // before surfacing the confirmation popup to the user.
+        if is_owner {
+            let needs_heartbeat_ack = record
+                .as_ref()
+                .and_then(|r| r.owner.as_ref().zip(r.takeover_request.as_ref()))
+                .is_some_and(|(owner, req)| {
+                    !macc_core::process_ownership::owner_responded_to_takeover(owner, req)
+                });
+            if needs_heartbeat_ack {
+                if let Some(handle) = self.coordinator_handle().or_else(|| self.project_handle()) {
+                    let _ = self.engine.process_heartbeat(
+                        &paths.root,
+                        &handle,
+                        &self.client_identity.client_id,
+                    );
+                    record = self
+                        .project_handle()
+                        .and_then(|h| {
+                            self.engine
+                                .process_ownership_status(&paths.root, &h)
+                                .ok()
+                                .flatten()
+                        })
+                        .or(record);
+                }
+            }
+        }
 
         let active_request_id = record
             .as_ref()
@@ -2208,6 +2263,8 @@ impl AppState {
             })
             .cloned();
         self.last_ownership_refresh = Some(Instant::now());
+        self.last_ownership_change_token =
+            Some(macc_core::process_ownership::ownership_change_token(&paths.root));
         self.coordinator_ownership_last_refresh = self.last_ownership_refresh;
         self.sync_coordinator_ownership_view();
     }
@@ -2238,33 +2295,40 @@ impl AppState {
             return;
         };
 
+        // If we are waiting on a pending takeover request whose current owner
+        // has not answered the automatic heartbeat within the verification
+        // window, trigger liveness verification so ownership transfers immediately.
+        if !self.ownership_state.is_owner {
+            let unverified_takeover = self
+                .ownership_state
+                .record
+                .as_ref()
+                .and_then(|r| r.owner.as_ref().zip(r.takeover_request.as_ref()))
+                .is_some_and(|(owner, req)| {
+                    !macc_core::process_ownership::owner_responded_to_takeover(owner, req)
+                });
+            if unverified_takeover {
+                let _ = macc_core::service::process_ownership::verify_takeover_owner_liveness(
+                    &paths.root,
+                    &handle,
+                );
+            }
+        }
+
+        // Event-driven view refresh: only refresh `ownership_state` when the
+        // ownership engine has published a state change.
+        let current_token = macc_core::process_ownership::ownership_change_token(&paths.root);
+        if self.last_ownership_change_token != Some(current_token) {
+            self.refresh_ownership_state();
+        }
+
+        // Silent keepalive heartbeat for active guards (does not refresh the view).
         let now = Instant::now();
-        let should_refresh = self
-            .last_ownership_refresh
+        let heartbeat_due = self
+            .coordinator_ownership_last_heartbeat
             .map(|t| now.duration_since(t) >= Duration::from_secs(5))
             .unwrap_or(true);
-        if should_refresh {
-            self.refresh_ownership_state();
-            if self.ownership_state.is_owner && self.ownership_guard.is_none() {
-                self.claim_process_ownership(handle.clone());
-            }
-
-            if self.ownership_state.pending_incoming_request.is_none() {
-                if let Some(request) = self
-                    .ownership_state
-                    .record
-                    .as_ref()
-                    .and_then(|record| record.takeover_request.clone())
-                    .filter(|request| {
-                        self.ownership_state.is_owner
-                            && self.ownership_state.dismissed_request_id.as_deref()
-                                != Some(request.request_id.as_str())
-                    })
-                {
-                    self.handle_takeover_request_received(request);
-                }
-            }
-
+        if heartbeat_due {
             let heartbeat_count =
                 usize::from(self.ownership_guard.is_some()) + self.viewer_guards.len();
             for _ in 0..heartbeat_count {
@@ -2275,6 +2339,8 @@ impl AppState {
                 );
             }
             self.coordinator_ownership_last_heartbeat = Some(now);
+            self.last_ownership_change_token =
+                Some(macc_core::process_ownership::ownership_change_token(&paths.root));
         }
     }
 
@@ -2966,7 +3032,6 @@ impl AppState {
             .filter(|request| {
                 request.request_id == active_request.request_id
                     && request.requester.client_id == active_request.requester.client_id
-                    && request.requested_at == active_request.requested_at
             })
         else {
             return;
@@ -6716,7 +6781,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_exit_releases_lease_while_tui_stays_open() {
+    fn coordinator_exit_retains_project_lease_while_tui_stays_open() {
         let dir = tempdir().expect("tempdir");
         sample_project(dir.path());
         let handle = ProcessHandle {
@@ -6740,14 +6805,24 @@ mod tests {
         let lease = project_lease(dir.path())
             .expect("load lease")
             .expect("project lease");
-        assert!(lease.owner.is_none());
+        assert!(
+            lease.owner.is_some(),
+            "an active TUI retains project ownership even after the coordinator process exits"
+        );
+        assert!(state.ownership_state.is_owner);
         assert!(!state.coordinator_ownership_attached);
-        assert!(state.ownership_guard.is_none());
+        assert!(state.ownership_guard.is_some());
         assert!(!state.should_quit, "the TUI must remain open");
+
+        state.release_ownership_on_exit();
+        let lease_after_exit = project_lease(dir.path())
+            .expect("load lease")
+            .expect("project lease");
+        assert!(lease_after_exit.owner.is_none());
     }
 
     #[test]
-    fn successful_tui_stop_releases_coordinator_lease() {
+    fn successful_tui_stop_retains_project_lease_until_tui_exit() {
         let dir = tempdir().expect("tempdir");
         sample_project(dir.path());
         let handle = ProcessHandle {
@@ -6768,8 +6843,40 @@ mod tests {
         let lease = project_lease(dir.path())
             .expect("load lease")
             .expect("project lease");
-        assert!(lease.owner.is_none());
+        assert!(lease.owner.is_some());
+        assert!(state.ownership_state.is_owner);
         assert!(!state.coordinator_ownership_attached);
+        assert!(state.ownership_guard.is_some());
+
+        state.release_ownership_on_exit();
+        let lease_after_exit = project_lease(dir.path())
+            .expect("load lease")
+            .expect("project lease");
+        assert!(lease_after_exit.owner.is_none());
+    }
+
+    #[test]
+    fn single_active_tui_becomes_owner_even_without_running_coordinator() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine);
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_context.project_root = dir.path().to_path_buf();
+
+        state.scan_and_attach_to_running_processes();
+
+        assert!(state.ownership_state.is_owner);
+        assert!(state.ownership_guard.is_some());
+        assert!(!state.coordinator_ownership_attached);
+        let lease = project_lease(dir.path())
+            .expect("load lease")
+            .expect("project lease");
+        assert_eq!(
+            lease.owner.as_ref().map(|o| o.client_id.as_str()),
+            Some(state.client_identity.client_id.as_str())
+        );
     }
 
     #[test]

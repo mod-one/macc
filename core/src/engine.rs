@@ -2420,7 +2420,7 @@ fields: []
         let _registered = engine.process_register(&paths.root, handle.clone())?;
         let owner_identity = ClientIdentity {
             client_id: "owner-client".into(),
-            kind: ClientKind::Cli,
+            kind: ClientKind::Tui,
             connected_at: "2026-05-21T00:00:00Z".into(),
             last_heartbeat: String::new(),
         };

@@ -80,6 +80,7 @@ impl OwnershipStore {
             }
         })?;
 
+        super::events::bump_ownership_change_seq();
         Ok(())
     }
 
@@ -159,6 +160,28 @@ fn load_takeover_policy(
 
 fn store_path(repo_root: &Path) -> PathBuf {
     repo_root.join(STORE_RELATIVE_PATH)
+}
+
+/// Lightweight change token combining the in-process publication sequence and
+/// the on-disk ownership store metadata. Callers can compare tokens to refresh
+/// ownership views strictly when the ownership engine publishes a change.
+pub fn ownership_change_token(repo_root: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::UNIX_EPOCH;
+
+    let mut hasher = DefaultHasher::new();
+    super::events::ownership_change_seq().hash(&mut hasher);
+    let path = store_path(repo_root);
+    if let Ok(meta) = fs::metadata(&path) {
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(dur) = modified.duration_since(UNIX_EPOCH) {
+                dur.as_nanos().hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn temp_path(path: &Path) -> PathBuf {

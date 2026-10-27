@@ -128,17 +128,17 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
         if state.coordinator_stop_task_confirm_id.is_some() {
             return rows(vec![("Enter", "Confirm task stop"), ("Esc", "Cancel")]);
         }
-        if state
-            .coordinator_ownership
-            .pending_incoming_request
-            .is_some()
-        {
-            return rows(vec![
-                ("a", "Accept takeover"),
-                ("r", "Reject takeover"),
-                ("Esc", "Dismiss"),
-            ]);
-        }
+    }
+    if state
+        .coordinator_ownership
+        .pending_incoming_request
+        .is_some()
+    {
+        return rows(vec![
+            ("a", "Accept takeover"),
+            ("r", "Reject takeover"),
+            ("Esc", "Dismiss"),
+        ]);
     }
     if screen == Screen::Tools && state.is_tool_install_confirmation_open() {
         return rows(vec![("Enter", "Confirm installation"), ("Esc", "Cancel")]);

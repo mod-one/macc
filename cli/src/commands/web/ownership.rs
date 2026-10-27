@@ -219,6 +219,9 @@ pub async fn remove_viewer_handler(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let client_id = client_id_from_headers(&headers)?;
     let handle = build_handle(&state, &kind, query.pid)?;
+    let _ = state
+        .engine
+        .process_ownership_release(&state.paths.root, &handle, &client_id);
     state
         .engine
         .process_unregister_viewer(&state.paths.root, &handle, &client_id)?;
@@ -237,6 +240,20 @@ pub async fn request_takeover_handler(
         state
             .engine
             .process_ownership_request_takeover(&state.paths.root, &handle, identity)?;
+    let root = state.paths.root.clone();
+    let verify_handle = handle.clone();
+    tokio::spawn(async move {
+        let wait_ms =
+            (macc_core::process_ownership::heartbeat::OWNER_HEARTBEAT_VERIFY_MS as u64) + 150;
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            macc_core::service::process_ownership::verify_takeover_owner_liveness(
+                &root,
+                &verify_handle,
+            )
+        })
+        .await;
+    });
     Ok(Json(TakeoverRequestResponse { request_id }))
 }
 

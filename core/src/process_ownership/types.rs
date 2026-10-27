@@ -8,6 +8,13 @@ pub enum ClientKind {
     Cli,
 }
 
+impl ClientKind {
+    /// Interactive UI clients (TUI and Web) take priority over one-shot CLI clients.
+    pub fn is_interactive_ui(&self) -> bool {
+        matches!(self, Self::Tui | Self::Web)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ClientIdentity {
     pub client_id: String,

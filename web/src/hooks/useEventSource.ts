@@ -121,6 +121,10 @@ export function useEventSource(
       if (!active) {
         return;
       }
+      if (typeof EventSource === 'undefined') {
+        setConnectionState('closed');
+        return;
+      }
 
       const nextSource = new EventSource(buildEventSourceUrl(path, options.baseUrl, lastEventId));
       source = nextSource;
