@@ -144,3 +144,22 @@ LAST_ERROR_CODE=E601
 if run_tool .macc/prompt 1 1; then exit 1; fi
 jq -e '.result_kind == "precondition_unmet" and .error_code == "E903" and .exit_status == 1 and .unmet_preconditions == ["dependency API missing"]' .macc/precondition-payload >/dev/null
 printf 'Non-zero structured precondition test passed.\n'
+
+# Optional metadata remains structured and cannot leak between invocations.
+get_active_model() { printf '%s' "${fixture_model:-}"; }
+get_active_effort() { printf '%s' "${fixture_effort:-}"; }
+for combination in both model effort absent; do
+  fixture_model=""; fixture_effort=""
+  case "$combination" in
+    both) fixture_model=probe-model; fixture_effort=high ;;
+    model) fixture_model=probe-model ;;
+    effort) fixture_effort=high ;;
+  esac
+  record_completion_evidence "META-$combination" title already_satisfied 'Metadata fixture verified.' "{\"id\":\"META-$combination\"}"
+  message="$(git log -1 --format=%B)"
+  grep -Fxq "[macc:tool $tool]" <<< "$message"
+  if [[ -n "$fixture_model" ]]; then grep -Fxq "[macc:model $fixture_model]" <<< "$message"; else ! grep -Fq '[macc:model ' <<< "$message"; fi
+  if [[ -n "$fixture_effort" ]]; then grep -Fxq "[macc:effort $fixture_effort]" <<< "$message"; else ! grep -Fq '[macc:effort ' <<< "$message"; fi
+  [[ -z "${tool_meta:-}" ]]
+done
+echo 'Structured optional metadata tests passed.'

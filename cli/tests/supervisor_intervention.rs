@@ -66,6 +66,11 @@ esac
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(root.join(".macc/tools.d/fake.tool.yaml"),format!("api_version: v1\nid: fake\ndisplay_name: Fake\nfields: []\nperformer:\n  command: {}\n  runner: unused\n  args: []\n  prompt:\n    mode: arg\n",script.display())).unwrap();
     std::fs::write(root.join(".macc/macc.yaml"),"tools:\n  enabled: [fake]\nautomation:\n  coordinator:\n    reference_branch: master\n  supervisor:\n    tool: fake\n    watchdog_interval_seconds: 1\n    max_restart_attempts: 1\n    intervention_timeout_seconds: 10\n    validation_commands:\n      - \"test $(cat defect.txt) = fixed\"\n").unwrap();
+    // These scenarios exercise supervisor recovery, not optional provider setup.
+    // Real O2 preparation is covered by the dedicated O2 CLI/runner fixtures.
+    let config_path = root.join(".macc/macc.yaml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(config_path,format!("{config}settings:\n  offline: true\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\n")).unwrap();
     git(root, &["init", "-q", "-b", "master"]);
     git(root, &["config", "user.name", "Supervisor Test"]);
     git(

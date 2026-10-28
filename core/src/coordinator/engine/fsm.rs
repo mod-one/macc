@@ -2009,6 +2009,12 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             ));
         }
         loop {
+            crate::coordinator::control::drain(
+                self.repo_root,
+                self.env_cfg,
+                self.coordinator,
+                &mut self.run_state,
+            );
             if !coordinator_pause_file_path(self.repo_root).exists() {
                 if let Some(log) = self.logger {
                     let _ = log.note("- Resume signal received; continuing run loop".to_string());
@@ -2031,6 +2037,12 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             ));
         }
         loop {
+            crate::coordinator::control::drain(
+                self.repo_root,
+                self.env_cfg,
+                self.coordinator,
+                &mut self.run_state,
+            );
             if !coordinator_pause_file_path(self.repo_root).exists() {
                 if let Some(log) = self.logger {
                     let _ = log.note("- Resume signal received; continuing run loop".to_string());

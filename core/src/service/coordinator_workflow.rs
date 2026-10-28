@@ -2243,6 +2243,8 @@ pub fn coordinator_block_task(
     Ok(())
 }
 
+#[path = "coordinator_unblock.rs"]
+pub(crate) mod unblocking;
 pub fn coordinator_unblock_task(
     paths: &ProjectPaths,
     coordinator_cfg: Option<&CoordinatorConfig>,
@@ -2250,120 +2252,7 @@ pub fn coordinator_unblock_task(
     task_id: &str,
     evidence: &str,
 ) -> Result<()> {
-    let mut state_args = BTreeMap::new();
-    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
-    let value =
-        crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
-    let mut registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
-    let task = registry.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Cannot unblock unknown task '{task_id}'."))
-    })?;
-    if task.workflow_state() != Some(WorkflowState::Blocked) {
-        return Err(MaccError::Validation(format!(
-            "Task '{task_id}' is not blocked."
-        )));
-    }
-    if task.task_runtime.last_error_code.as_deref() == Some("E905") {
-        return Err(MaccError::Validation(format!(
-            "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
-        )));
-    }
-    // Reconcile before changing task state. A conflict preserves the original
-    // worktree and leaves the task blocked, with durable content/index refs.
-    let repaired_base = if task.has_worktree_attached() {
-        let reference =
-            crate::config::CoordinatorConfigResolved::resolve(coordinator_cfg).reference_branch;
-        Some(crate::coordinator::repair_handoff::reconcile(
-            &paths.root,
-            task,
-            &reference,
-        )?)
-    } else {
-        None
-    };
-    if let Some(block) = task.blocked_on_external.as_ref() {
-        task.task_runtime.external_block_resolution =
-            Some(crate::coordinator::model::ExternalBlockResolution {
-                evidence: evidence.to_string(),
-                resolved_at: crate::coordinator::helpers::now_iso_coordinator(),
-                block_reason: block.reason.clone(),
-                tracking_id: block.tracking_id.clone(),
-            });
-    }
-    task.set_workflow_state(WorkflowState::Todo);
-    let runtime = task.ensure_runtime();
-    runtime.set_status(RuntimeStatus::Idle);
-    runtime.pid = None;
-    if let Some(base) = repaired_base {
-        runtime.extra.insert(
-            crate::coordinator::repair_handoff::RESUME_KEY.into(),
-            serde_json::json!({"base":base,"evidence":evidence}),
-        );
-    }
-    runtime.last_error = None;
-    runtime.last_error_code = None;
-    runtime.last_error_origin = None;
-    runtime.last_error_message = None;
-    runtime
-        .extra
-        .remove(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY);
-    let changed = crate::coordinator::task_selector::reconcile_task_blocks(
-        &mut registry,
-        &crate::coordinator::helpers::now_iso_coordinator(),
-    );
-    crate::coordinator::state::coordinator_state_registry_save(
-        &paths.root,
-        &state_args,
-        &registry.to_value()?,
-    )?;
-    let detail = format!(
-        "Task {task_id} unblocked with evidence: {evidence}. Reconciled: {}",
-        if changed.is_empty() {
-            "none".to_string()
-        } else {
-            changed.join(", ")
-        }
-    );
-    let unblock_record = crate::coordinator::CoordinatorEventRecord {
-        schema_version: "1".into(),
-        event_id: format!(
-            "evt-task_unblocked-{}-{}",
-            task_id,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ),
-        seq: 0,
-        ts: crate::coordinator::helpers::now_iso_coordinator(),
-        source: "coordinator:cli".into(),
-        task_id: Some(task_id.to_string()),
-        event_type: "task_unblocked".into(),
-        phase: Some("dispatch".into()),
-        status: "todo".into(),
-        detail: Some(detail.clone()),
-        msg: Some(detail.clone()),
-        payload: serde_json::json!({
-            "message": detail,
-            "evidence": evidence,
-        }),
-        run_id: None,
-        coordinator_epoch: None,
-        claim_id: None,
-        extra: BTreeMap::new(),
-    };
-    let sent_via_ipc =
-        crate::coordinator::ipc::send_event_to_coordinator_sync(&paths.root, &unblock_record)
-            .unwrap_or(false);
-    if !sent_via_ipc {
-        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-            &paths.root,
-            "task_unblocked",
-            task_id,
-            "dispatch",
-            "todo",
-            &detail,
-            "info",
-        );
-    }
-    Ok(())
+    unblocking::execute(paths, coordinator_cfg, env_cfg, task_id, evidence)
 }
 
 /// Identity recorded with a decision when `--as` is not given: the operator's

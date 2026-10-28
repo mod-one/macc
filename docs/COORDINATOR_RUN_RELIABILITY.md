@@ -97,3 +97,44 @@ cannot copy an unfinished task into a generic repair commit or attest its delive
 See [supervisor handoff](SUPERVISOR.md#retained-task-handoff-and-repair-traceability)
 for recovery artifacts, retry semantics and the distinction between
 `repair_integrated`, `restart_requested` and verified `recovered` execution.
+
+## Revision-checked unblock commands
+
+`macc coordinator unblock-task --task <id> --evidence <proof>` uses a control
+request when the coordinator is alive. It carries a unique request ID and the
+fingerprint of the task inspected by the client. The owning coordinator processes
+it between lifecycle phases (also while paused), rechecks the fingerprint and
+blocked state, reconciles the retained worktree, saves the state and then returns
+an acknowledgement. Offline unblocks use the same repair/validation operation.
+A live endpoint failure does not silently fall back to a competing registry write.
+
+A repeated request ID with identical contents is acknowledged without applying the
+transition again, even if the task has since advanced. A changed payload or stale
+fingerprint is rejected. `task_unblocked` records remain informational audit events;
+replaying them cannot reopen delivered work, erase a later failure or reset a PID.
+The task retains a small `unblock_control` receipt; the next claim consumes the
+existing `repair_resume` authorization as before.
+
+The IPC transport has one five-second connect/write/read deadline, bounded replies
+and numeric loopback addresses only. The server discards queued commands whose acknowledgement wait was cancelled
+or whose queue deadline expired. A client timeout does not establish cancellation:
+inspect the task before retrying, as an accepted repair may still complete. Async callers use `control::send().await`
+or `spawn_blocking` for the synchronous service API so the listener and owner loop
+remain schedulable. No provider or model is involved in an unblock request.
+
+Checkpoint migration is automatic only between existing `worker-<digits>` or
+`slot-<digits>` worktrees immediately under the project's `.macc/worktree/` pool.
+Both must belong to the same repository and contain the same task in their scoped
+PRD. Present MACC metadata must match the real branch and slot identity. Both slots
+must have no active session lease. Moving to the main checkout or an unrelated
+worktree requires explicit reconciliation, rather than a slot-name heuristic.
+
+## Deterministic CLI regression fixtures
+
+Adapter-only Apply/catalogue tests configure fixture tools explicitly and disable
+native preparation/network checks in their temporary project. Tests of indexing
+and provider preparation use their own initialized Git fixtures and controlled
+processes; real provider installation remains opt-in. Local HTTP fixtures own and
+join their server threads, bound request reads and I/O, and serve multiple requests
+without leaking an accept loop. Tests should not depend on tools or cached GitHub
+availability installed on the developer's machine.

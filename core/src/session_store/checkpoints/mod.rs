@@ -9,6 +9,7 @@ mod model;
 #[cfg(test)]
 mod resume_tests;
 mod schema;
+mod slot_reassignment;
 #[cfg(test)]
 mod tests;
 use super::*;

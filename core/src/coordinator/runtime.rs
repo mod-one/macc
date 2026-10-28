@@ -136,9 +136,6 @@ pub enum CoordinatorRuntimeEventKind {
         phase: Option<String>,
         message: Option<String>,
     },
-    TaskUnblocked {
-        evidence: String,
-    },
     /// A pre-retry salvage check was attempted for a task worktree.
     /// Emitted before the coordinator decides whether to retry on the same
     /// worktree or abandon the slot.
@@ -223,6 +220,8 @@ pub struct CoordinatorRunState {
     pub merge_event_rx: tokio::sync::mpsc::UnboundedReceiver<CoordinatorMergeEvent>,
     pub runtime_event_bus_tx: tokio::sync::broadcast::Sender<CoordinatorRuntimeEvent>,
     pub runtime_event_bus_rx: tokio::sync::broadcast::Receiver<CoordinatorRuntimeEvent>,
+    pub control_tx: tokio::sync::mpsc::Sender<crate::coordinator::control::Pending>,
+    pub control_rx: tokio::sync::mpsc::Receiver<crate::coordinator::control::Pending>,
     pub last_heartbeat_log_at: Option<std::time::Instant>,
     pub heartbeat_updates_since_log: usize,
     pub dispatch_retry_not_before: HashMap<String, std::time::Instant>,
@@ -327,10 +326,13 @@ pub trait PhaseExecutor {
 
 impl CoordinatorRunState {
     pub fn new() -> Self {
+        let (control_tx, control_rx) = tokio::sync::mpsc::channel(32);
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (merge_event_tx, merge_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (runtime_event_bus_tx, runtime_event_bus_rx) = tokio::sync::broadcast::channel(4096);
         Self {
+            control_tx,
+            control_rx,
             active_jobs: HashMap::new(),
             join_set: tokio::task::JoinSet::new(),
             event_tx,
@@ -912,15 +914,6 @@ pub fn raw_event_to_runtime_event(
         "failed" => CoordinatorRuntimeEventKind::Failed {
             phase: event_phase,
             message: event_message,
-        },
-        "task_unblocked" => CoordinatorRuntimeEventKind::TaskUnblocked {
-            evidence: event
-                .payload
-                .get("evidence")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| event.message())
-                .unwrap_or("")
-                .to_string(),
         },
         // L4-EVENTS-001: reliability observability event kinds
         // Metadata is read from the flat payload object.

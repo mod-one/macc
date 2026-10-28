@@ -8,10 +8,11 @@ use std::time::Duration;
 fn project() -> tempfile::TempDir {
     let t = tempfile::tempdir().unwrap();
     let r = t.path();
-    std::fs::create_dir_all(r.join(".macc")).unwrap();
+    std::fs::create_dir_all(r.join(".macc/tools.d")).unwrap();
+    std::fs::write(r.join(".macc/tools.d/fake.tool.yaml"),"api_version: v1\nid: fake\ndisplay_name: Launch fixture\nfields: []\nperformer:\n  command: /bin/true\n  runner: unused\n  args: []\n  prompt:\n    mode: arg\n").unwrap();
     std::fs::write(
         r.join(".macc/macc.yaml"),
-        "tools:\n  enabled: [codex]\nautomation:\n  coordinator:\n    reference_branch: master\n",
+        "tools:\n  enabled: [fake]\nsettings:\n  offline: true\ncontext_engine:\n  enabled: false\ncode_intelligence:\n  enabled: false\nautomation:\n  coordinator:\n    reference_branch: master\n",
     )
     .unwrap();
     std::fs::write(r.join("prd.json"), "{\"tasks\":[]}").unwrap();

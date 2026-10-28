@@ -4030,6 +4030,8 @@ fi
             fixture_engine(&ids),
         )?;
 
+        crate::test_support::isolate_fixture_project(&temp_base, &[tool_one.clone()]);
+
         // 2. Apply with first tool
         run_with_engine(
             Cli {
@@ -4145,6 +4147,8 @@ fi
             },
             TestEngine::with_fixtures(),
         )?;
+
+        crate::test_support::isolate_fixture_project(&temp_base, &[]);
 
         // 2. Add skill
         run_with_engine(
@@ -4264,6 +4268,8 @@ fi
             },
             TestEngine::with_fixtures(),
         )?;
+
+        crate::test_support::isolate_fixture_project(&temp_base, &[]);
 
         // 2. Add MCP
         run_with_engine(
@@ -4689,31 +4695,7 @@ fi
 
     #[test]
     fn test_search_remote_cli() -> macc_core::Result<()> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::thread;
-
-        // Mock server
-        let (listener, port) = match bind_loopback() {
-            Some(v) => v,
-            None => return Ok(()),
-        };
-        let server_url = format!("http://127.0.0.1:{}", port);
-
-        thread::spawn(move || {
-            while let Ok((mut stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(&mut stream);
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
-                    continue;
-                }
-                while line.trim() != "" {
-                    line.clear();
-                    if reader.read_line(&mut line).is_err() {
-                        break;
-                    }
-                }
-
-                let response_body = r#"{
+        let response_body = r#"{
                 "items": [
                     {
                         "id": "remote-skill-1",
@@ -4730,14 +4712,13 @@ fi
                     }
                 ]
             }"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_body.len(),
-                    response_body
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
-        });
+        let Some(server) = crate::test_support::http::Server::start(
+            response_body.as_bytes().to_vec(),
+            "application/json",
+        ) else {
+            return Ok(());
+        };
+        let server_url = format!("http://127.0.0.1:{}", server.port);
 
         let temp_base =
             std::env::temp_dir().join(format!("macc_search_remote_test_{}", uuid_v4_like()));
@@ -4797,9 +4778,7 @@ fi
 
     #[test]
     fn test_install_skill_multi_zip_cli() -> macc_core::Result<()> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::thread;
-
+        use std::io::Write;
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -4853,35 +4832,12 @@ fi
             buf
         };
 
-        // 2. Mock server to serve this zip
-        let (listener, port) = match bind_loopback() {
-            Some(v) => v,
-            None => return Ok(()),
+        let Some(server) =
+            crate::test_support::http::Server::start(archive_bytes, "application/zip")
+        else {
+            return Ok(());
         };
-        let server_url = format!("http://127.0.0.1:{}/skills.zip", port);
-
-        thread::spawn(move || {
-            while let Ok((mut stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(&mut stream);
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
-                    continue;
-                }
-                while line.trim() != "" {
-                    line.clear();
-                    if reader.read_line(&mut line).is_err() {
-                        break;
-                    }
-                }
-
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    archive_bytes.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.write_all(&archive_bytes);
-            }
-        });
+        let server_url = format!("http://127.0.0.1:{}/skills.zip", server.port);
 
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_multi_zip_test_{}", uuid_v4_like()));

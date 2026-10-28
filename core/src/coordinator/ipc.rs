@@ -62,54 +62,6 @@ pub fn read_performer_ipc_addr(repo_root: &Path) -> Option<String> {
     }
 }
 
-pub fn send_event_to_coordinator_sync(
-    repo_root: &Path,
-    event: &crate::coordinator::CoordinatorEventRecord,
-) -> Result<bool> {
-    let Some(addr) = read_performer_ipc_addr(repo_root) else {
-        return Ok(false);
-    };
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    let timeout = Duration::from_millis(1500);
-    let socket_addrs: Vec<std::net::SocketAddr> = match addr.to_socket_addrs() {
-        Ok(addrs) => addrs.collect(),
-        Err(_) => return Ok(false),
-    };
-    if socket_addrs.is_empty() {
-        return Ok(false);
-    }
-    let mut stream = match TcpStream::connect_timeout(&socket_addrs[0], timeout) {
-        Ok(s) => s,
-        Err(_) => return Ok(false),
-    };
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-
-    let line = serde_json::to_string(event).map_err(|e| MaccError::Validation(e.to_string()))?;
-    if stream.write_all(line.as_bytes()).is_err() {
-        return Ok(false);
-    }
-    if stream.write_all(b"\n").is_err() {
-        return Ok(false);
-    }
-    if stream.flush().is_err() {
-        return Ok(false);
-    }
-
-    let mut reader = BufReader::new(stream);
-    let mut ack_line = String::new();
-    if reader.read_line(&mut ack_line).is_err() {
-        return Ok(false);
-    }
-    let Ok(ack) = serde_json::from_str::<PerformerIpcAck>(ack_line.trim()) else {
-        return Ok(false);
-    };
-    Ok(ack.ok)
-}
-
 pub async fn ensure_performer_ipc_listener(
     repo_root: &Path,
     state: &mut CoordinatorRunState,
@@ -164,6 +116,7 @@ pub async fn ensure_performer_ipc_listener(
     })?;
     let addr = local_addr.to_string();
     let runtime_event_bus_tx = state.runtime_event_bus_tx.clone();
+    let control_tx = state.control_tx.clone();
     let project_paths = ProjectPaths::from_root(repo_root);
     let alive_flag = state.performer_ipc_listener_alive.clone();
     alive_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -210,9 +163,15 @@ pub async fn ensure_performer_ipc_listener(
                 };
                 let runtime_event_bus_tx = runtime_event_bus_tx.clone();
                 let project_paths = project_paths.clone();
+                let control_tx = control_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(err) =
-                        handle_ipc_connection(stream, &project_paths, &runtime_event_bus_tx).await
+                    if let Err(err) = handle_ipc_connection(
+                        stream,
+                        &project_paths,
+                        &runtime_event_bus_tx,
+                        &control_tx,
+                    )
+                    .await
                     {
                         tracing::warn!("coordinator IPC connection failed: {}", err);
                     }
@@ -236,6 +195,7 @@ async fn handle_ipc_connection(
     runtime_event_bus_tx: &tokio::sync::broadcast::Sender<
         crate::coordinator::runtime::CoordinatorRuntimeEvent,
     >,
+    control_tx: &tokio::sync::mpsc::Sender<crate::coordinator::control::Pending>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
@@ -248,6 +208,20 @@ async fn handle_ipc_connection(
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        if crate::coordinator::control::is_request(trimmed) {
+            let reply = crate::coordinator::control::receive(trimmed, control_tx).await;
+            let line =
+                serde_json::to_vec(&reply).map_err(|e| MaccError::Validation(e.to_string()))?;
+            write_half
+                .write_all(&line)
+                .await
+                .map_err(|e| MaccError::Validation(e.to_string()))?;
+            write_half
+                .write_all(b"\n")
+                .await
+                .map_err(|e| MaccError::Validation(e.to_string()))?;
+            return Ok(());
         }
         let ack = process_ipc_event(trimmed, project_paths, runtime_event_bus_tx);
         write_ipc_ack(&mut write_half, &ack)
@@ -653,70 +627,6 @@ jq -nc \
         assert!(get_record(&root, &handle)
             .expect("read ownership after drop")
             .is_none());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn send_event_to_coordinator_sync_unblocks_task_via_live_ipc() {
-        let root = temp_root("unblock-sync-ipc");
-        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
-        let project_paths = ProjectPaths::from_root(&root);
-        let storage_paths =
-            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
-        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-        sqlite
-            .init_schema(&sqlite.open().expect("open sqlite"))
-            .expect("init schema");
-
-        let mut state = CoordinatorRunState::new();
-
-        ensure_performer_ipc_listener(&root, &mut state, None)
-            .await
-            .expect("start listener");
-
-        let event = crate::coordinator::CoordinatorEventRecord {
-            schema_version: "1".into(),
-            event_id: "evt-unblock-test-1".into(),
-            seq: 1,
-            ts: "2026-10-27T20:00:00Z".into(),
-            source: "coordinator:cli".into(),
-            task_id: Some("TASK-UNBLOCK-1".into()),
-            event_type: "task_unblocked".into(),
-            phase: Some("dispatch".into()),
-            status: "todo".into(),
-            detail: Some("Unblocked by test".into()),
-            msg: Some("Unblocked by test".into()),
-            payload: serde_json::json!({
-                "message": "Unblocked by test",
-                "evidence": "Operator verified",
-            }),
-            run_id: None,
-            coordinator_epoch: None,
-            claim_id: None,
-            extra: std::collections::BTreeMap::new(),
-        };
-
-        let delivered = super::send_event_to_coordinator_sync(&root, &event)
-            .expect("send event via sync IPC");
-        assert!(delivered, "event should be delivered and acknowledged by listener");
-
-        let runtime_event = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            state.runtime_event_bus_rx.recv(),
-        )
-        .await
-        .expect("receive runtime event within timeout")
-        .expect("valid runtime event");
-
-        assert_eq!(runtime_event.task_id, "TASK-UNBLOCK-1");
-        match runtime_event.kind {
-            crate::coordinator::runtime::CoordinatorRuntimeEventKind::TaskUnblocked { evidence } => {
-                assert_eq!(evidence, "Operator verified");
-            }
-            other => panic!("expected TaskUnblocked, got {:?}", other),
-        }
-
-        drop(state);
         let _ = fs::remove_dir_all(root);
     }
 }
