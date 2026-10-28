@@ -521,6 +521,13 @@ fn heartbeat_web_viewers_once(state: &WebState) {
 
     for record in records {
         let handle = record.process.clone();
+        if record.takeover_request.is_none() {
+            if let Some(owner) = record.owner.as_ref().filter(|o| o.kind == ClientKind::Web) {
+                let _ = state
+                    .engine
+                    .process_heartbeat(&state.paths.root, &handle, &owner.client_id);
+            }
+        }
         for viewer in record.viewers {
             if viewer.kind != ClientKind::Web {
                 continue;

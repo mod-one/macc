@@ -6,6 +6,17 @@ use serde_json::{Map, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static OWNERSHIP_CHANGE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+pub fn bump_ownership_change_seq() -> u64 {
+    OWNERSHIP_CHANGE_SEQ.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+pub fn ownership_change_seq() -> u64 {
+    OWNERSHIP_CHANGE_SEQ.load(Ordering::SeqCst)
+}
 
 pub struct OwnershipEventBroadcaster;
 
@@ -16,8 +27,9 @@ impl OwnershipEventBroadcaster {
         handle: &ProcessHandle,
         payload_fields: Map<String, Value>,
     ) {
-        let message = serialize_message(handle, payload_fields);
-        let raw_event = build_raw_event(event_type, &message);
+        bump_ownership_change_seq();
+        let message = serialize_message(handle, payload_fields.clone());
+        let raw_event = build_raw_event(event_type, &message, &payload_fields);
         if let Err(err) = append_coordinator_event_with_severity(
             repo_root,
             event_type,
@@ -135,6 +147,22 @@ pub fn emit_takeover_timeout(
     OwnershipEventBroadcaster::emit(repo_root, "takeover_timeout", handle, payload);
 }
 
+pub fn emit_ownership_heartbeat(
+    repo_root: &Path,
+    handle: &ProcessHandle,
+    client: &ClientIdentity,
+    verified_request_id: Option<&str>,
+) {
+    let mut payload = client_payload(client);
+    if let Some(request_id) = verified_request_id {
+        payload.insert(
+            "request_id".to_string(),
+            Value::String(request_id.to_string()),
+        );
+    }
+    OwnershipEventBroadcaster::emit(repo_root, "ownership_heartbeat", handle, payload);
+}
+
 fn client_payload(client: &ClientIdentity) -> Map<String, Value> {
     let mut payload = Map::new();
     payload.insert("client".to_string(), serde_json::json!(client));
@@ -148,9 +176,13 @@ fn serialize_message(handle: &ProcessHandle, payload_fields: Map<String, Value>)
     Value::Object(message).to_string()
 }
 
-fn build_raw_event(event_type: &str, message: &str) -> Value {
+fn build_raw_event(
+    event_type: &str,
+    message: &str,
+    payload_fields: &Map<String, Value>,
+) -> Value {
     let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "schema_version": "1",
         "event_id": format!("evt-{}---{}", event_type, seq),
         "run_id": ensure_coordinator_run_id(),
@@ -165,7 +197,19 @@ fn build_raw_event(event_type: &str, message: &str) -> Value {
         "payload": {
             "message": message
         }
-    })
+    });
+    if let Some(map) = obj.as_object_mut() {
+        if let Some(req_id) = payload_fields.get("request_id") {
+            map.insert("request_id".to_string(), req_id.clone());
+        }
+        if let Some(client) = payload_fields.get("client") {
+            map.insert("requester".to_string(), client.clone());
+            if let Some(cid) = client.get("client_id") {
+                map.insert("requester_client_id".to_string(), cid.clone());
+            }
+        }
+    }
+    obj
 }
 
 fn append_event_jsonl(repo_root: &Path, event: &Value) -> std::io::Result<()> {

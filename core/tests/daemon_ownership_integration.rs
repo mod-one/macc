@@ -427,15 +427,15 @@ fn first_connect_takes_ownership_and_later_clients_become_viewers() {
     let first_status = claim_owner(
         &repo_root,
         &handle,
-        fresh_client("cli-owner", ClientKind::Cli),
+        fresh_client("tui-owner", ClientKind::Tui),
     )
-    .expect("first cli claims ownership");
+    .expect("first tui claims ownership");
     let second_status = claim_owner(
         &repo_root,
         &handle,
         fresh_client("cli-viewer", ClientKind::Cli),
     )
-    .expect("second cli joins as viewer");
+    .expect("cli joins as viewer");
     let third_status = claim_owner(
         &repo_root,
         &handle,
@@ -461,13 +461,134 @@ fn first_connect_takes_ownership_and_later_clients_become_viewers() {
         .expect("lease exists");
     assert_eq!(
         lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
-        Some("cli-owner")
+        Some("tui-owner")
     );
     assert_eq!(lease.viewers.len(), 2);
     assert_eq!(lease.viewers[0].client_id, "cli-viewer");
     assert_eq!(lease.viewers[0].kind, ClientKind::Cli);
     assert_eq!(lease.viewers[1].client_id, "web-viewer");
     assert_eq!(lease.viewers[1].kind, ClientKind::Web);
+}
+
+#[test]
+fn tui_and_web_clients_preempt_cli_owner() {
+    let repo_root = unique_repo_root("tui-web-preempt-cli");
+    let handle = coordinator_handle(&repo_root);
+
+    register_process(&repo_root, handle.clone()).expect("register coordinator");
+
+    let cli_status = claim_owner(
+        &repo_root,
+        &handle,
+        fresh_client("cli-owner", ClientKind::Cli),
+    )
+    .expect("cli claims ownership");
+    assert_eq!(
+        cli_status,
+        macc_core::process_ownership::OwnershipStatus::Owner
+    );
+
+    // A Web or TUI client preempts the CLI owner immediately.
+    let web_status = claim_owner(
+        &repo_root,
+        &handle,
+        fresh_client("web-client", ClientKind::Web),
+    )
+    .expect("web preempts cli owner");
+    assert_eq!(
+        web_status,
+        macc_core::process_ownership::OwnershipStatus::Owner
+    );
+
+    let lease = project_lease(&repo_root)
+        .expect("load lease")
+        .expect("lease exists");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some("web-client")
+    );
+    assert_eq!(lease.viewers.len(), 1);
+    assert_eq!(lease.viewers[0].client_id, "cli-owner");
+}
+
+#[test]
+fn release_owner_immediately_promotes_interactive_viewer_over_cli() {
+    use macc_core::service::process_ownership::release_owner;
+
+    let repo_root = unique_repo_root("release-promotes-interactive");
+    let handle = coordinator_handle(&repo_root);
+    register_process(&repo_root, handle.clone()).expect("register coordinator");
+
+    claim_owner(&repo_root, &handle, fresh_client("tui-1", ClientKind::Tui)).expect("tui-1 owner");
+    claim_owner(&repo_root, &handle, fresh_client("cli-1", ClientKind::Cli)).expect("cli-1 viewer");
+    claim_owner(&repo_root, &handle, fresh_client("web-1", ClientKind::Web)).expect("web-1 viewer");
+
+    release_owner(&repo_root, &handle, "tui-1").expect("release tui-1");
+
+    let lease = project_lease(&repo_root)
+        .expect("load lease")
+        .expect("lease exists");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some("web-1"),
+        "sole remaining interactive client (web-1) must immediately become owner ahead of cli-1"
+    );
+}
+
+#[test]
+fn takeover_request_evicts_owner_that_fails_to_answer_heartbeat() {
+    use macc_core::service::process_ownership::{heartbeat, verify_takeover_owner_liveness};
+
+    let repo_root = unique_repo_root("takeover-heartbeat-check");
+    let handle = coordinator_handle(&repo_root);
+    register_process(&repo_root, handle.clone()).expect("register coordinator");
+
+    claim_owner(&repo_root, &handle, fresh_client("tui-owner", ClientKind::Tui))
+        .expect("tui-owner claims");
+    let req_id = request_takeover(
+        &repo_root,
+        &handle,
+        fresh_client("web-requester", ClientKind::Web),
+    )
+    .expect("request takeover");
+
+    // Case A: owner responds via heartbeat -> stays owner, request remains pending for user popup.
+    heartbeat(&repo_root, &handle, "tui-owner").expect("owner auto heartbeat");
+    let lease_verified = project_lease(&repo_root).unwrap().unwrap();
+    let owner = lease_verified.owner.as_ref().unwrap();
+    let req = lease_verified.takeover_request.as_ref().unwrap();
+    assert_eq!(req.request_id, req_id);
+    assert!(macc_core::process_ownership::owner_responded_to_takeover(
+        owner, req
+    ));
+
+    // Case B: a new takeover request where the owner does NOT respond within the verify window.
+    let stale_req_ts = (Utc::now() - Duration::seconds(3)).to_rfc3339();
+    let stale_hb_ts = (Utc::now() - Duration::seconds(5)).to_rfc3339();
+    let proj_handle = project_handle(&repo_root);
+    OwnershipStore::load_and_modify(&repo_root, |store| {
+        if let Some(mut rec) = store.get_record(&proj_handle).cloned() {
+            if let Some(o) = rec.owner.as_mut() {
+                o.last_heartbeat = stale_hb_ts.clone();
+            }
+            if let Some(r) = rec.takeover_request.as_mut() {
+                r.requested_at = stale_req_ts.clone();
+            }
+            store.upsert_record(rec);
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let transferred =
+        verify_takeover_owner_liveness(&repo_root, &handle).expect("verify liveness");
+    assert!(transferred);
+    let lease_after = project_lease(&repo_root).unwrap().unwrap();
+    assert_eq!(
+        lease_after.owner.as_ref().map(|o| o.client_id.as_str()),
+        Some("web-requester")
+    );
+    assert!(lease_after.takeover_request.is_none());
 }
 
 #[test]

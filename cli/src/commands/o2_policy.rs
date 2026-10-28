@@ -27,12 +27,16 @@ pub enum PolicyCommand {
         revision: Option<String>,
     },
 }
-fn output(value: &serde_json::Value) -> Result<()> {
-    print!("{}", macc_core::context::payload::json_line(value)?);
-    Ok(())
+fn output(action: &Action, value: &serde_json::Value, json: bool, is_list: bool) -> Result<()> {
+    if is_list && !super::o2_format::should_output_json(json) {
+        println!("{}", super::o2_format::format_o2_policy_list(value));
+        return Ok(());
+    }
+    super::o2_format::emit_o2(action, value, json)
 }
-pub(super) fn run(app: &AppContext, command: &PolicyCommand) -> Result<()> {
+pub(super) fn run(app: &AppContext, command: &PolicyCommand, json: bool) -> Result<()> {
     let paths = app.project_paths()?;
+    let is_list = matches!(command, PolicyCommand::List);
     let action = match command {
         PolicyCommand::List => Action::Status,
         PolicyCommand::Get { path } => Action::PolicyFieldGet { path: path.clone() },
@@ -43,16 +47,14 @@ pub(super) fn run(app: &AppContext, command: &PolicyCommand) -> Result<()> {
             confirm,
             revision,
         } => {
-            let preview = execute(
-                &paths.root,
-                Action::PolicyFieldPreview {
-                    path: path.clone(),
-                    value: value.clone(),
-                    revision: revision.clone(),
-                },
-            )?;
+            let preview_action = Action::PolicyFieldPreview {
+                path: path.clone(),
+                value: value.clone(),
+                revision: revision.clone(),
+            };
+            let preview = execute(&paths.root, preview_action.clone())?;
             if !apply {
-                return output(&preview);
+                return output(&preview_action, &preview, json, false);
             }
             if *confirm && revision.is_none() {
                 return Err(MaccError::Validation(
@@ -77,7 +79,10 @@ pub(super) fn run(app: &AppContext, command: &PolicyCommand) -> Result<()> {
                     .map_err(|e| MaccError::Validation(e.to_string()))?;
                 if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
                     return output(
+                        &preview_action,
                         &serde_json::json!({"applied":false,"cancelled":true,"preview":preview}),
+                        json,
+                        false,
                     );
                 }
             }
@@ -90,5 +95,5 @@ pub(super) fn run(app: &AppContext, command: &PolicyCommand) -> Result<()> {
             }
         }
     };
-    output(&execute(&paths.root, action)?)
+    output(&action, &execute(&paths.root, action.clone())?, json, is_list)
 }

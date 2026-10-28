@@ -1,7 +1,23 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { getWebClientId, heartbeatProjectOwnership } from '../api/client';
 import { useEventSource } from './useEventSource';
 import { useNotificationStore } from '../stores/notificationStore';
+import { useOwnershipStore } from '../stores/ownershipStore';
 import type { ApiEventPayload } from '../api/models';
+
+const OWNERSHIP_EVENT_TYPES = new Set([
+  'ownership_claimed',
+  'ownership_released',
+  'viewer_joined',
+  'viewer_left',
+  'takeover_requested',
+  'takeover_accepted',
+  'takeover_rejected',
+  'owner_stale',
+  'takeover_timeout',
+  'ownership_heartbeat',
+  'ownership_changed',
+]);
 
 export function useNotificationCenter() {
   const { events } = useEventSource('/events');
@@ -10,6 +26,19 @@ export function useNotificationCenter() {
 
   const processEvent = useCallback((payload: ApiEventPayload) => {
     const { type, status, msg, detail, task_id } = payload;
+
+    if (payload.phase === 'ownership' || OWNERSHIP_EVENT_TYPES.has(type)) {
+      if (type === 'takeover_requested') {
+        const clientId = getWebClientId();
+        const records = useOwnershipStore.getState().records;
+        const isCurrentOwner = records.some((r) => r.owner?.client_id === clientId);
+        if (isCurrentOwner) {
+          void heartbeatProjectOwnership({ clientId }).catch(() => undefined);
+        }
+      }
+      void useOwnershipStore.getState().fetchRecords();
+      return;
+    }
 
     // Task Failed / Blocked
     if (type === 'failed' || type === 'task_blocked' || type === 'command_error' || type === 'dispatch_failed') {

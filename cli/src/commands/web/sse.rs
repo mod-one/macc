@@ -73,6 +73,8 @@ pub(super) fn coordinator_event_stream(
         let _viewer_guards = viewer_guards;
         let mut source_seq_cursor = resolve_source_seq_cursor(&initial_events, last_event_id.as_deref());
         let mut pending_events = pending_events_after(&initial_events, source_seq_cursor);
+        let mut last_ownership_token =
+            macc_core::process_ownership::ownership_change_token(&state.paths.root);
         let mut poll_tick = tokio::time::interval(poll_interval);
         let mut heartbeat_tick = tokio::time::interval(heartbeat_interval);
         poll_tick.tick().await;
@@ -92,6 +94,18 @@ pub(super) fn coordinator_event_stream(
                         }
                         Err(err) => {
                             tracing::warn!("failed to refresh coordinator SSE events: {}", err);
+                        }
+                    }
+                    let current_token =
+                        macc_core::process_ownership::ownership_change_token(&state.paths.root);
+                    if current_token != last_ownership_token {
+                        last_ownership_token = current_token;
+                        let has_ownership_event = pending_events
+                            .iter()
+                            .any(|e| e.phase.as_deref() == Some("ownership"));
+                        if !has_ownership_event {
+                            source_seq_cursor += 1;
+                            yield Ok(build_ownership_changed_sse_event(source_seq_cursor));
                         }
                     }
                 }
@@ -289,6 +303,29 @@ pub(super) fn build_coordinator_sse_event(event: &CoordinatorEvent) -> Event {
         .event("coordinator_event")
         .json_data(event.raw.clone())
         .expect("serialize coordinator event payload")
+}
+
+pub(super) fn build_ownership_changed_sse_event(seq: i64) -> Event {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let event_id = format!("evt-ownership_changed---{}-{}", seq, unix_timestamp_millis());
+    let payload = serde_json::json!({
+        "schema_version": COORDINATOR_EVENT_SCHEMA_VERSION,
+        "event_id": event_id,
+        "seq": seq,
+        "ts": ts,
+        "source": "coordinator:native",
+        "task_id": "-",
+        "type": "ownership_changed",
+        "phase": "ownership",
+        "status": "info",
+        "severity": "info"
+    });
+
+    Event::default()
+        .id(payload["event_id"].as_str().expect("ownership event id"))
+        .event("coordinator_event")
+        .json_data(payload)
+        .expect("serialize ownership changed event payload")
 }
 
 pub(super) fn build_heartbeat_sse_event(source_seq_cursor: i64) -> Event {

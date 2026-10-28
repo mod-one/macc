@@ -13,14 +13,17 @@ import { useNotificationCenter } from '../hooks/useNotificationCenter';
 import {
   claimProjectOwnership,
   getHealth,
-  getProjectOwnership,
   getWebClientId,
-  heartbeatProjectOwnership,
   requestProjectTakeover,
   respondProjectTakeover,
   setWebOwnershipMode,
 } from '../api/client';
-import type { ApiOwnershipRecord } from '../api/models';
+import {
+  useIsOwner,
+  useOwnershipRecord,
+  useOwnershipStore,
+} from '../stores/ownershipStore';
+import { TakeoverNotificationToast } from './TakeoverNotificationToast';
 import { useCoordinatorStore } from '../store';
 import { getHelpSectionForRoute } from '../pages/helpDocs';
 
@@ -91,16 +94,13 @@ const topbarH    = 'var(--topbar-height)';
 const statusbarH = 'var(--statusbar-height)';
 
 /* ── Timing ──────────────────────────────────────────────────────── */
-const LAYOUT_REFRESH_MS      = 10_000;
-const OWNERSHIP_REFRESH_MS   =  2_000;
-const OWNERSHIP_HEARTBEAT_MS = 15_000;
+const LAYOUT_REFRESH_MS = 10_000;
 
 /* ── Component ───────────────────────────────────────────────────── */
 const Layout: React.FC = () => {
   const [collapsed, setCollapsed]               = useState(false);
   const [cmdOpen, setCmdOpen]                   = useState(false);
   const [projectRoot, setProjectRoot]           = useState<string | null>(null);
-  const [ownership, setOwnership]               = useState<ApiOwnershipRecord | null>(null);
   const [ownershipMessage, setOwnershipMessage] = useState<string | null>(null);
   const [webClientId]                           = useState(() => getWebClientId());
   const mainRef                                 = useRef<HTMLElement>(null);
@@ -110,8 +110,10 @@ const Layout: React.FC = () => {
   const setIsOpen   = useNotificationStore((s) => s.setIsOpen);
   const status      = useCoordinatorStore((s) => s.status);
   const loadStatus  = useCoordinatorStore((s) => s.loadStatus);
+  const ownership   = useOwnershipRecord();
+  const isOwner     = useIsOwner();
+  const fetchOwnershipRecords = useOwnershipStore((s) => s.fetchRecords);
 
-  const isOwner        = ownership?.owner?.client_id === webClientId;
   const pendingTakeover = ownership?.takeover_request ?? null;
   const showGitPanel   = !location.pathname.startsWith('/ops/git');
   const contextualHelpSection = getHelpSectionForRoute(location.pathname);
@@ -137,26 +139,19 @@ const Layout: React.FC = () => {
   useEffect(() => {
     let disposed = false;
     const clientId = webClientId;
-    const refresh = async () => {
+    const initOwnership = async () => {
       try {
         await claimProjectOwnership({ clientId });
-        const record = await getProjectOwnership();
         if (!disposed) {
-          setOwnership(record);
-          setWebOwnershipMode(record?.owner?.client_id === clientId ? 'owner' : 'viewer');
+          await fetchOwnershipRecords();
         }
       } catch {
         if (!disposed) setWebOwnershipMode('unknown');
       }
     };
-    const hb = async () => {
-      try { await heartbeatProjectOwnership({ clientId }); } catch { /* silent */ }
-    };
-    void refresh();
-    const rId = setInterval(refresh, OWNERSHIP_REFRESH_MS);
-    const hId = setInterval(hb,      OWNERSHIP_HEARTBEAT_MS);
-    return () => { disposed = true; clearInterval(rId); clearInterval(hId); };
-  }, [webClientId]);
+    void initOwnership();
+    return () => { disposed = true; };
+  }, [webClientId, fetchOwnershipRecords]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -172,6 +167,7 @@ const Layout: React.FC = () => {
   const requestTakeover = async () => {
     try {
       await requestProjectTakeover({ clientId: webClientId });
+      await fetchOwnershipRecords();
       setOwnershipMessage('Takeover requested waiting for the owner to respond.');
       setTimeout(() => setOwnershipMessage(null), 6000);
     } catch { /* silent */ }
@@ -180,7 +176,8 @@ const Layout: React.FC = () => {
   const respondTakeover = (accept: boolean) => {
     if (!pendingTakeover) return;
     respondProjectTakeover(pendingTakeover.request_id, accept, { clientId: webClientId })
-      .then(() => {
+      .then(async () => {
+        await fetchOwnershipRecords();
         setOwnershipMessage(accept ? 'Ownership transferred.' : 'Takeover rejected.');
         setTimeout(() => setOwnershipMessage(null), 4000);
       })
@@ -675,6 +672,7 @@ const Layout: React.FC = () => {
       </div>
 
       {/* Global overlays */}
+      <TakeoverNotificationToast />
       <NotificationsDrawer />
       <CoordinatorLaunchDialog />
       <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} />

@@ -328,11 +328,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     }
 
     let current_screen = state.current_screen();
-    let has_pending_takeover = current_screen == Screen::CoordinatorLive
-        && state
-            .coordinator_ownership
-            .pending_incoming_request
-            .is_some();
+    let has_pending_takeover = state
+        .coordinator_ownership
+        .pending_incoming_request
+        .is_some();
 
     if current_screen == Screen::ToolSettings && state.is_tool_field_editing() {
         match key {
@@ -2676,9 +2675,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         .pending_incoming_request
         .as_ref()
     {
-        if state.current_screen() == Screen::CoordinatorLive {
-            crate::ownership::render_takeover_modal(f, ui::content_area(f.size()), req);
-        }
+        crate::ownership::render_takeover_modal(f, ui::content_area(f.size()), req);
     }
     if state.current_screen() == Screen::CoordinatorLive {
         if state.coordinator_stop_dialog_open {
@@ -3382,7 +3379,7 @@ fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppSta
                 .unwrap_or_else(|| "<none>".to_string());
             (owner, r.viewers.len())
         }
-        None => ("<no coordinator process>".to_string(), 0usize),
+        None => ("<none>".to_string(), 0usize),
     };
     let has_pending_request = state
         .coordinator_ownership

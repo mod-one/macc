@@ -83,11 +83,17 @@ enum Commands {
     },
     /// Memory, context, compaction and code intelligence operations
     O2 {
+        /// Output raw machine JSON
+        #[arg(long, global = true)]
+        json: bool,
         #[command(subcommand)]
         command: commands::o2::O2Command,
     },
     /// Inspect and migrate canonical provider-neutral session ownership
     SessionStore {
+        /// Output raw machine JSON
+        #[arg(long, global = true)]
+        json: bool,
         #[command(subcommand)]
         command: commands::session_store::SessionStoreCommands,
     },
@@ -1379,7 +1385,7 @@ fn main() {
     let cli = Cli::parse();
     let protocol_stdio = matches!(
         &cli.command,
-        Some(Commands::O2 { command }) if command.is_mcp()
+        Some(Commands::O2 { command, .. }) if command.is_mcp()
     ) || matches!(&cli.command, Some(Commands::Apply { .. }));
     init_tracing(cli.verbose, protocol_stdio);
 
@@ -1511,9 +1517,12 @@ fn run_with_engine_provider(
         Some(Commands::Hooks { command }) => {
             commands::hooks::Hooks(app.clone(), command.clone()).run()
         }
-        Some(Commands::O2 { command }) => commands::o2::O2::new(app.clone(), command.clone()).run(),
-        Some(Commands::SessionStore { command }) => {
-            commands::session_store::SessionStoreCommand::new(app.clone(), command.clone()).run()
+        Some(Commands::O2 { json, command }) => {
+            commands::o2::O2::new(app.clone(), command.clone(), *json).run()
+        }
+        Some(Commands::SessionStore { json, command }) => {
+            commands::session_store::SessionStoreCommand::new(app.clone(), command.clone(), *json)
+                .run()
         }
         Some(Commands::Init {
             force,

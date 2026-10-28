@@ -83,11 +83,31 @@ pub fn claim_owner(
             return Ok(OwnershipStatus::Owner);
         }
 
-        if record
+        if let Some(owner) = record
             .owner
-            .as_ref()
-            .is_some_and(|owner| owner.client_id == identity.client_id)
+            .as_mut()
+            .filter(|owner| owner.client_id == identity.client_id)
         {
+            owner.last_heartbeat = now_rfc3339();
+            return Ok(OwnershipStatus::Owner);
+        }
+
+        // Interactive clients (TUI and Web) take priority over CLI clients.
+        if identity.kind.is_interactive_ui()
+            && record
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.kind == crate::process_ownership::ClientKind::Cli)
+        {
+            let new_owner = refreshed_identity(identity);
+            if let Some(displaced_cli) = record.owner.replace(new_owner.clone()) {
+                let _ = add_viewer_if_missing(record, displaced_cli);
+            }
+            record
+                .viewers
+                .retain(|viewer| viewer.client_id != new_owner.client_id);
+            record.takeover_request = None;
+            emit_ownership_claimed(repo_root, handle, &new_owner);
             return Ok(OwnershipStatus::Owner);
         }
 
@@ -99,6 +119,12 @@ pub fn claim_owner(
                 .cloned()
                 .expect("viewer added");
             emit_viewer_joined(repo_root, handle, &viewer);
+        } else if let Some(viewer) = record
+            .viewers
+            .iter_mut()
+            .find(|viewer| viewer.client_id == identity.client_id)
+        {
+            viewer.last_heartbeat = now_rfc3339();
         }
 
         Ok(OwnershipStatus::Viewer)
@@ -125,6 +151,12 @@ pub fn release_owner(repo_root: &Path, handle: &ProcessHandle, client_id: &str) 
         let owner = record.owner.take().expect("owner present");
         record.takeover_request = None;
         emit_ownership_released(repo_root, handle, &owner);
+
+        if let Some(next_owner) = crate::process_ownership::heartbeat::promote_oldest_viewer(record)
+        {
+            record.owner = Some(next_owner.clone());
+            emit_ownership_claimed(repo_root, handle, &next_owner);
+        }
         Ok(())
     })
 }
@@ -178,15 +210,52 @@ pub fn request_takeover(
 ) -> Result<String> {
     let lease = project_lease_handle(repo_root);
     let request_id = Uuid::new_v4().to_string();
+    let req_dt = Utc::now();
     let request = TakeoverRequest {
         request_id: request_id.clone(),
         requester: refreshed_identity(requester),
-        requested_at: now_rfc3339(),
+        requested_at: req_dt.to_rfc3339(),
     };
 
     OwnershipStore::load_and_modify(repo_root, |store| {
         ensure_project_lease_record(store, repo_root);
         let record = find_record_mut(store, &lease).expect("project lease ensured");
+
+        // If there is no current owner, or if an interactive (TUI/Web) client is
+        // taking over from a CLI client, transfer ownership immediately.
+        if record.owner.is_none()
+            || (request.requester.kind.is_interactive_ui()
+                && record
+                    .owner
+                    .as_ref()
+                    .is_some_and(|o| o.kind == crate::process_ownership::ClientKind::Cli))
+        {
+            if let Some(displaced_cli) = record.owner.replace(request.requester.clone()) {
+                let _ = add_viewer_if_missing(record, displaced_cli);
+            } else {
+                record.owner = Some(request.requester.clone());
+            }
+            record
+                .viewers
+                .retain(|v| v.client_id != request.requester.client_id);
+            record.takeover_request = None;
+            emit_ownership_claimed(repo_root, handle, &request.requester);
+            return Ok(());
+        }
+
+        // Ensure the current owner's `last_heartbeat` is strictly older than
+        // `request.requested_at` so the automatic `heartbeat` presence check
+        // can unambiguously distinguish an active owner response.
+        if let Some(owner) = record.owner.as_mut() {
+            let needs_backdate = chrono::DateTime::parse_from_rfc3339(&owner.last_heartbeat)
+                .map(|hb| hb.with_timezone(&Utc) >= req_dt)
+                .unwrap_or(true);
+            if needs_backdate {
+                owner.last_heartbeat =
+                    (req_dt - chrono::Duration::milliseconds(1)).to_rfc3339();
+            }
+        }
+
         record.takeover_request = Some(request.clone());
         emit_takeover_requested(repo_root, handle, &request.requester, &request.request_id);
         Ok(())
@@ -242,20 +311,45 @@ pub fn respond_takeover(
     })
 }
 
-pub fn heartbeat(repo_root: &Path, _handle: &ProcessHandle, client_id: &str) -> Result<()> {
+pub fn heartbeat(repo_root: &Path, handle: &ProcessHandle, client_id: &str) -> Result<()> {
     let lease = project_lease_handle(repo_root);
     OwnershipStore::load_and_modify(repo_root, |store| {
         let Some(record) = find_record_mut(store, &lease) else {
             return Ok(());
         };
 
-        let now = now_rfc3339();
+        let mut now_dt = Utc::now();
+        let mut verified_request_id = None;
+        if let Some(req) = record.takeover_request.as_ref() {
+            if let Ok(req_dt) = chrono::DateTime::parse_from_rfc3339(&req.requested_at) {
+                let req_utc = req_dt.with_timezone(&Utc);
+                if now_dt <= req_utc {
+                    now_dt = req_utc + chrono::Duration::milliseconds(1);
+                }
+            }
+            if let Some(owner) = record.owner.as_ref().filter(|o| o.client_id == client_id) {
+                if !crate::process_ownership::owner_responded_to_takeover(owner, req) {
+                    verified_request_id = Some(req.request_id.clone());
+                }
+            }
+        }
+        let now = now_dt.to_rfc3339();
+
         if let Some(owner) = record
             .owner
             .as_mut()
             .filter(|owner| owner.client_id == client_id)
         {
-            owner.last_heartbeat = now.clone();
+            owner.last_heartbeat = now;
+            let owner_snapshot = owner.clone();
+            if verified_request_id.is_some() {
+                crate::process_ownership::emit_ownership_heartbeat(
+                    repo_root,
+                    handle,
+                    &owner_snapshot,
+                    verified_request_id.as_deref(),
+                );
+            }
             return Ok(());
         }
 
@@ -271,6 +365,41 @@ pub fn heartbeat(repo_root: &Path, _handle: &ProcessHandle, client_id: &str) -> 
     })
 }
 
+/// Evaluates whether a pending takeover request's owner failed to respond to
+/// the automatic `heartbeat` check within the verification window, persisting
+/// the transfer to the requester and emitting `ownership_claimed` if so.
+pub fn verify_takeover_owner_liveness(repo_root: &Path, handle: &ProcessHandle) -> Result<bool> {
+    let lease = project_lease_handle(repo_root);
+    let raw_before = std::fs::read_to_string(repo_root.join(".macc/state/process_ownership.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<OwnershipStore>(&s).ok());
+    let pending_requester_before = raw_before
+        .as_ref()
+        .and_then(|s| s.get_record(&lease))
+        .and_then(|r| r.takeover_request.as_ref())
+        .map(|req| req.requester.client_id.clone());
+
+    if pending_requester_before.is_none() {
+        return Ok(false);
+    }
+
+    let mut transferred = false;
+    OwnershipStore::load_and_modify(repo_root, |store| {
+        if let Some(record) = find_record_mut(store, &lease) {
+            if record.takeover_request.is_none() {
+                if let Some(owner) = record.owner.as_ref() {
+                    if Some(owner.client_id.as_str()) == pending_requester_before.as_deref() {
+                        transferred = true;
+                        emit_ownership_claimed(repo_root, handle, owner);
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(transferred)
+}
+
 /// Force-clear the project-wide owner without checking whether the caller is
 /// the current owner. Returns the evicted owner's client_id, or None if there
 /// was no owner. Use this as a recovery tool when a client died without
@@ -281,8 +410,15 @@ pub fn force_release_project_owner(repo_root: &Path) -> Result<Option<String>> {
     OwnershipStore::load_and_modify(repo_root, |store| {
         if let Some(record) = store.records.iter_mut().find(|r| r.process == lease) {
             if let Some(owner) = record.owner.take() {
-                evicted = Some(owner.client_id);
+                evicted = Some(owner.client_id.clone());
                 record.takeover_request = None;
+                emit_ownership_released(repo_root, &lease, &owner);
+                if let Some(next_owner) =
+                    crate::process_ownership::heartbeat::promote_oldest_viewer(record)
+                {
+                    record.owner = Some(next_owner.clone());
+                    emit_ownership_claimed(repo_root, &lease, &next_owner);
+                }
             }
         }
         Ok(())
