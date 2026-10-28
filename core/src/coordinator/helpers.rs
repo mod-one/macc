@@ -1441,11 +1441,8 @@ pub fn ensure_coordinator_run_id() -> String {
     generated
 }
 
-pub fn write_worktree_prd_for_task(
-    prd_file: &Path,
-    task_id: &str,
-    worktree_path: &Path,
-) -> Result<()> {
+/// The exact scoped execution contract, shared by dispatch and recovery previews.
+pub fn scoped_prd_for_task(prd_file: &Path, task_id: &str) -> Result<serde_json::Value> {
     let prd_raw = std::fs::read_to_string(prd_file).map_err(|e| MaccError::Io {
         path: prd_file.to_string_lossy().into(),
         action: "read prd for worktree".into(),
@@ -1489,6 +1486,15 @@ pub fn write_worktree_prd_for_task(
         "lot": prd.get("lot").cloned().unwrap_or(serde_json::Value::Null),
         "tasks": [selected],
     });
+    Ok(payload)
+}
+
+pub fn write_worktree_prd_for_task(
+    prd_file: &Path,
+    task_id: &str,
+    worktree_path: &Path,
+) -> Result<()> {
+    let payload = scoped_prd_for_task(prd_file, task_id)?;
     let out_path = worktree_path.join("worktree.prd.json");
     std::fs::write(
         &out_path,

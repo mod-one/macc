@@ -837,6 +837,10 @@ pub(super) async fn run_dispatch_pipeline(
                 .await?;
         let claim =
             claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
+        if !super::checkpoint_preflight::ready(repo_root, &mut registry, &claim.task_id, prd_file)?
+        {
+            continue;
+        }
         let pid = launch_performer(
             LaunchPerformerContext {
                 repo_root,

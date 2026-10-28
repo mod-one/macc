@@ -19,6 +19,52 @@ live in ToolSpec, with no provider-name dispatch in the collector. The output
 profile change conservatively rotates incompatible native sessions; retained Git
 work stays on the same task branch. See [usage telemetry](USAGE_TELEMETRY.md).
 
+## Checkpoint execution-context drift (E903)
+
+`MACC-CHECKPOINT-CONTEXT-DRIFT` identifies a checkpoint that no longer matches
+the task's actual execution context. It remains an `E903` precondition failure,
+not a provider failure or quota condition. Dependent tasks retain `E905`.
+
+Dispatch checks checkpoint readiness before launching the performer. Recovery
+uses the registry's retained worker, its verified branch, and the same scoped
+authoritative PRD projection as dispatch. It never assumes that the worker named
+in an old checkpoint is still the task's worker. Old unintegrated work must be
+preserved and integrated before a checkpoint can move to another worker.
+
+An unchanged contract can be aligned automatically. If enabled, supervisor
+repair and automatic restart use this deterministic recovery without requiring
+an AI diagnosis or source commit. A reviewed reconciliation followed by a
+supervisor retry can also resume the task. Task acceptance, device evidence and
+human gates are not inferred from checkpoint recovery.
+
+Changed requirements require explicit review:
+
+```sh
+macc session-store reconcile <current-checkpoint-id>
+macc session-store --json reconcile <current-checkpoint-id>
+macc session-store reconcile <current-checkpoint-id> --expected-sha256 <preview-sha256>
+macc coordinator unblock-task --task <task-id> --evidence "Reviewed current task contract; criteria require revalidation"
+```
+
+The first command is a **preview**. Review its task fields and the JSON old/new
+contract before applying. TUI and Web reconciliation use the same domain
+operation and fingerprint. Apply materializes the reviewed PRD in the actual
+resume worker and creates a replacement checkpoint. The preview is bound to
+the source checkpoint, worker contents, registry assignment and authoritative
+PRD; changes require a fresh preview. Superseded checkpoint IDs are rejected
+with the current ID. No database schema upgrade is required.
+
+`coordinator sync` reports pending checkpoint recovery, including its stable
+code and next command. It does not silently approve changed requirements.
+`unblock-task` checks checkpoint readiness both before and after integrating a
+repaired base, and leaves the task blocked if its contract still needs review.
+Session events record the previous/replacement checkpoints, diagnostic,
+fingerprint and whether reconciliation was automatic. Coordinator events and
+structured tracing identify preflight blocks; supervisor evidence is archived
+as `checkpoint-recovery.json`. A stable checkpoint revision is part of the
+supervisor wait context, so applying a reviewed reconciliation wakes it without
+requiring a Git change or another repeated diagnosis.
+
 ## Checkpoint size and finalization
 
 Initial checkpoints retain the strict `max_content_bytes` bound and fail before

@@ -138,7 +138,10 @@ fn format_session_store_status(v: &Value) -> String {
     ));
     lines.push(String::new());
 
-    let sessions = v["sessions"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let sessions = v["sessions"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
     lines.push(format!("Sessions ({}):", sessions.len()));
     if sessions.is_empty() {
         lines.push("  (no recorded sessions)".to_string());
@@ -342,7 +345,40 @@ fn format_checkpoint_detail(v: &Value) -> String {
 }
 
 fn format_reconcile(v: &Value) -> String {
-    serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+    let applied = v["applied"].as_bool().unwrap_or(false);
+    let d = &v["diagnostic"];
+    let id = d["checkpoint_id"].as_str().unwrap_or("?");
+    let mut lines = vec![
+        format!(
+            "Checkpoint reconciliation · {}",
+            if applied { "APPLIED" } else { "PREVIEW" }
+        ),
+        format!("Diagnostic: {}", val_str(&d["code"])),
+        format!("Task: {}", val_str(&d["task_id"])),
+        format!("Previous worker: {}", val_str(&d["previous_worktree"])),
+        format!("Resume worker:   {}", val_str(&d["execution_worktree"])),
+        format!(
+            "Contract review required: {}",
+            val_str(&d["requires_contract_review"])
+        ),
+        format!("Changed task fields: {}", d["changed_task_fields"]),
+    ];
+    if applied {
+        lines.push(format!(
+            "Replacement checkpoint: {}",
+            val_str(&v["checkpoint"])
+        ));
+        lines.push(
+            "Criteria remain unvalidated. Unblock the task, then resume the coordinator.".into(),
+        );
+    } else {
+        lines.push("Review the changed contract with --json. Apply the reviewed plan:".into());
+        lines.push(format!(
+            "  macc session-store reconcile {id} --expected-sha256 {}",
+            val_str(&v["current_sha256"])
+        ));
+    }
+    lines.join("\n")
 }
 
 pub fn format_o2(action: &Action, v: &Value) -> String {
@@ -394,7 +430,11 @@ fn format_o2_status(v: &Value, show_all_fields: bool) -> String {
     lines.push(format!("  Project:   {root}"));
     lines.push(format!(
         "  Storage:   {} (O2 schema: {})",
-        if sqlite { "SQLite" } else { "JSON (migration required)" },
+        if sqlite {
+            "SQLite"
+        } else {
+            "JSON (migration required)"
+        },
         if ready { "ready" } else { "upgrade required" }
     ));
     lines.push(format!("  Source:    {source}"));
@@ -552,7 +592,8 @@ fn format_o2_status(v: &Value, show_all_fields: bool) -> String {
 
     if !sqlite {
         lines.push(String::new());
-        lines.push("Next action: Run `macc session-store migrate` to enable SQLite storage.".into());
+        lines
+            .push("Next action: Run `macc session-store migrate` to enable SQLite storage.".into());
     } else if !ready {
         lines.push(String::new());
         lines.push("Next action: Run `macc o2 upgrade` to install the O2 schema.".into());
@@ -621,7 +662,10 @@ fn format_provider_plan(v: &Value) -> String {
         format!("  Plan ID:         {id}"),
         format!("  Checksum:        {checksum}"),
         format!("  Provider:        {provider} v{version} ({origin})"),
-        format!("  Network access:  {}", if network { "yes" } else { "no (offline/local)" }),
+        format!(
+            "  Network access:  {}",
+            if network { "yes" } else { "no (offline/local)" }
+        ),
         format!("  Source revision: {rev}"),
     ];
     if let Some(paths) = d["affected_paths"].as_array() {

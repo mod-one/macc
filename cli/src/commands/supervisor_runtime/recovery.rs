@@ -54,6 +54,12 @@ pub(super) async fn intervene(
             report.incident.reason
         );
     }
+    if config.repair_enabled && config.auto_restart && restart_allowed {
+        if let Some(ids) = super::checkpoint_recovery::recover(paths, &report.incident, dir)? {
+            report.detail = format!("MACC-CHECKPOINT-CONTEXT-DRIFT: execution context recovered without changing task requirements for {}",ids.join(", "));
+            return restart_only(paths, canonical, report, lock, &progress, &ids).await;
+        }
+    }
     // The supervisor commits the repair itself: fail before spending AI calls.
     let identity = macc_core::git::missing_git_identity_fields(&paths.root);
     if config.repair_enabled && !identity.is_empty() {

@@ -1877,6 +1877,12 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
     if sync_unmerged_branches {
         coordinator_sync_unmerged_branches(paths, coordinator_cfg, env_cfg, logger)?;
     }
+    for diagnostic in crate::session_store::checkpoints::recovery::diagnostics(&paths.root)? {
+        tracing::warn!(diagnostic=%diagnostic,"Checkpoint recovery is pending");
+        if let Some(log) = logger {
+            log.note(format!("- Checkpoint recovery: {diagnostic}"))?;
+        }
+    }
     // Reconcile runtime state: reset ghost/orphan tasks whose performer is dead.
     coordinator_reconcile(paths, env_cfg, coordinator_cfg, logger)?;
     let json_compat = env_cfg

@@ -3,6 +3,7 @@ use super::super::{digest, error};
 use crate::Result;
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path, process::Command};
+#[derive(Clone)]
 pub(super) struct GitState {
     pub revision: String,
     pub branch: String,
@@ -161,7 +162,16 @@ pub(super) fn task_sources(root: &Path, task: &str) -> Result<(Value, BTreeMap<S
     if raw.len() > 1024 * 1024 {
         return Err(error("Task PRD exceeds checkpoint input bound"));
     }
-    let mut prd: Value = serde_json::from_slice(&raw).map_err(|e| error(e.to_string()))?;
+    let prd: Value = serde_json::from_slice(&raw).map_err(|e| error(e.to_string()))?;
+    task_sources_from(root, task, prd)
+}
+
+/// Normalize and hash the projected contract without writing the worker.
+pub(super) fn task_sources_from(
+    root: &Path,
+    task: &str,
+    mut prd: Value,
+) -> Result<(Value, BTreeMap<String, String>)> {
     let mut selected = prd["tasks"]
         .as_array()
         .and_then(|a| a.iter().find(|t| t["id"] == task))

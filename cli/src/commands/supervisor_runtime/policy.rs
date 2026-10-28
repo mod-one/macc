@@ -99,7 +99,7 @@ pub fn context(
         "source_status":git(&paths.root,&["status","--porcelain"])?,
         "source_diff":git(&paths.root,&["diff","HEAD","--binary"])?,
         "tools":canonical.tools,"supervisor":canonical.automation.supervisor,
-        "availability":availability}),
+        "availability":availability,"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?}),
     )
 }
 

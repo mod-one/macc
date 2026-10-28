@@ -74,6 +74,8 @@ pub(crate) fn apply(
             "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
         )));
     }
+    // A successful unblock must not immediately redispatch a stale checkpoint.
+    crate::session_store::checkpoints::recovery::ensure_task_ready(&paths.root, task_id)?;
     // Reconcile before changing task state. A conflict preserves the original
     // worktree and leaves the task blocked, with durable content/index refs.
     let repaired_base = if task.has_worktree_attached() {
@@ -87,6 +89,8 @@ pub(crate) fn apply(
     } else {
         None
     };
+    // The repaired base may also have changed a referenced specification.
+    crate::session_store::checkpoints::recovery::ensure_task_ready(&paths.root, task_id)?;
     if let Some(block) = task.blocked_on_external.as_ref() {
         task.task_runtime.external_block_resolution =
             Some(crate::coordinator::model::ExternalBlockResolution {
@@ -107,9 +111,7 @@ pub(crate) fn apply(
         );
     }
     runtime.last_error = None;
-    runtime.last_error_code = None;
-    runtime.last_error_origin = None;
-    runtime.last_error_message = None;
+    runtime.clear_last_error_details();
     runtime
         .extra
         .remove(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY);

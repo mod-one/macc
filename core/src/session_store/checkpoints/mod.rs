@@ -6,6 +6,7 @@ mod lifecycle;
 mod memory_context;
 pub mod merge_repair;
 mod model;
+pub mod recovery;
 #[cfg(test)]
 mod resume_tests;
 mod schema;
@@ -13,8 +14,9 @@ mod slot_reassignment;
 #[cfg(test)]
 mod tests;
 use super::*;
-pub use lifecycle::{finish, prepare, reconcile, rotation_guard};
+pub use lifecycle::{finish, prepare, rotation_guard};
 pub use model::*;
+pub use recovery::reconcile;
 use rusqlite::{params, OptionalExtension};
 pub(super) use schema::ready;
 pub use schema::upgrade;
