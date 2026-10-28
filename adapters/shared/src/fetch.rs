@@ -809,7 +809,7 @@ mod tests {
 
         let source = Source {
             kind: SourceKind::Http,
-            url: "http://example.com/test.zip".into(),
+            url: format!("http://example.com/no_markers_{}.zip", uuid_v4_like()),
             reference: "".into(),
             checksum: None,
             subpaths: vec!["skills/s1".into()],
@@ -878,7 +878,7 @@ mod tests {
 
         let source = Source {
             kind: SourceKind::Http,
-            url: "http://example.com/test.zip".into(),
+            url: format!("http://example.com/no_markers_{}.zip", uuid_v4_like()),
             reference: "".into(),
             checksum: None,
             subpaths: vec!["skills/s1".into()],

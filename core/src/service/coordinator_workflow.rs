@@ -2324,15 +2324,45 @@ pub fn coordinator_unblock_task(
             changed.join(", ")
         }
     );
-    let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-        &paths.root,
-        "task_unblocked",
-        task_id,
-        "dispatch",
-        "todo",
-        &detail,
-        "info",
-    );
+    let unblock_record = crate::coordinator::CoordinatorEventRecord {
+        schema_version: "1".into(),
+        event_id: format!(
+            "evt-task_unblocked-{}-{}",
+            task_id,
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ),
+        seq: 0,
+        ts: crate::coordinator::helpers::now_iso_coordinator(),
+        source: "coordinator:cli".into(),
+        task_id: Some(task_id.to_string()),
+        event_type: "task_unblocked".into(),
+        phase: Some("dispatch".into()),
+        status: "todo".into(),
+        detail: Some(detail.clone()),
+        msg: Some(detail.clone()),
+        payload: serde_json::json!({
+            "message": detail,
+            "evidence": evidence,
+        }),
+        run_id: None,
+        coordinator_epoch: None,
+        claim_id: None,
+        extra: BTreeMap::new(),
+    };
+    let sent_via_ipc =
+        crate::coordinator::ipc::send_event_to_coordinator_sync(&paths.root, &unblock_record)
+            .unwrap_or(false);
+    if !sent_via_ipc {
+        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+            &paths.root,
+            "task_unblocked",
+            task_id,
+            "dispatch",
+            "todo",
+            &detail,
+            "info",
+        );
+    }
     Ok(())
 }
 

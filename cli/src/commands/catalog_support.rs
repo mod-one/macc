@@ -61,7 +61,9 @@ impl macc_core::catalog::service::CatalogInstallBackend for CliCatalogInstallBac
         plan: &mut macc_core::plan::ActionPlan,
         allow_user_scope: bool,
     ) -> Result<macc_core::ApplyReport> {
-        self.app.engine.apply(paths, plan, allow_user_scope)
+        macc_core::validate_plan(plan, allow_user_scope)?;
+        let operations = macc_core::plan::collect_plan_operations(paths, plan);
+        macc_core::apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})
     }
 }
 

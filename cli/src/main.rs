@@ -4700,18 +4700,20 @@ fi
         let server_url = format!("http://127.0.0.1:{}", port);
 
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&mut stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            // Consume headers
-            while line.trim() != "" {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-            }
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                while line.trim() != "" {
+                    line.clear();
+                    if reader.read_line(&mut line).is_err() {
+                        break;
+                    }
+                }
 
-            // Return mock response
-            let response_body = r#"{
+                let response_body = r#"{
                 "items": [
                     {
                         "id": "remote-skill-1",
@@ -4728,12 +4730,13 @@ fi
                     }
                 ]
             }"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream.write_all(response.as_bytes()).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
         });
 
         let temp_base =
@@ -4858,22 +4861,26 @@ fi
         let server_url = format!("http://127.0.0.1:{}/skills.zip", port);
 
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&mut stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            // Consume headers
-            while line.trim() != "" {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-            }
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                while line.trim() != "" {
+                    line.clear();
+                    if reader.read_line(&mut line).is_err() {
+                        break;
+                    }
+                }
 
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\n\r\n",
-                archive_bytes.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            stream.write_all(&archive_bytes).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    archive_bytes.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&archive_bytes);
+            }
         });
 
         let temp_base =

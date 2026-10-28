@@ -1,6 +1,21 @@
 use super::*;
 use rusqlite::{params, TransactionBehavior};
 
+fn is_worker_slot_reassignment(root: &Path, prev: &str, curr: &str) -> bool {
+    let is_slot = |p: &Path| {
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("worker-") || name.starts_with("slot-") {
+                return true;
+            }
+        }
+        p.components().any(|c| c.as_os_str() == "worktree" || c.as_os_str() == "worktrees")
+            || crate::read_worktree_metadata(p).ok().flatten().is_some()
+    };
+    let prev_p = Path::new(prev);
+    let curr_p = Path::new(curr);
+    (is_slot(prev_p) || is_slot(curr_p)) && git_state::verify_repository(root, curr_p).is_ok()
+}
+
 fn idle(db: &rusqlite::Connection, worktree: &str) -> Result<()> {
     let active: i64 = sql(db.query_row(
         "SELECT count(*) FROM session_leases WHERE owner_worktree_id=?1",
@@ -43,11 +58,13 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         if prior_validation == "needs_reconciliation" {
             reasons.push("a prior checkpoint still requires reviewed reconciliation");
         }
-        if previous.project_id != c.project_id
-            || previous.task_id != c.task_id
-            || previous.worktree != c.worktree
+        if previous.project_id != c.project_id || previous.task_id != c.task_id {
+            reasons.push("project or task changed");
+        }
+        if previous.worktree != c.worktree
+            && !is_worker_slot_reassignment(root, &previous.worktree, &c.worktree)
         {
-            reasons.push("project, task or execution worktree changed");
+            reasons.push("execution worktree changed");
         }
         if previous.source_hashes != c.source_hashes {
             reasons.push("mandatory PRD or specification sources changed");
@@ -68,7 +85,9 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         c.validation["max_content_bytes"] = json!(content_limit);
         c.validation["content_budget_setting"] = json!("max_finish_content_bytes");
         let branch_changed = previous.branch != c.branch;
+        let worktree_changed = previous.worktree != c.worktree;
         if branch_changed
+            || worktree_changed
             || previous.source_revision != c.source_revision
             || previous.worktree_dirty_digest != c.worktree_dirty_digest
         {
@@ -82,9 +101,9 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
                 &tx,
                 &previous.id,
                 "checkpoint_reconciled",
-                json!({"task":c.task_id,"reason":"retained worktree changed; current Git evidence recaptured; completion not inferred","previous_branch":previous.branch,"current_branch":c.branch,"branch_changed":branch_changed}),
+                json!({"task":c.task_id,"reason":"retained worktree changed; current Git evidence recaptured; completion not inferred","previous_branch":previous.branch,"current_branch":c.branch,"branch_changed":branch_changed,"worktree_changed":worktree_changed}),
             )?;
-            if branch_changed || previous.worktree_content_digest != c.worktree_content_digest {
+            if branch_changed || worktree_changed || previous.worktree_content_digest != c.worktree_content_digest {
                 sql(tx.execute("UPDATE logical_sessions SET status='rotated' WHERE project_id=?1 AND task_id=?2 AND role=?3 AND status='available'",params![a.project_id,c.task_id,c.role]))?;
             }
             c.blocking_issues.push("Retained Git state changed since prior checkpoint; revalidate all acceptance criteria and outstanding review findings".into());

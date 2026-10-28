@@ -1611,6 +1611,8 @@ pub fn apply_runtime_event_bus_updates(
         last_error: Option<String>,
         /// True when a terminal failure IPC event was received for this task.
         failure_signaled: bool,
+        unblocked: bool,
+        unblock_evidence: Option<String>,
     }
 
     let mut runtime_updates: HashMap<String, PendingRuntimeUpdate> = HashMap::new();
@@ -1629,6 +1631,7 @@ pub fn apply_runtime_event_bus_updates(
                         CoordinatorRuntimeEventKind::Progress { .. } => "progress",
                         CoordinatorRuntimeEventKind::PhaseResult { .. } => "phase_result",
                         CoordinatorRuntimeEventKind::Failed { .. } => "failed",
+                        CoordinatorRuntimeEventKind::TaskUnblocked { .. } => "task_unblocked",
                         // L4-EVENTS-001: reliability observability events are
                         // informational; no runtime state update is needed.
                         CoordinatorRuntimeEventKind::SalvageAttempted { .. } => "salvage_attempted",
@@ -1717,6 +1720,15 @@ pub fn apply_runtime_event_bus_updates(
                             update.last_error = Some(message);
                         }
                     }
+                    CoordinatorRuntimeEventKind::TaskUnblocked { evidence } => {
+                        update.status = Some(
+                            crate::coordinator::RuntimeStatus::Idle
+                                .as_str()
+                                .to_string(),
+                        );
+                        update.unblocked = true;
+                        update.unblock_evidence = Some(evidence.clone());
+                    }
                     // L4-EVENTS-001: reliability observability events — no
                     // runtime state update required; they are informational.
                     CoordinatorRuntimeEventKind::SalvageAttempted { .. }
@@ -1758,6 +1770,12 @@ pub fn apply_runtime_event_bus_updates(
         let Some(update) = runtime_updates.get(task.id.as_str()) else {
             continue;
         };
+        let external_block = if update.unblocked {
+            task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+            task.blocked_on_external.clone()
+        } else {
+            None
+        };
         let runtime = task.ensure_runtime();
         if let Some(ts) = &update.last_heartbeat {
             runtime.last_heartbeat = Some(ts.clone());
@@ -1774,10 +1792,38 @@ pub fn apply_runtime_event_bus_updates(
         if let Some(last_error) = &update.last_error {
             runtime.last_error = Some(last_error.clone());
         }
+        if update.unblocked {
+            runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+            runtime.pid = None;
+            runtime.last_error = None;
+            runtime.last_error_code = None;
+            runtime.last_error_origin = None;
+            runtime.last_error_message = None;
+            runtime
+                .extra
+                .remove(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY);
+            if let Some(block) = external_block {
+                runtime.external_block_resolution =
+                    Some(crate::coordinator::model::ExternalBlockResolution {
+                        evidence: update.unblock_evidence.clone().unwrap_or_default(),
+                        resolved_at: now_iso_coordinator(),
+                        block_reason: block.reason,
+                        tracking_id: block.tracking_id,
+                    });
+            }
+        }
         updated += 1;
     }
     if updated == 0 {
         return Ok(0);
+    }
+
+    let has_unblocks = runtime_updates.values().any(|u| u.unblocked);
+    if has_unblocks {
+        crate::coordinator::task_selector::reconcile_task_blocks(
+            &mut registry,
+            &now_iso_coordinator(),
+        );
     }
 
     registry.set_updated_at(now_iso_coordinator());

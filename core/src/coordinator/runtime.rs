@@ -136,6 +136,9 @@ pub enum CoordinatorRuntimeEventKind {
         phase: Option<String>,
         message: Option<String>,
     },
+    TaskUnblocked {
+        evidence: String,
+    },
     /// A pre-retry salvage check was attempted for a task worktree.
     /// Emitted before the coordinator decides whether to retry on the same
     /// worktree or abandon the slot.
@@ -909,6 +912,15 @@ pub fn raw_event_to_runtime_event(
         "failed" => CoordinatorRuntimeEventKind::Failed {
             phase: event_phase,
             message: event_message,
+        },
+        "task_unblocked" => CoordinatorRuntimeEventKind::TaskUnblocked {
+            evidence: event
+                .payload
+                .get("evidence")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| event.message())
+                .unwrap_or("")
+                .to_string(),
         },
         // L4-EVENTS-001: reliability observability event kinds
         // Metadata is read from the flat payload object.
