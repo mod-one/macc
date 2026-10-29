@@ -187,7 +187,18 @@ expand_config_args() {
   done
 }
 
+# The receipt is taken at the provider boundary, after checkpoint/context
+# materialization, so its digest describes the actual effective prompt.
+decision_prompt_receipt() {
+  [[ -n "${MACC_DECISION_CONTEXT_FILE:-}" ]] || return 0
+  local diagnostic
+  if diagnostic="$("${MACC_DECISION_CLI:-macc}" --cwd "$MACC_DECISION_ROOT" decisions receipt --prompt-file "$prompt_file" 2>&1)"; then return 0; fi
+  printf 'MACC_TASK_PRECONDITION: %s\nMACC_TASK_RESULT_EXP: Decision context changed before provider invocation; work retained\nMACC_TASK_RESULT: precondition_unmet\n' "$diagnostic" >&2
+  return 1
+}
+
 run_resume_and_capture() {
+  decision_prompt_receipt || return 1
   local output_file="$1"
   local sid="$2"
   local prompt="$3"
@@ -465,6 +476,7 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 
 run_default_call() {
+  decision_prompt_receipt || return 1
   local final_call_args=()
   local a
 

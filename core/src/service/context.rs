@@ -398,6 +398,7 @@ fn invoke_context_tool(
     }
 
     let mut cmd = std::process::Command::new(&performer.command);
+    cmd.env_remove("MACC_WEB_ACCESS_TOKEN");
     cmd.current_dir(&paths.root);
     // The spec's arguments are a template: a literal `{model}` must not reach the tool.
     cmd.args(crate::tool::render_performer_args(

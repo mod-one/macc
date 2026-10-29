@@ -56,9 +56,10 @@ pub(super) fn restore_from(
         ))
     })?;
 
-    if !matches!(manifest.version, 1 | 2)
+    if !matches!(manifest.version, 1 | 2 | 3)
         || manifest.kind != "macc.save_bundle"
-        || ((manifest.version == 2) != manifest.session_store.is_some())
+        || (manifest.version < 3 && ((manifest.version == 2) != manifest.session_store.is_some()))
+        || ((manifest.version == 3) != manifest.decision_store.is_some())
         || (manifest.session_store.is_some() && !manifest.includes.coordinator_sessions)
     {
         return Err(MaccError::Validation(
@@ -190,6 +191,17 @@ pub(super) fn restore_from(
     } else {
         None
     };
+    let decision_source = if !config_only && !opts.no_sessions {
+        if let Some(meta) = &manifest.decision_store {
+            let source = super::sessions::payload(&target_save_dir, &meta.database_path)?;
+            crate::coordinator::decisions::validate_backup(&paths.root, &source, meta)?;
+            Some(source)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let skill_lock = if manifest.includes.config {
         super::skill_locks::load(&target_save_dir)?
     } else {
@@ -199,6 +211,9 @@ pub(super) fn restore_from(
         return Ok(());
     }
 
+    if let (Some(source), Some(meta)) = (&decision_source, &manifest.decision_store) {
+        crate::coordinator::decisions::restore_backup(&paths.root, source, meta)?;
+    }
     // 1. Restore config
     // SQLite preflight above runs before any configuration is overwritten.
     if let (Some(source), Some(meta)) = (&sqlite_source, &manifest.session_store) {

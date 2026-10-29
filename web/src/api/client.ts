@@ -306,6 +306,10 @@ export async function sendJson<TResponse, TBody = undefined>(
   const headers: HeadersInit = {
     Accept: 'application/json',
   };
+  try {
+    const token = window.sessionStorage.getItem('macc.remoteAccessToken');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } catch { /* Browser storage can be disabled. */ }
 
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';

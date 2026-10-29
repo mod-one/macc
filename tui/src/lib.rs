@@ -25,6 +25,7 @@ mod command_palette;
 #[cfg(test)]
 mod command_tests;
 mod coordinator_poll;
+pub mod decision_center;
 use command_palette::*;
 mod hooks;
 #[cfg(test)]
@@ -250,6 +251,18 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if state.decision_center.open {
+        if let Some(action) = state.decision_center.key_event(key) {
+            if let Some(paths) = &state.project_paths {
+                state.decision_center.submit(
+                    paths.root.clone(),
+                    state.client_identity.client_id.clone(),
+                    action,
+                );
+            }
+        }
+        return;
+    }
     if let Some(window) = state.approval_window.as_mut() {
         match window.key(key) {
             approval::Outcome::Continue => {}
@@ -589,6 +602,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Char('A') => state.open_approval_window(),
+        KeyCode::Char('D') => state.decision_center.show(),
         // Navigation: Esc/q to quit (or pop if in a sub-screen)
         KeyCode::Esc | KeyCode::Char('q') => {
             if state.screen_stack.len() > 1 {
@@ -2694,6 +2708,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if let Some(window) = &state.approval_window {
         window.draw(f);
     }
+    state.decision_center.draw(f);
     state.draw_apply_confirmation(f);
     state.draw_launch_dialog(f);
     if state.command_palette_open {

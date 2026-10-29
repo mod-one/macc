@@ -564,17 +564,21 @@ pub fn sync_registry_from_prd_native(
     // Human approval gates first: an approval recorded since the last cycle
     // must satisfy dependants before block propagation runs, and a gate must
     // be parked in `waiting_approval` before the dispatcher can see it.
-    let gate_transitions = crate::coordinator::approval::reconcile_human_gates_for_project(
+    let gate_result = crate::coordinator::approval::reconcile_human_gates_for_project(
         repo_root,
         &mut registry,
         &now_iso_coordinator(),
-    )
-    .unwrap_or_else(|err| {
-        if let Some(log) = logger {
-            let _ = log.note(format!("- Human gate reconciliation skipped: {err}"));
-        }
-        Vec::new()
-    });
+    );
+    let gate_transitions = if crate::coordinator::decisions::policy(repo_root)?.enabled {
+        gate_result?
+    } else {
+        gate_result.unwrap_or_else(|err| {
+            if let Some(log) = logger {
+                let _ = log.note(format!("- Human gate reconciliation skipped: {err}"));
+            }
+            Vec::new()
+        })
+    };
     if let Some(log) = logger {
         for t in &gate_transitions {
             let _ = log.note(format!(
@@ -587,6 +591,7 @@ pub fn sync_registry_from_prd_native(
         &mut registry,
         &now_iso_coordinator(),
     );
+    crate::coordinator::decisions::sync(repo_root, prd_file, &mut registry)?;
     registry.recompute_resource_locks(&now_iso_coordinator());
     let changed = registry != stored;
     if changed {
@@ -745,13 +750,42 @@ pub async fn advance_tasks_native(
         .cloned()
         .collect::<HashSet<_>>();
     let max_review_cycles = env_cfg.max_review_cycles.or(cfg.max_review_cycles);
-    let actions = coordinator_engine::build_advance_actions(
+    let mut actions = coordinator_engine::build_advance_actions(
         &registry,
         &active_merge_ids,
         &now,
         max_review_cycles,
         &cfg.phases,
     )?;
+    if crate::coordinator::decisions::policy(repo_root)?.enabled {
+        for action in &mut actions {
+            if let coordinator_engine::AdvanceTaskAction::QueueMerge { task_id, .. } = action {
+                if registry_snapshot.find_task(task_id).is_some_and(|task| {
+                    (task.task_runtime.extra.get("decision_has_bindings")
+                        == Some(&serde_json::json!(true))
+                        || task.task_runtime.extra.get("decision_merge_repair")
+                            == Some(&serde_json::json!(true)))
+                        && task
+                            .task_runtime
+                            .extra
+                            .get("decision_context")
+                            .and_then(|v| v.get("phase"))
+                            .and_then(serde_json::Value::as_str)
+                            != Some("review")
+                }) {
+                    *action = coordinator_engine::AdvanceTaskAction::RunPhase {
+                        task_id: task_id.clone(),
+                        mode: "review",
+                        transition: coordinator_engine::PhaseTransition {
+                            mode: "review",
+                            next_state: crate::coordinator::WorkflowState::Reviewing,
+                            runtime_phase: "review",
+                        },
+                    };
+                }
+            }
+        }
+    }
     if !actions.is_empty() {
         if let Some(log) = logger {
             let _ = log.note(format!("- Advance started (actions={})", actions.len()));
@@ -781,14 +815,42 @@ pub async fn advance_tasks_native(
                     // an external process and waits). Running it directly in the async
                     // executor would seize the tokio thread for minutes, preventing heartbeat
                     // monitoring, merge detection, and rate-limit timers from firing.
-                    match tokio::task::block_in_place(|| {
+                    let reviewed_commit = crate::git::head_commit(Path::new(
+                        task_snapshot.worktree_path().unwrap_or_default(),
+                    ))
+                    .ok();
+                    let mut review_result = tokio::task::block_in_place(|| {
                         coordinator_runtime::run_review_phase(
                             &executor,
                             &task_snapshot,
                             coordinator_tool_override,
                             phase_runner_max_attempts,
                         )
-                    })? {
+                    })?;
+                    if matches!(review_result, Ok(coordinator_engine::ReviewVerdict::Ok))
+                        && crate::coordinator::decisions::policy(repo_root)?.enabled
+                    {
+                        let current = crate::coordinator::decisions::registry(repo_root)?;
+                        let attestation = (|| -> Result<()> {
+                            let info = current
+                                .find_task(&task_id)
+                                .and_then(|t| t.task_runtime.extra.get("decision_context"))
+                                .ok_or_else(|| {
+                                    crate::coordinator::decisions::error("Missing review context")
+                                })?;
+                            let mut store = crate::coordinator::decisions::Store::open(repo_root)?;
+                            store.attest_review_artifact(
+                                info["plan_id"].as_str().unwrap_or_default(),
+                                info["attempt_id"].as_str().unwrap_or_default(),
+                                Path::new(task_snapshot.worktree_path().unwrap_or_default()),
+                                reviewed_commit.as_deref().unwrap_or_default(),
+                            )
+                        })();
+                        if let Err(error) = attestation {
+                            review_result = Err(error.to_string());
+                        }
+                    }
+                    match review_result {
                         Ok(verdict) => {
                             let verdict_status = match verdict {
                                 coordinator_engine::ReviewVerdict::Ok => "ok",
@@ -890,6 +952,24 @@ pub async fn advance_tasks_native(
                         }
                     }
                 }
+                if crate::coordinator::decisions::policy(repo_root)?.enabled {
+                    let current = crate::coordinator::decisions::registry(repo_root)?;
+                    let mut typed = TaskRegistry::from_value(&registry)?;
+                    if let (Some(source), Some(target)) =
+                        (current.find_task(&task_id), typed.find_task_mut(&task_id))
+                    {
+                        for key in [
+                            "decision_context",
+                            "decision_has_bindings",
+                            "decision_bindings_digest",
+                        ] {
+                            if let Some(v) = source.task_runtime.extra.get(key) {
+                                target.task_runtime.extra.insert(key.into(), v.clone());
+                            }
+                        }
+                    }
+                    registry = typed.to_value()?;
+                }
                 note_unapplicable_phase_outcome(repo_root, &registry, &task_id, mode, logger);
                 progressed = true;
             }
@@ -899,6 +979,23 @@ pub async fn advance_tasks_native(
                 base,
                 merge_context,
             } => {
+                if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, &task_id)
+                {
+                    let mut typed = TaskRegistry::from_value(&registry)?;
+                    if let Some(task) = typed.find_task_mut(&task_id) {
+                        task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+                        task.task_runtime
+                            .set_status(crate::coordinator::RuntimeStatus::Idle);
+                        task.task_runtime.set_last_error_details(
+                            "DM_CONTEXT",
+                            "decisions",
+                            error.to_string(),
+                        );
+                    }
+                    registry = typed.to_value()?;
+                    progressed = true;
+                    continue;
+                }
                 // Only one merge at a time — all merges operate on the same
                 // repo_root so concurrent merges cause races (dirty worktree,
                 // git lock conflicts, lost merge results).  Remaining merges

@@ -227,6 +227,7 @@ pub struct AppState {
     pub coordinator_pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
     /// The approval window, opened by itself when a gate awaits a decision.
     pub approval_window: Option<crate::approval::Window>,
+    pub decision_center: crate::decision_center::Center,
     /// Gates (by id and subject revision) the operator put off with "Later";
     /// they re-open when the revision changes or on demand (`A`).
     pub approval_snoozed: std::collections::HashSet<(String, Option<String>)>,
@@ -403,6 +404,7 @@ impl AppState {
             coordinator_run_summary: None,
             coordinator_pending_approvals: Vec::new(),
             approval_window: None,
+            decision_center: crate::decision_center::Center::default(),
             approval_snoozed: std::collections::HashSet::new(),
             approvals_last_refresh: None,
             coordinator_last_refresh: None,
@@ -1081,6 +1083,14 @@ impl AppState {
     /// displayed gate, close it once decided elsewhere, and open it by itself
     /// for a gate the operator has not put off.
     pub fn sync_approval_window(&mut self) {
+        let p = self.decision_center.policy();
+        if p.enabled
+            && p.human_question_min_risk
+                == macc_core::coordinator::decisions::Consultation::NeverAsk
+        {
+            self.approval_window = None;
+            return;
+        }
         let waiting = self.awaiting_approvals().len();
         if let Some(window) = self.approval_window.as_mut() {
             let current = self
@@ -1116,7 +1126,8 @@ impl AppState {
 
     /// The operator is typing elsewhere: do not steal the keyboard.
     fn approval_input_busy(&self) -> bool {
-        self.search_editing
+        self.decision_center.open
+            || self.search_editing
             || self.command_palette_open
             || self.prd_queue_editor.is_some()
             || self.coordinator_task_diff_popup.is_some()
@@ -2263,8 +2274,9 @@ impl AppState {
             })
             .cloned();
         self.last_ownership_refresh = Some(Instant::now());
-        self.last_ownership_change_token =
-            Some(macc_core::process_ownership::ownership_change_token(&paths.root));
+        self.last_ownership_change_token = Some(
+            macc_core::process_ownership::ownership_change_token(&paths.root),
+        );
         self.coordinator_ownership_last_refresh = self.last_ownership_refresh;
         self.sync_coordinator_ownership_view();
     }
@@ -2339,8 +2351,9 @@ impl AppState {
                 );
             }
             self.coordinator_ownership_last_heartbeat = Some(now);
-            self.last_ownership_change_token =
-                Some(macc_core::process_ownership::ownership_change_token(&paths.root));
+            self.last_ownership_change_token = Some(
+                macc_core::process_ownership::ownership_change_token(&paths.root),
+            );
         }
     }
 
@@ -2790,6 +2803,12 @@ impl AppState {
     }
 
     pub fn tick(&mut self) {
+        let decisions_busy =
+            self.approval_input_busy() || self.approval_window.is_some() || self.help_open;
+        self.decision_center.tick(
+            self.project_paths.as_ref().map(|p| p.root.clone()),
+            decisions_busy,
+        );
         self.poll_apply_preparation();
         self.poll_launch_start();
         if matches!(self.current_screen(), Screen::Sessions | Screen::O2) {

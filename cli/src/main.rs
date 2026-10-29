@@ -76,6 +76,11 @@ enum SaveSubcommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Durable decisions, autonomy policy, task contexts and live graph patches
+    Decisions {
+        #[command(subcommand)]
+        command: commands::decisions::Action,
+    },
     /// Discover, configure and import tool-neutral hooks
     Hooks {
         #[command(subcommand)]
@@ -1520,6 +1525,7 @@ fn run_with_engine_provider(
         std::env::current_exe().map_err(|e| MaccError::Validation(e.to_string()))?,
     );
     match &cli.command {
+        Some(Commands::Decisions { command }) => commands::decisions::run(&app, command),
         Some(Commands::Hooks { command }) => {
             commands::hooks::Hooks(app.clone(), command.clone()).run()
         }

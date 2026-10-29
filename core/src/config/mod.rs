@@ -278,6 +278,9 @@ pub struct CoordinatorClientConfig {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
+    /// Durable decisions and live graph control. Opt-in during legacy migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<crate::coordinator::decisions::Policy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator_tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -602,6 +605,7 @@ pub fn load_canonical_config<P: AsRef<Path>>(path: P) -> crate::Result<Canonical
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
+            decisions: None,
             coordinator_tool: None,
             reference_branch: None,
             require_clean_reference_branch: None,
@@ -1091,6 +1095,14 @@ impl CanonicalConfig {
 
     pub fn validate(&self) -> crate::Result<()> {
         crate::o2::policy::from_config(self).validate()?;
+        if let Some(policy) = self
+            .automation
+            .coordinator
+            .as_ref()
+            .and_then(|c| c.decisions.as_ref())
+        {
+            policy.validate()?;
+        }
         crate::hooks::validate(self)?;
         if let Some(policy) = &self.session_management {
             policy.validate()?;

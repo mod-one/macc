@@ -772,6 +772,9 @@ Instructions:
 15) If the task JSON contains `gate` (kind `verdict` or no kind), also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict. Never produce, simulate, or claim a human approval: approvals are recorded only by people through `macc coordinator approve`, and a verdict you print is ignored for `human_approval` gates. If your task needs an approval that has not been recorded, that is `precondition_unmet`, not something to decide yourself.
 
 PROMPT
+  if [[ -n "${MACC_DECISION_CONTEXT_FILE:-}" ]]; then
+    "${MACC_DECISION_CLI:-macc}" --cwd "$MACC_DECISION_ROOT" decisions context --render | jq -er '.rendered' || return 1
+  fi
   printf '\n%s\n' "$prompt_closing_line"
 }
 
@@ -943,6 +946,9 @@ run_tool() {
   local max_attempts="$3"
   local output_capture
   local script
+  if [[ -n "${MACC_DECISION_CONTEXT_FILE:-}" ]]; then
+    "${MACC_DECISION_CLI:-macc}" --cwd "$MACC_DECISION_ROOT" decisions receipt --prompt-file "$prompt_file" > /dev/null || return 1
+  fi
   script="$(tool_runner_path)"
   if [[ -z "$script" || ! -x "$script" ]]; then
     set_last_error "E102" "performer" "tool runner not found or not executable"
@@ -995,6 +1001,14 @@ run_tool() {
 
   spinner_stop "Runner finished (${tool})"
   set -e
+
+  if [[ -n "${MACC_DECISION_CONTEXT_FILE:-}" && "$status" -eq 0 ]]; then
+    local decision_check
+    if ! decision_check="$("${MACC_DECISION_CLI:-macc}" --cwd "$MACC_DECISION_ROOT" decisions complete --output-file "$output_capture" 2>&1)"; then
+      printf '\nMACC_TASK_PRECONDITION: %s\nMACC_TASK_RESULT_EXP: Decision context verification did not pass: %s\nMACC_TASK_RESULT: precondition_unmet\n' "$decision_check" "$decision_check" >> "$output_capture"
+      printf '%s\n' "$decision_check" >> "$task_log_file"
+    fi
+  fi
 
   # A structured terminal precondition remains authoritative even when the
   # adapter propagates a non-zero exit. Never turn it into a quota/retry error.

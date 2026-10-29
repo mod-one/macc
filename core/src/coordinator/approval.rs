@@ -412,7 +412,12 @@ fn evaluate_human_gates_for_project(
     let storage = crate::coordinator_storage::SqliteStorage::new(
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths),
     );
-    let ledger = storage.gate_decisions_by_task()?;
+    let p = crate::coordinator::decisions::policy(repo_root)?;
+    let ledger = if p.enabled {
+        crate::coordinator::decisions::approval_ledger_for_project(repo_root, registry)?
+    } else {
+        storage.gate_decisions_by_task()?
+    };
     let branch = reference_branch(repo_root);
     Ok(reconcile_human_gates(
         registry,
@@ -430,6 +435,12 @@ pub fn current_pending_approvals(
     repo_root: &std::path::Path,
     registry: &TaskRegistry,
 ) -> Vec<PendingApproval> {
+    if crate::coordinator::decisions::policy(repo_root).is_ok_and(|p| {
+        p.enabled
+            && p.human_question_min_risk == crate::coordinator::decisions::Consultation::NeverAsk
+    }) {
+        return Vec::new();
+    }
     let diff_stat = |rev: &str| revision_diff_stat(repo_root, rev);
     if !registry.tasks.iter().any(|t| t.is_human_approval_gate()) {
         return Vec::new();

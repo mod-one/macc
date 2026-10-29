@@ -629,6 +629,22 @@ pub(super) async fn launch_performer(
     if claim.resume_attempt > 0 {
         routing_env.push(("MACC_RESUME_ATTEMPT", claim.resume_attempt.to_string()));
     }
+    if let Some((context, file)) = crate::coordinator::decisions::prepare_context(
+        repo_root,
+        &claim.task_id,
+        "dev",
+        &claim.worktree_path,
+        &claim.claim_id,
+    )? {
+        routing_env.extend([
+            ("MACC_DECISION_ROOT", repo_root.display().to_string()),
+            ("MACC_DECISION_PLAN", context.plan_id),
+            ("MACC_DECISION_ATTEMPT", claim.claim_id.clone()),
+            ("MACC_DECISION_PHASE", "dev".into()),
+            ("MACC_DECISION_CONTEXT_FILE", file.display().to_string()),
+            ("MACC_DECISION_CLI", current_exe.display().to_string()),
+        ]);
+    }
 
     let pid = coordinator_runtime::spawn_performer_job(
         &current_exe,

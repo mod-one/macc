@@ -60,7 +60,59 @@ else
 fi
 jq -nc --arg sid "$2" '{type:"result",session_id:$sid,result:"MACC_TASK_RESULT: success_with_changes",usage:{input:17,output:3}}'
 "#).unwrap();
-    let out = Command::new("bash")
+    let decision_context = if fail_mode.starts_with("decisions") {
+        use macc_core::coordinator::decisions as dm;
+        let paths = macc_core::ProjectPaths::from_root(root);
+        let mut cfg = macc_core::load_canonical_config(&paths.config_path).unwrap();
+        let c = cfg
+            .automation
+            .coordinator
+            .get_or_insert_with(Default::default);
+        c.prd_file = Some("worktree.prd.json".into());
+        c.reference_branch = Some("main".into());
+        let policy = dm::Policy {
+            enabled: true,
+            ..Default::default()
+        };
+        c.decisions = Some(policy.clone());
+        macc_core::save_canonical_config(&paths, &cfg).unwrap();
+        let (mut store, plan) = dm::active_plan(root).unwrap();
+        let request:dm::Request=serde_json::from_value(json!({"idempotency_key":"operator-direction","task_id":"A","question":"Which contract?","recommendation":"Preserve contract bytes","investigated":["Read consumer contracts"],"impact":{"evidence":["Operator clarification"]}})).unwrap();
+        let d = store
+            .submit(&plan, request, "operator", "human", &policy)
+            .unwrap();
+        store.answer(&d.id,d.version,"Preserve the existing public contract. This exact wording must reach the provider.",None,"operator",false,&policy).unwrap();
+        let plan = store.plan(&plan.id).unwrap();
+        Some(
+            store
+                .issue(&plan, "A", "decision-lifecycle-test", "dev", root, &policy)
+                .unwrap()
+                .0,
+        )
+    } else {
+        None
+    };
+    if decision_context.is_some() {
+        let path = root.join("fake-ai.sh");
+        let mut script = std::fs::read_to_string(&path).unwrap();
+        script=script.replace("printf 'retained work", "[[ \"${@: -1}\" == *'This exact wording must reach the provider.'* ]] || exit 43\nprintf 'retained work");
+        script=script.replace("jq -nc --arg sid", "if [[ \"$FAIL_MODE\" != decisions_missing_ack ]]; then\n  decision_ack=\"$(printf '%s\\n' \"${@: -1}\" | sed -n '/^MACC_DECISION_ACK: /p')\"\n  jq -nc --arg ack \"$decision_ack\" '{type:\"assistant\",message:{content:[{type:\"text\",text:$ack}]}}'\nfi\njq -nc --arg sid");
+        std::fs::write(path, script).unwrap();
+    }
+    let mut performer = Command::new("bash");
+    if let Some(context) = &decision_context {
+        performer
+            .env("MACC_DECISION_ROOT", root)
+            .env("MACC_DECISION_PLAN", &context.plan_id)
+            .env("MACC_DECISION_ATTEMPT", &context.attempt_id)
+            .env("MACC_DECISION_PHASE", "dev")
+            .env(
+                "MACC_DECISION_CONTEXT_FILE",
+                root.join(".macc/runtime/decisions/decision-lifecycle-test/dev.json"),
+            )
+            .env("MACC_DECISION_CLI", env!("CARGO_BIN_EXE_macc"));
+    }
+    let out = performer
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../automat/performer.sh"))
         .arg("--repo")
         .arg(root)
@@ -176,4 +228,48 @@ fn checkpoint_protocol_failure_is_terminal_preserves_work_and_never_retries_or_c
         .as_str()
         .unwrap()
         .contains("did not acknowledge"));
+}
+#[test]
+fn decision_feedback_reaches_the_real_performer_and_receipt_records_assistant_ack() {
+    let (temp, out, events) = run_case("decisions");
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "phase_result" && e["status"] == "done"));
+    let store = macc_core::coordinator::decisions::Store::open(temp.path()).unwrap();
+    let plan = store.plans().unwrap().pop().unwrap();
+    let history = store.context_history(&plan.id, "A").unwrap();
+    assert_eq!(history[0]["receipt"]["acknowledged"], true);
+    assert!(history[0]["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("This exact wording must reach the provider."));
+}
+#[test]
+fn missing_decision_ack_preserves_performer_work_and_prevents_commit() {
+    let (temp, out, events) = run_case("decisions_missing_ack");
+    assert!(!out.status.success());
+    assert!(temp.path().join("implementation.txt").exists());
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(temp.path())
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&commit.stdout).trim(), "initial");
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "phase_result" && e["status"] == "failed"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("calls.tsv"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 }

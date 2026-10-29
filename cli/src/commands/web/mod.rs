@@ -8,6 +8,8 @@ mod catalog_skills;
 mod config;
 mod coordinator;
 mod coordinator_lease;
+mod decision_security;
+mod decisions;
 #[allow(clippy::result_large_err)]
 mod doctor;
 mod errors;
@@ -203,6 +205,21 @@ impl Command for WebCommand {
             registered_process_guard: Some(Arc::new(guard)),
         };
         let app = build_web_router(state.clone());
+        let app = if !config.host.is_loopback() {
+            let token=std::env::var("MACC_WEB_ACCESS_TOKEN").map_err(|_|MaccError::Validation("Remote web access requires MACC_WEB_ACCESS_TOKEN (at least 32 characters); localhost remains available without it".into()))?;
+            if !(32..=128).contains(&token.len())
+                || !token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return Err(MaccError::Validation(
+                    "MACC_WEB_ACCESS_TOKEN must contain 32–128 letters, digits, hyphens or underscores".into(),
+                ));
+            }
+            decision_security::protect(app, token)
+        } else {
+            app
+        };
 
         println!("Web server starting on http://{}...", config.bind_addr());
 
@@ -359,6 +376,8 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/coordinator/approvals",
             get(coordinator::list_approvals_handler),
         )
+        .route("/api/v1/decisions", get(decisions::snapshot).post(decisions::mutate))
+        .route("/api/v1/decisions/contexts/:task",get(decisions::contexts))
         .route(
             "/api/v1/coordinator/approvals/:id/decision",
             post(coordinator::gate_decision_handler),
@@ -523,9 +542,10 @@ fn heartbeat_web_viewers_once(state: &WebState) {
         let handle = record.process.clone();
         if record.takeover_request.is_none() {
             if let Some(owner) = record.owner.as_ref().filter(|o| o.kind == ClientKind::Web) {
-                let _ = state
-                    .engine
-                    .process_heartbeat(&state.paths.root, &handle, &owner.client_id);
+                let _ =
+                    state
+                        .engine
+                        .process_heartbeat(&state.paths.root, &handle, &owner.client_id);
             }
         }
         for viewer in record.viewers {

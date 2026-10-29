@@ -8,6 +8,7 @@ pub mod args;
 pub mod commit_reconciler;
 pub mod control;
 pub mod control_plane;
+pub mod decisions;
 pub mod delivery_evidence;
 pub mod drain;
 pub mod engine;

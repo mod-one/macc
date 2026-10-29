@@ -303,7 +303,18 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 runner_path.display()
             )));
         }
-        let prompt = coordinator_runtime::build_phase_prompt(mode, task_id, &phase_tool, task)?;
+        let mut prompt = coordinator_runtime::build_phase_prompt(mode, task_id, &phase_tool, task)?;
+        let decision_attempt = uuid::Uuid::new_v4().to_string();
+        let decision_context = crate::coordinator::decisions::prepare_context(
+            self.repo_root,
+            task_id,
+            mode,
+            &worktree,
+            &decision_attempt,
+        )?;
+        if let Some((context, _)) = &decision_context {
+            prompt.push_str(&context.render());
+        }
         let prompt_dir = worktree.join(".macc").join("tmp");
         std::fs::create_dir_all(&prompt_dir).map_err(|e| MaccError::Io {
             path: prompt_dir.to_string_lossy().into(),
@@ -315,7 +326,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             mode,
             task_id.replace('/', "-")
         ));
-        std::fs::write(&prompt_path, prompt).map_err(|e| MaccError::Io {
+        std::fs::write(&prompt_path, &prompt).map_err(|e| MaccError::Io {
             path: prompt_path.to_string_lossy().into(),
             action: "write coordinator phase prompt".into(),
             source: e,
@@ -384,6 +395,28 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 &format!("### Attempt {}/{}\n", attempt, attempts),
             );
             let mut command = std::process::Command::new(&runner_path);
+            command.env_remove("MACC_WEB_ACCESS_TOKEN");
+            if let Some((context, file)) = &decision_context {
+                let mut store = crate::coordinator::decisions::Store::open(self.repo_root)?;
+                store.issued(
+                    &context.plan_id,
+                    &decision_attempt,
+                    mode,
+                    &prompt,
+                    &crate::coordinator::decisions::policy(self.repo_root)?,
+                )?;
+                command
+                    .env("MACC_DECISION_ROOT", self.repo_root)
+                    .env("MACC_DECISION_PLAN", &context.plan_id)
+                    .env("MACC_DECISION_ATTEMPT", &decision_attempt)
+                    .env("MACC_DECISION_PHASE", mode)
+                    .env("MACC_DECISION_CONTEXT_FILE", file)
+                    .env(
+                        "MACC_DECISION_CLI",
+                        std::env::current_exe()
+                            .map_err(|e| MaccError::Validation(e.to_string()))?,
+                    );
+            }
             command
                 .current_dir(&worktree)
                 .env_remove(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV)
@@ -458,6 +491,19 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 return Ok(Err(reason));
             }
             if out.status.success() {
+                if let Some((context, _)) = &decision_context {
+                    let mut store = crate::coordinator::decisions::Store::open(self.repo_root)?;
+                    let policy = crate::coordinator::decisions::policy(self.repo_root)?;
+                    if let Err(error) = store.complete(
+                        &context.plan_id,
+                        &decision_attempt,
+                        mode,
+                        &combined_output,
+                        &policy,
+                    ) {
+                        return Ok(Err(error.to_string()));
+                    }
+                }
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits
                 // are managed by performer.sh. Fix phases may leave

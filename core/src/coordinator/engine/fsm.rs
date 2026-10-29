@@ -1728,6 +1728,14 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         )
     }
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        if self
+            .coordinator
+            .and_then(|c| c.decisions.as_ref())
+            .is_some_and(|p| p.enabled)
+            && !crate::coordinator::decisions::policy(self.repo_root)?.enabled
+        {
+            return Err(MaccError::Validation("Decision management was disabled during this run; stopping before more work or merges. Resume only after reviewing the policy change.".into()));
+        }
         // Measure the previous cycle before starting this one, so ghost
         // detection can tell "the performer stopped" apart from "we stopped
         // looking".
@@ -1974,6 +1982,39 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn on_blocked_merge(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        if reason.contains("Decision control:") {
+            let mut registry = crate::coordinator::decisions::registry(self.repo_root)?;
+            if let Some(task) = registry.find_task_mut(task_id) {
+                let repairs = task
+                    .task_runtime
+                    .extra
+                    .get("decision_merge_repairs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                if reason.contains("DM_REPAIR") && repairs < 3 {
+                    task.set_workflow_state(WorkflowState::ChangesRequested);
+                    task.task_runtime
+                        .extra
+                        .insert("decision_merge_repair".into(), serde_json::json!(true));
+                    task.task_runtime.extra.insert(
+                        "decision_merge_repairs".into(),
+                        serde_json::json!(repairs + 1),
+                    );
+                } else {
+                    task.set_workflow_state(WorkflowState::Blocked);
+                }
+                task.task_runtime.set_status(RuntimeStatus::Idle);
+                task.task_runtime
+                    .set_last_error_details("DM_CONTEXT", "decisions", reason);
+                task.task_runtime.merge_result_pending = Some(false);
+            }
+            crate::coordinator::state::coordinator_state_registry_save(
+                self.repo_root,
+                &std::collections::BTreeMap::new(),
+                &registry.to_value()?,
+            )?;
+            return Ok(());
+        }
         if !is_operator_blocked_merge(reason) {
             // Transient failure (e.g. precheck_clean, timeout, verify_branch).
             // Do not kill other running performers or enter the operator-wait
@@ -2104,7 +2145,13 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             active,
             blocked,
             merged,
-            waiting_approval: snapshot.registry.waiting_approval_count(),
+            waiting_approval: snapshot.registry.waiting_approval_count()
+                + snapshot
+                    .registry
+                    .tasks
+                    .iter()
+                    .filter(|t| t.task_runtime.extra.contains_key("decision_wait"))
+                    .count(),
         };
         self.last_logged_counts = Some(counts);
         Ok(counts)
@@ -2194,6 +2241,8 @@ pub async fn run_native_control_plane(
     env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let _decision_controller = crate::coordinator::decisions::controller_lock(repo_root)?;
+    crate::coordinator::decisions::recover(repo_root)?;
     let _queue_lock = crate::fs_lock::AdvisoryLock::acquire(
         &repo_root.join(".macc/state/prd-queue.lock"),
         std::time::Duration::ZERO,

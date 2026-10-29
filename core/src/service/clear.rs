@@ -16,7 +16,7 @@ pub fn clear_project(
     ui.info("This will:");
     ui.info("  1) Remove non-root worktrees; dirty worktrees are protected against removal");
     ui.info("  2) Remove MACC-managed files/directories in this project (macc clear)");
-    ui.info("  Session authority and O2 memory/checkpoints are retained. A configuration-only restore does not restore historical O2 data; use a saved session bundle for that.");
+    ui.info("  The durable decision/graph ledger under the Git common directory, session authority and O2 memory/checkpoints are retained. A configuration-only restore does not restore historical O2 data; use a saved session bundle for that.");
 
     if dry_run {
         let entries = crate::list_worktrees(&paths.root).unwrap_or_default();
@@ -52,6 +52,7 @@ pub fn clear_project(
     }
 
     crate::session_store::require_stopped(&paths.root)?;
+    let _decision_controller = crate::coordinator::decisions::controller_lock(&paths.root)?;
     let removed_worktrees = crate::service::worktree::remove_all_worktrees(&paths.root, false)?;
     crate::prune_worktrees(&paths.root)?;
     ui.info(&format!("Removed worktrees: {}", removed_worktrees));

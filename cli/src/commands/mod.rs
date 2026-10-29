@@ -12,6 +12,7 @@ pub mod clear;
 pub mod config;
 pub mod context;
 pub mod coordinator;
+pub mod decisions;
 pub mod doctor;
 pub mod failure;
 pub mod hooks;

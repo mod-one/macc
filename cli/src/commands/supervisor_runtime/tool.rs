@@ -115,6 +115,7 @@ impl Agent {
             macc_core::supervisor::tool_settings::write(cwd, spec, &self.effort)?;
         }
         let mut cmd = tokio::process::Command::new(&self.performer.command);
+        cmd.env_remove("MACC_WEB_ACCESS_TOKEN");
         cmd.args(render_args(
             &self.performer.args,
             &self.model,
@@ -353,7 +354,10 @@ performer:
         let fake = temp.path().join("fake-agy.sh");
         std::fs::write(
             &fake,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", capture.display()),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                capture.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();

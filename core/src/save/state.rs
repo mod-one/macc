@@ -3,7 +3,8 @@ use super::*;
 
 pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
     if !paths.config_path.exists() {
-        return crate::session_store::is_sqlite(&paths.root);
+        return Ok(crate::session_store::is_sqlite(&paths.root)?
+            || crate::coordinator::decisions::current_state_digest(&paths.root)?.is_some());
     }
     let saves = detect_matching_saves(paths)?;
     let saves: Vec<_> = saves
@@ -14,6 +15,7 @@ pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
         return Ok(true);
     }
 
+    let decision_digest = crate::coordinator::decisions::current_state_digest(&paths.root)?;
     let config_sha = compute_file_sha256(&paths.config_path).ok();
     let sessions_path = paths.macc_dir.join("state").join("tool-sessions.json");
     let sqlite = crate::session_store::is_sqlite(&paths.root)?;
@@ -46,7 +48,9 @@ pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
             (None, None) => true,
             _ => false,
         };
-        if config_matches && sessions_matches {
+        let decisions_match = decision_digest.as_deref()
+            == m.decision_store.as_ref().map(|s| s.state_digest.as_str());
+        if config_matches && sessions_matches && decisions_match {
             return Ok(false); // Found a match, so it's not unsaved
         }
     }
@@ -60,10 +64,12 @@ pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateRepo
         sessions_changed: false,
     };
     if !paths.config_path.exists() {
-        report.sessions_changed = crate::session_store::is_sqlite(&paths.root)?;
+        report.sessions_changed = crate::session_store::is_sqlite(&paths.root)?
+            || crate::coordinator::decisions::current_state_digest(&paths.root)?.is_some();
         return Ok(report);
     }
 
+    let decision_digest = crate::coordinator::decisions::current_state_digest(&paths.root)?;
     let config_sha = compute_file_sha256(&paths.config_path).ok();
     let sessions_path = paths.macc_dir.join("state").join("tool-sessions.json");
     let sqlite = crate::session_store::is_sqlite(&paths.root)?;
@@ -85,7 +91,7 @@ pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateRepo
         .collect();
     if matches.is_empty() {
         report.config_changed = true;
-        if sessions_path.exists() {
+        if sessions_path.exists() || decision_digest.is_some() {
             report.sessions_changed = true;
         }
         return Ok(report);
@@ -111,7 +117,12 @@ pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateRepo
     };
 
     report.config_changed = !config_matches;
-    report.sessions_changed = !sessions_matches;
+    report.sessions_changed = !sessions_matches
+        || decision_digest.as_deref()
+            != best_match
+                .decision_store
+                .as_ref()
+                .map(|s| s.state_digest.as_str());
 
     Ok(report)
 }

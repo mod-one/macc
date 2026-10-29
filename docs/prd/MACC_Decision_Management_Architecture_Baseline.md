@@ -1,14 +1,16 @@
 # MACC — Decision Management & Durable Approval Persistence
 
 **Architecture Decision Baseline, Verified Implementation, and Recommendation Review — Revision 1.4**<br>
-**Status:** Source-verified baseline; target architecture technically reviewed; decision-management extension not implemented  
+**Status:** Reviewed target architecture; opt-in local implementation added; full release qualification remains pending<br>
 **Date:** 2026-10-29  
 **Revision:** 1.4 — responsive Web/TUI decision interfaces, explicit never-ask autonomy and universal decision traceability; source baseline remains `13ca933`<br>
 **Scope:** MACC native Rust coordinator, PRD planner, performers, reviewers, worktrees, CLI/TUI, local web client, and durable control-plane state.
 
 > **Document status:** The six choices in Section 1 remain the project-owner architectural requirements. Section 2 records the implementation inspected on 2026-10-29 at commit `13ca933`; Sections 3–16 describe the **target extension**, except where an existing behavior is explicitly identified. Section 12.6 validates or qualifies all 43 recommendations technically; this review neither invents project governance nor certifies unimplemented capabilities. The filename is retained for existing references. This revision changes documentation only; no runtime feature or new acceptance test was implemented or executed for this review.
 
-**Owner clarification incorporated in revision 1.3:** performers must be free to raise important unresolved decisions without making questions systematic. The coordinator filters requests and remains as autonomous as possible. The user controls the minimum risk level for discretionary human questions, thereby granting more or less decision latitude within existing authority. Section 7.3 specifies this mechanism; it is a target requirement, not an implemented setting.
+> **Implementation update (2026-10-29):** The local implementation, activation, commands, migration/trust boundaries and validation scope are documented in [Decision management: local implementation](../architecture/decision-management.md). Section 2 remains the historical inspection at `13ca933`; its statements of absence describe that snapshot. The opt-in implementation does not claim secure approver isolation, signed Git transport or certification of the complete AT01–AT68 matrix.
+
+**Owner clarification incorporated in revision 1.3:** performers must be free to raise important unresolved decisions without making questions systematic. The coordinator filters requests and remains as autonomous as possible. The user controls the minimum risk level for discretionary human questions, thereby granting more or less decision latitude within existing authority. Section 7.3 specifies this mechanism; the opt-in local setting is documented in the implementation guide.
 
 **Owner clarification incorporated in revision 1.4:** Web and TUI must offer approachable, responsive question/approval/request interfaces while the coordinator runs. The autonomy selector also includes a **never-ask mode**: performers can choose and implement their recommended solutions at any risk level without human consultation through MACC. Every material resolution, whether human or autonomous and whatever the threshold, is durably recorded, propagated and accessible to other affected agents/clients. This explicitly extends revision 1.3's threshold-only behavior; automated choices must remain identifiable as delegated agent decisions, never fabricated human votes.
 

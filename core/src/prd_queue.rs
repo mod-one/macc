@@ -305,9 +305,16 @@ fn incomplete_tasks(
         .task_ids
         .iter()
         .filter(|id| {
-            registry
-                .find_task(id)
-                .is_none_or(|task| !task.satisfies_dependants())
+            registry.find_task(id).is_none_or(|task| {
+                !task.satisfies_dependants()
+                    && !(task.state == "abandoned"
+                        && task
+                            .task_runtime
+                            .extra
+                            .get("decision_quarantine")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true))
+            })
         })
         .cloned()
         .collect()
@@ -443,6 +450,10 @@ async fn run_queue(
         )
         .await;
         let outcome = result.and_then(|_| {
+            // Graph projections can legitimately change this entry during a run.
+            // Only the durable controller updates the persisted queue fingerprint.
+            let live_progress=load(root)?;
+            let entry=if crate::coordinator::decisions::policy(root)?.enabled { live_progress.entries.iter().find(|e|e.path==entry.path).unwrap_or(&entry) } else { &entry };
             if inspect(&root.join(&entry.path))?.0.fingerprint != entry.fingerprint {
                 return Err(invalid(format!("PRD changed during execution: {}; review and reset queue progress before continuing", entry.path)));
             }

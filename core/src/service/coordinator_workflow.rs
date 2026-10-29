@@ -2313,6 +2313,10 @@ pub fn coordinator_record_gate_decision(
     let record = approval::validate_decision(&registry, &request, digest.as_deref(), &now)?;
 
     let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(paths));
+    if crate::coordinator::decisions::policy(&paths.root)?.enabled {
+        let (mut control, plan) = crate::coordinator::decisions::active_plan(&paths.root)?;
+        control.record_approval(&paths.root, &plan, &request.task_id, &record)?;
+    }
     storage.append_gate_decision(&request.task_id, &record)?;
     let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
         &paths.root,

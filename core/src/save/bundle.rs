@@ -162,6 +162,11 @@ pub(super) fn create_in(
     }
 
     // 2. Capture sessions through the canonical authority service.
+    let decision_store = if include_sessions {
+        crate::coordinator::decisions::capture_backup(&paths.root, &tmp_save_dir)?
+    } else {
+        None
+    };
     let mut session_store = if include_sessions {
         super::sessions::capture(
             paths,
@@ -264,7 +269,14 @@ pub(super) fn create_in(
     if opts.dry_run {
         fs::remove_dir_all(&tmp_save_dir).ok();
         return Ok(SaveBundleManifest {
-            version: if session_store.is_some() { 2 } else { 1 },
+            version: if decision_store.is_some() {
+                3
+            } else if session_store.is_some() {
+                2
+            } else {
+                1
+            },
+            decision_store,
             session_store,
             kind: "macc.save_bundle".to_string(),
             name: name.to_string(),
@@ -372,7 +384,14 @@ pub(super) fn create_in(
     // Write manifest
     let manifest_path = tmp_save_dir.join("manifest.yaml");
     let mut manifest = SaveBundleManifest {
-        version: if session_store.is_some() { 2 } else { 1 },
+        version: if decision_store.is_some() {
+            3
+        } else if session_store.is_some() {
+            2
+        } else {
+            1
+        },
+        decision_store,
         session_store,
         kind: "macc.save_bundle".to_string(),
         name: name.to_string(),

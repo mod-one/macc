@@ -1174,6 +1174,11 @@ pub fn build_phase_prompt(mode: &str, task_id: &str, tool: &str, task: &Task) ->
             mode, task_id, e
         ))
     })?;
+    if mode == "fix"
+        && task.task_runtime.extra.get("decision_merge_repair") == Some(&serde_json::json!(true))
+    {
+        return Ok(format!("Repair task {task_id} in its retained worktree. Preserve existing commits, dirty and untracked work. Merge the current base branch '{}' into this task branch; resolve the merge conflict using the task contract and applicable decisions, validate the result and commit the resolved task work. Do not use reset --hard or clean to discard work. Ask material unresolved questions only through the decision protocol.\nTask and repair diagnostic:\n{task_payload}",task.base_branch("main")));
+    }
     if mode == "review" {
         return Ok(format!(
             "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the review phase only.\n2) Review the already committed task changes and produce a verdict.\n3) Before approving, run `git merge-tree $(git merge-base HEAD {{base}}) HEAD {{base}}` (where {{base}} is the task's base branch, usually `main` or `master`) to check for merge conflicts. If the merge-tree output shows conflicts, return CHANGES_REQUESTED with a description of the conflicting files and what needs to be resolved.\n4) Do not modify files, do not create commits, and do not modify task registry state.\n5) Return exactly one final verdict line at the end of your response:\n   - REVIEW_VERDICT: OK\n   - REVIEW_VERDICT: CHANGES_REQUESTED\n",
@@ -1259,6 +1264,7 @@ pub fn spawn_performer_job(
         })?;
 
     let mut run_cmd = tokio::process::Command::new(executable_path);
+    run_cmd.env_remove("MACC_WEB_ACCESS_TOKEN");
     // Create a new process group so we can kill the entire subprocess tree on
     // timeout by sending signals to the negative PGID.
     #[cfg(unix)]
@@ -1810,10 +1816,16 @@ pub fn summarize_output(text: &str) -> String {
 /// `failure:local_merge` vocabulary the coordinator already reports on.
 fn finish_integration(
     integration: &IntegrationWorktree,
+    repo_root: &Path,
+    task_id: &str,
     branch: &str,
     base: &str,
     suggestion: &str,
 ) -> Result<std::result::Result<(), String>> {
+    let _decision_fence = crate::coordinator::decisions::publication_lock(repo_root)?;
+    if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, task_id) {
+        return Ok(Err(error.to_string()));
+    }
     match integration.publish() {
         Ok(PublishOutcome::Published { .. }) | Ok(PublishOutcome::UpToDate) => Ok(Ok(())),
         Ok(outcome) => {
@@ -1855,6 +1867,9 @@ pub fn merge_task_with_policy_native<FE>(
 where
     FE: FnMut(&str, &str, &str, &str, &str, &str),
 {
+    if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, task_id) {
+        return Ok(Err(error.to_string()));
+    }
     let log_dir = coordinator_log_dir(repo_root);
     std::fs::create_dir_all(&log_dir).map_err(|e| MaccError::Io {
         path: log_dir.to_string_lossy().into(),
@@ -1896,7 +1911,7 @@ where
         "run local merge",
     )?;
     if merge.status.success() {
-        return finish_integration(&integration, branch, base, &suggestion);
+        return finish_integration(&integration, repo_root, task_id, branch, base, &suggestion);
     }
 
     let merge_output = format!(
@@ -1913,6 +1928,12 @@ where
     .map(|o| String::from_utf8_lossy(&o.stdout).trim().replace('\n', ","))
     .unwrap_or_default();
 
+    // Decision-aware repair belongs to the task's fix/review pipeline: a
+    // detached hook must not change artifacts after their compliance review.
+    if crate::coordinator::decisions::policy(repo_root)?.enabled {
+        integration.reset()?;
+        return Ok(Err(crate::coordinator::decisions::error(format!("DM_REPAIR: merge {base} into the retained task branch {branch}, resolve [{conflicts}] without discarding work, then run task validation and independent review before retrying publication")).to_string()));
+    }
     let mut hook_output = String::new();
     if merge_ai_fix {
         let hook = crate::ProjectPaths::from_root(repo_root).automation_merge_fix_hook_path();
@@ -1992,7 +2013,7 @@ where
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(true);
         if hook_accepted && !unresolved && !integration.merge_in_progress() {
-            return finish_integration(&integration, branch, base, &suggestion);
+            return finish_integration(&integration, repo_root, task_id, branch, base, &suggestion);
         }
     }
 

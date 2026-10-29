@@ -1429,6 +1429,7 @@ dependencies = [
  "macc-core",
  "macc-registry",
  "ratatui",
+ "serde",
  "serde_json",
  "tempfile",
 ]

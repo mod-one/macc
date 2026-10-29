@@ -58,7 +58,7 @@
       "source": {
         "kind": "git",
         "url": "https://github.com/mod-one/skills.git",
-        "ref": "main",
+        "ref": "93f177b4f71383bcbdf2a376e58beaa6b10e9f62",
         "checksum": null
       },
       "mandatory": true

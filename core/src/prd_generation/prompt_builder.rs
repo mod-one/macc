@@ -109,6 +109,7 @@ pub fn build_generate_prompt(
     );
 
     prompt.push_str(CROSS_MODULE_CONTRACT_CHECK);
+    prompt.push_str("## Decision governance\n\nInvestigate repository contracts and existing decisions before planning. Do not invent required human roles or approvals: derive gates from explicit project governance and cite governance_ref/approval_trigger. Routine reversible implementation choices remain autonomous. For an important unresolved choice, include a top-level decision_requests array of structured proposals (idempotency_key, task_id, kind, question, context, investigated, recommendation, options with IDs, recommended_option_id, affected_tasks, risk, impact with evidence). Questions are proposals for the coordinator policy, never pre-approved human consent. Keep every original task ID and retain delivered history; use follow-up corrective tasks for delivered work. Runtime changes use versioned graph patches, never direct edits of the active PRD.\n\n");
 
     prompt.push_str("## Output contract\n\n");
     prompt
