@@ -15,9 +15,7 @@ pub fn inspect(paths: &ProjectPaths, config: Option<&CoordinatorConfig>) -> Resu
         let entries = validate(&paths.root, &config.unwrap().prd_files)?;
         let progress = load(&paths.root)?;
         if !progress.entries.is_empty() && progress.entries != entries {
-            return Err(invalid(
-                "PRD queue changed; review and reset progress before continuing.",
-            ));
+            return Err(changed_error(&progress.entries, &entries));
         }
     }
     let mut path = paths.root.join(&current.path);

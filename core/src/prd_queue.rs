@@ -166,6 +166,38 @@ pub struct Progress {
     pub reason: Option<String>,
 }
 
+/// Actionable "queue changed" error: names what differs and the commands to run.
+pub(crate) fn changed_error(recorded: &[Entry], current: &[Entry]) -> MaccError {
+    let mut details = Vec::new();
+    for entry in current {
+        match recorded.iter().find(|e| e.path == entry.path) {
+            None => details.push(format!("added: {}", entry.path)),
+            Some(old) if old.fingerprint != entry.fingerprint => {
+                details.push(format!("content modified: {}", entry.path))
+            }
+            _ => {}
+        }
+    }
+    for entry in recorded {
+        if !current.iter().any(|e| e.path == entry.path) {
+            details.push(format!("removed: {}", entry.path));
+        }
+    }
+    if details.is_empty() {
+        details.push("the PRD order changed".into());
+    }
+    invalid(format!(
+        "PRD queue changed since progress was last recorded ({}).\n\
+         What to do:\n  \
+         1. Review the queue:      macc coordinator prds check\n  \
+         2. Inspect the progress:  macc coordinator prds status\n  \
+         3. If the change is intended, accept it as the new baseline (the cursor returns to the first PRD; delivered tasks are kept):\n     \
+         macc coordinator prds reset\n  \
+         4. Then retry your command.",
+        details.join("; ")
+    ))
+}
+
 pub fn state_path(root: &Path) -> PathBuf {
     root.join(".macc/state/prd-queue.json")
 }
@@ -182,9 +214,7 @@ pub fn active_path(
         let progress = load(root)?;
         let entries = validate(root, &config.prd_files)?;
         if !progress.entries.is_empty() && progress.entries != entries {
-            return Err(invalid(
-                "PRD queue changed; review and reset progress before continuing.",
-            ));
+            return Err(changed_error(&progress.entries, &entries));
         }
         return config
             .prd_files
@@ -521,6 +551,30 @@ async fn run_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_queue_error_names_the_difference_and_the_commands_to_run() {
+        let e = |p: &str, f: &str| Entry {
+            path: p.into(),
+            fingerprint: f.into(),
+            task_ids: vec![],
+        };
+        let message = changed_error(
+            &[e("a.json", "1"), e("b.json", "1")],
+            &[e("a.json", "2"), e("c.json", "1")],
+        )
+        .to_string();
+        for expected in [
+            "PRD queue changed",
+            "content modified: a.json",
+            "added: c.json",
+            "removed: b.json",
+            "macc coordinator prds check",
+            "macc coordinator prds reset",
+        ] {
+            assert!(message.contains(expected), "{expected} missing: {message}");
+        }
+    }
 
     #[test]
     fn current_prd_follows_the_queue_cursor_and_falls_back_to_the_single_file() {
