@@ -1,12 +1,16 @@
 # MACC — Decision Management & Durable Approval Persistence
 
-**Architecture Decision Baseline, Verified Implementation, and Recommendation Review — Revision 1.2**  
+**Architecture Decision Baseline, Verified Implementation, and Recommendation Review — Revision 1.4**<br>
 **Status:** Source-verified baseline; target architecture technically reviewed; decision-management extension not implemented  
 **Date:** 2026-10-29  
-**Revision:** 1.2 — aligned with repository commit `13ca933`; recommendation review and migration constraints  
+**Revision:** 1.4 — responsive Web/TUI decision interfaces, explicit never-ask autonomy and universal decision traceability; source baseline remains `13ca933`<br>
 **Scope:** MACC native Rust coordinator, PRD planner, performers, reviewers, worktrees, CLI/TUI, local web client, and durable control-plane state.
 
 > **Document status:** The six choices in Section 1 remain the project-owner architectural requirements. Section 2 records the implementation inspected on 2026-10-29 at commit `13ca933`; Sections 3–16 describe the **target extension**, except where an existing behavior is explicitly identified. Section 12.6 validates or qualifies all 43 recommendations technically; this review neither invents project governance nor certifies unimplemented capabilities. The filename is retained for existing references. This revision changes documentation only; no runtime feature or new acceptance test was implemented or executed for this review.
+
+**Owner clarification incorporated in revision 1.3:** performers must be free to raise important unresolved decisions without making questions systematic. The coordinator filters requests and remains as autonomous as possible. The user controls the minimum risk level for discretionary human questions, thereby granting more or less decision latitude within existing authority. Section 7.3 specifies this mechanism; it is a target requirement, not an implemented setting.
+
+**Owner clarification incorporated in revision 1.4:** Web and TUI must offer approachable, responsive question/approval/request interfaces while the coordinator runs. The autonomy selector also includes a **never-ask mode**: performers can choose and implement their recommended solutions at any risk level without human consultation through MACC. Every material resolution, whether human or autonomous and whatever the threshold, is durably recorded, propagated and accessible to other affected agents/clients. This explicitly extends revision 1.3's threshold-only behavior; automated choices must remain identifiable as delegated agent decisions, never fabricated human votes.
 
 ## 1. Accepted architectural decisions
 
@@ -187,7 +191,7 @@ This avoids a dangerous first-release failure: restoring a previous approval whi
 | `SubjectRevision` | Exact artefact/code/requirements binding evaluated by a gate | Content and Git revision references |
 | `DecisionBinding` | Associates a decision with affected tasks and enforceable constraints | `decision_id + task_id + version` |
 | `HumanFeedbackEvent` | Preserves an original human answer, instruction, remark, correction or explanation and its intended effect | Immutable `feedback_id`, linked to decision and principal |
-| `TaskDecisionContext` | Complete, reproducible set of applicable decisions and human input for a particular task attempt | `task_id + attempt_id + context_digest` |
+| `TaskDecisionContext` | Complete, reproducible set of applicable human and autonomous decisions, with original human input when present, for a particular task attempt | `task_id + attempt_id + context_digest` |
 | `TaskContextReceipt` | Records which context version a performer/reviewer was actually issued and acknowledged | `attempt_id + context_digest + phase` |
 
 ### 5.2 Human interaction types
@@ -291,7 +295,7 @@ The request and authorization state machines are **new target contracts**. Exist
 
 `resolved -> (implemented | superseded | revoked)`
 
-- `auto_resolved` is permitted only if policy allows a deterministic safe default.
+- `auto_resolved` requires explicit policy: a verified existing/default answer or the user-selected `never_ask` delegation. Agent recommendations may determine the choice in full autonomy, while the control plane deterministically validates authority, subject and resulting effects; model output does not authorize itself.
 - `changes_requested` can return a request to investigation or proposal revision; it is not an implicit approval.
 - `superseded` preserves historical resolution and explains the replacement decision.
 - Prefer an explicit `needs_reconciliation` condition rather than destructively mutating the old outcome when the subject changes.
@@ -305,6 +309,8 @@ Current `WorkflowState` mapping:
 `changes_requested` is an `ApprovalStatus`/vote while the human gate's workflow state remains `waiting_approval`; the executable-task `WorkflowState::ChangesRequested` is a different review/fix state. There is no current human-gate workflow state named `pending_approval`, `waiting_for_subject` or `stale`.
 
 On a new resolved subject revision, existing evaluation withdraws prior matching-revision approval and recomputes the gate. The target verifier additionally requires trusted current subject/policy/actor information and records an explicit stale/reconciliation explanation. Historic votes remain intact. Existing actor/role strings must not be described as independently trusted actor records.
+
+**Delegated-mode extension:** `never_ask` additionally needs a typed gate outcome/resolution origin for `delegated_autonomous`, evaluated against the current delegation, subject and policy. Adapt readiness/dependency satisfaction and all clients explicitly; an autonomous gate resolution is not evidence that the original human quorum voted. Preserve the human-only evaluator for risk-threshold modes and historical records. Never enable full autonomy by merely setting `task.state = approved` or ignoring the gate in the UI.
 
 ### 6.3 Authorization lifecycle
 
@@ -329,12 +335,103 @@ An authorization may be tied to a single operation ID, target environment, windo
 |---|---|
 | Fully specified choice governed by existing approved standard | Resolve automatically; record provenance. |
 | Minor reversible implementation choice | Auto-resolve only if permitted by policy; record rationale. |
-| Unspecified product behavior, meaningful architecture fork, security/privacy change | Ask human or designated authorized role. |
-| Unplanned high-risk change or contradiction with an accepted decision | Block affected subgraph and escalate. |
-| Destructive/production-sensitive operation | Fresh authorization with operation-specific scope. |
-| Unknown or conflicting governance | Fail closed for the affected action; present precise missing authority. |
+| Unresolved product behavior, meaningful architecture fork, security/privacy choice | Investigate and classify; ask only if the configured threshold or a mandatory authority rule requires it. Existing approved policy may already settle the choice. |
+| Unplanned material change or contradiction with an accepted decision | Apply the threshold/authority filter; conflicting binding decisions require scoped escalation rather than unilateral override. |
+| Destructive/production-sensitive operation | Operation-specific authorization; in risk-threshold modes obtain required fresh human consent, or in `never_ask` evaluate explicit delegated authority and record the autonomous operation resolution. External access/authority cannot be fabricated. |
+| Unknown or conflicting governance | Resolve through the configured authority; threshold modes may request human clarification, whereas `never_ask` records an autonomous resolution or a precise impossible-to-execute diagnostic without prompting. |
 
 Human intervention is **risk-based, not model-confidence-based**. A model's confidence score may help triage but must not independently override governance. Deduplicate related questions by semantic key + explicit task/subject scope; batch only when dependencies do not make ordering ambiguous.
+
+### 7.3 Performer initiative and configurable question threshold
+
+#### 7.3.1 Autonomous-first question flow
+
+Performers and reviewers **may raise an important unresolved decision at any phase**; the planner need not anticipate it or create a gate first. A question is neither a mandatory end-of-task ritual nor evidence that the task/tool failed. The coordinator is the sole routing/filtering authority for MACC-managed human questions; performers submit structured requests rather than bypassing it through an interactive tool prompt.
+
+1. **Investigate first.** The performer checks the task/PRD, relevant code, dependency contracts, applicable human decisions and existing policy within a bounded investigation budget. Routine naming, local organization and reversible implementation details are decided autonomously when authorized. Do not ask the user for information already available in these sources.
+2. **Submit a meaningful request if needed.** Include the concrete unresolved choice, why it materially affects the result, sources checked, remaining unknowns, options and recommendation, consequences of each option/inaction, reversibility, affected tasks and proposed risk with evidence. Reuse the request/attempt identity and idempotency contract in Section 5.3. Do not submit an empty “what should I do?” question or treat low confidence alone as a decision request.
+3. **Filter centrally.** The coordinator validates provenance and independently applies versioned policy. It may resolve from an existing decision, delegate an authorized reversible choice to the performer, perform/request a bounded complementary investigation, or route the important unresolved question to the user. An agent's proposed risk is an input, not an authority to authorize itself or force a popup.
+4. **Continue useful work.** A submitted request does not automatically create a gate, mutate the DAG, mark a task failed or stop the run. Hold only work that genuinely depends on the missing decision; independent ready tasks continue. If complementary investigation yields no answer, report the precise missing prerequisite instead of looping or inventing requirements.
+5. **Record and propagate the outcome.** Persist the resolution and its provenance; deliver applicable human wording and constraints to performers/reviewers through Section 8.6. Create a graph patch only if the answer changes the work/dependencies; otherwise update the relevant decision/task-context versions without manufacturing DAG nodes.
+
+#### 7.3.2 User-controlled autonomy
+
+**Required setting:** a user-visible autonomy selector, provisionally named `human_question_min_risk`, supports the ordered thresholds `low < medium < high < critical` **and the distinct mode `never_ask`**. For a risk threshold, it is the level **at or above which an unresolved, material choice may be presented to the user**, after investigation, deduplication and checks for an existing answer. Crossing the threshold does not mean every task at that risk needs a question. `never_ask` disables human consultation rather than inventing a fifth risk level.
+
+| Threshold | Discretionary human questions | Decision latitude below the threshold |
+|---|---|---|
+| `low` | Material unresolved choices at any risk level may be asked after filtering. | Least additional delegation; still no routine or redundant questions. |
+| `medium` | Material unresolved `medium`, `high` and `critical` choices may be asked. | Authorized low-risk choices are decided autonomously. |
+| `high` | Only important unresolved `high` and `critical` choices may be asked. | Authorized low/medium-risk choices are decided autonomously. **Proposed default** for the autonomy-first workflow. |
+| `critical` | Only critical discretionary choices may be asked. | Greatest delegation for authorized low/medium/high-risk choices; mandatory approvals still apply. |
+| `never_ask` | **No human questions, approvals or clarification prompts from MACC, regardless of risk.** | **Full decision autonomy:** performers choose and implement their recommended solutions; coordinator validates/applies their structured resolutions and records them under explicit user delegation. See Section 7.3.5. |
+
+**Direction of the control:** raising the threshold grants more autonomous decision latitude and reduces discretionary questions; lowering it increases human consultation. Selecting **“Full autonomy — never ask”** (`never_ask`) removes the human-question loop entirely, including MACC-managed approval requests, and applies the delegated decision path in Section 7.3.5. Display this distinction beside the setting in CLI/TUI/web; do not label an autonomous decision “approved by the user.”
+
+Illustrative target configuration, **not a field supported by current MACC**:
+
+```yaml
+automation:
+  coordinator:
+    decisions:
+      human_question_min_risk: high
+```
+
+The final path must be added to the canonical schema, validation, save/restore and all clients consistently, accepting all five values. For full autonomy the illustrative value is `human_question_min_risk: never_ask`. Show the effective mode, policy source and delegated resolution behavior in coordinator settings and the live coordinator view. The proposed `high` default and detailed risk classification below are design defaults to validate during implementation. An authorized user selecting `never_ask` supplies the explicit MACC decision delegation; no per-question confirmation is then requested.
+
+#### 7.3.3 Risk evaluation and authority boundaries
+
+Risk classifies the **consequences of the actual decision**, not the performer's uncertainty or the whole task's generic risk label. A starting classification is:
+
+| Level | Typical decision characteristics |
+|---|---|
+| `low` | Local, reversible implementation detail with no change to specified behavior, shared contracts or protected assets. |
+| `medium` | Bounded, reversible technical choice within authorized scope, with limited module impact and a testable rollback. |
+| `high` | Material product/scope ambiguity, shared architecture/API/data-contract change, meaningful security/privacy or cost impact. |
+| `critical` | Irreversible data consequences, production/destructive action, exposure of sensitive authority/assets or major blast radius. |
+
+The trusted policy engine derives the effective risk from structured impact, reversibility, environment and scope rules. Resolve missing/contradictory impact evidence conservatively by bounded investigation or a scoped diagnostic; do not silently label it `low`. Projects may tighten the matrix and mandatory rules. The performer cannot edit the threshold, downgrade its own risk classification, split one material change into smaller requests to evade the threshold, or reinterpret silence as consent.
+
+Apply the following precedence **for the four risk-threshold modes**. In `never_ask`, use Section 7.3.5 instead of routing any outcome to a human prompt:
+
+1. **An existing applicable decision or authorized policy already settles the choice:** reuse/verify it and continue; do not ask again solely because the task has a high risk label.
+2. **An explicit human approval, fresh operation authorization or binding-policy conflict requires intervention:** preserve that requirement regardless of threshold. Raising the threshold is not a waiver of a gate, an authorization to alter product scope, or permission to contradict a human decision.
+3. **No applicable answer exists, but policy delegates the choice and effective risk is below threshold:** choose autonomously, record rationale and constraints, and continue. Do not ask a discretionary question to avoid ordinary engineering responsibility.
+4. **No applicable answer exists and the material choice meets/exceeds threshold:** submit one deduplicated, actionable human question with options and a recommendation; continue independent work.
+5. **Below threshold but no safe authorized choice or necessary factual prerequisite exists:** investigate within budget, then record the precise scoped block. The threshold must not force hallucinated requirements or out-of-scope execution. A genuine mandatory authority exception follows rule 2 and is shown as such; a technical/environment problem remains a diagnostic, not a fabricated product question.
+
+The user can change this policy through the same authorized settings boundary as other coordinator controls. Version/audit the change, communicate its effective value to future/current task contexts, and re-evaluate pending requests at a safe boundary. Changing a risk threshold does not waive mandatory human approval; switching to `never_ask` activates the explicit delegated-resolution path for pending and future requests. Neither change rewrites past decisions or automatically treats an unanswered request as a human approval. Existing graph changes and newly affected in-flight work still follow Sections 8–9.
+
+#### 7.3.4 Operator visibility and acceptance of autonomy
+
+Human prompts must show why a question passed the filter: effective risk, threshold or mandatory-rule exception, unresolved issue, options, recommendation, impact and affected tasks. The operator can see automatically resolved/delegated choices in an audit view without answering each one. Do not insert a new confirmation dialog merely to confirm a permitted autonomous choice.
+
+Measure discretionary questions per completed task, duplicate/avoidable question rate, autonomous resolutions, scoped waiting time and escalations by mandatory rule. These metrics evaluate usefulness and must not become a quota that suppresses an important question. A request repeated unchanged is deduplicated; unresolved investigation is bounded rather than retried indefinitely.
+
+#### 7.3.5 Full autonomy: `never_ask`
+
+In this mode, the user delegates MACC-managed implementation decisions, clarifications, approvals and specific performer requests to the coordinator/performers **for every risk class**, including `critical`. A performer may select its recommended alternative and implement it without consulting the user. The coordinator still owns validation, state transitions, graph/context consistency and audit; autonomy does not require bypassing the control plane or turning model output into direct database edits.
+
+- **Resolution, not a hidden pending question.** Create and resolve material requests through the same structured decision channel, using the best available evidence, applicable requirements and the performer's recommendation. The resolution may select, revise or reject a recommendation with a recorded rationale; no user popup, CLI prompt or interactive tool question is issued. A general advice question may become a documented implementation assumption instead of a wait state.
+- **Approval compatibility.** Extend gate policy/evaluation to accept an explicit `delegated_autonomous` resolution where this mode delegates MACC approval. Keep original `human_approval` declarations and historical votes visible, but record which policy version and user delegation permitted this specific automated outcome. Expose a separate resolution origin/evidence type; never forge a human actor, role, signature, vote or attestation, and never make the existing evaluator accept a fake `gate_decisions` row. This requires a new versioned gate/decision contract, not only suppressing the approval dialog.
+- **All questions, not only low-risk choices.** Product alternatives, architectural forks, specific performer requests, corrections and high/critical-risk questions follow this path. A conflict requiring a new project decision is explicitly resolved or superseded through that authority and lineage, rather than silently rewriting a prior human statement. Human evidence remains verbatim; the new agent decision is separately attributed.
+- **Pending work.** On entering this mode, re-evaluate already pending requests and resolve them individually through the delegated policy. Withdraw their interactive prompts once the corresponding durable outcome is committed. Do not blindly mark all pending requests “approved”; each requires an actual chosen resolution and applicable graph/context effects. Returning to a threshold affects future/re-evaluated requests without erasing prior autonomous choices.
+- **No fabricated capabilities or evidence.** This setting delegates decisions within MACC; it cannot create unavailable credentials, access rights, missing external data or attest that an independent person approved something. If execution is genuinely impossible, record a precise blocked/failed diagnostic and continue independent work, **without replacing the failure with a human question**. Technical validation, required tests and DAG/history invariants remain enforced.
+- **Visible, recoverable autonomy.** Show the active mode in Web/TUI. Automatic outcomes appear in the decision timeline/history and task context views, without modal interruptions or acknowledgement requirements. The user can inspect, change mode or introduce a corrective direction later; that creates a new versioned decision rather than deleting history.
+
+#### 7.3.6 Universal traceability, distribution and discoverability
+
+**For every threshold and `never_ask`, material decisions use the same durable ledger and propagation guarantees.** Autonomous does not mean transient or private to one performer. Record at least:
+
+- decision/request ID and version, project/plan, originating task/attempt/phase and coordinator run;
+- origin (`human`, `performer_recommendation`, `coordinator_resolution`, or verified existing-policy reuse), actual actor/tool identity and authorizing delegation/policy version;
+- question/problem, options considered, recommendation, chosen outcome, rationale, risk, assumptions, source evidence and any superseded decision;
+- affected tasks/contracts, binding/advisory effects, graph patch or context-only update, applicability explanation and resulting versions/digests;
+- commit status, timestamps, context issuance/receipts and independent compliance results as they become available.
+
+Commit a material autonomous choice **before dependent implementation/merge relies on it**. If the ledger or required propagation is unavailable, preserve a recoverable diagnostic and fence affected transitions; do not silently continue with an unrecorded private decision. Routine details need not each create a human-style question, but their material task-level choices must remain reconstructable through a bounded structured resolution record and linked implementation evidence.
+
+Publish the resolution through the same applicability/context/outbox pipeline to affected current, downstream, parallel and newly added tasks, including reviewers. Unaffected agents need not receive every decision in their prompt, but scoped decisions must be discoverable through the shared decision service and CLI/TUI/web history/search, with access/provenance rules preserved. Reused sessions receive refreshed context explicitly; another performer must not have to infer a decision from the original agent's conversation. Persist and restore this lineage after restart/clear like human-origin decisions. The operator can see which autonomous choice each agent received and what changed because of it.
 
 ## 8. Runtime dynamic DAG mutation: initial-release design
 
@@ -342,9 +439,11 @@ This section is **release-1 mandatory** because of ADR-DM-002.
 
 ### 8.1 Mutation pipeline
 
+Apply this complete pipeline when a resolved decision requires a graph mutation. A question resolved by an existing answer or a context-only clarification follows Section 7.3/8.6 without creating artificial tasks, gates or graph patches.
+
 1. **Detect:** performer, reviewer, planner, or operator submits a structured decision request / patch proposal.
 2. **Authenticate source:** bind request to task attempt, agent identity, PRD/graph version, and evidence artifacts.
-3. **Triage:** Policy Engine determines auto resolution, human decision, additional investigation, or rejection.
+3. **Triage:** Policy Engine applies Section 7.3's risk threshold or `never_ask` delegation to determine automatic resolution, bounded investigation or, only in human-consulting modes, a human question. Record the chosen authority and resolution origin.
 4. **Compute affected subgraph:** dependency descendants, shared resources, decision consumers, and potentially affected running tasks.
 5. **Establish scope barrier:** prevent newly affected work from dispatching; negotiate stop/cancel for incompatible in-flight tasks; preserve other work.
 6. **Resolve decision:** record authorized outcome before accepting any patch that depends on it.
@@ -385,7 +484,7 @@ This section is **release-1 mandatory** because of ADR-DM-002.
 
 ### 8.4 Graph-patch risk gates
 
-A graph patch is not intrinsically safe because it is syntactically valid. Removing security tests, dropping governance dependencies, altering task purpose, or changing protected file scopes may require approval. A patch must include a machine-readable impact summary and policy classification.
+A graph patch is not intrinsically valid because it parses. Removing security tests, dropping governance dependencies, altering task purpose, or changing protected file scopes must be classified and resolved under the current policy. In risk-threshold modes this may require human approval; `never_ask` records a delegated autonomous resolution instead of prompting. Every patch still requires a machine-readable impact summary, valid authority and graph/history invariants; agents cannot change their own delegation by editing a patch.
 
 ### 8.5 `audit-prd` integration
 
@@ -411,7 +510,7 @@ Treat the original user input as a first-class, immutable `HumanFeedbackEvent`, 
 
 A verified human may also submit a new correction or orientation **without answering a pre-existing gate**. The Decision Manager records it as a scoped event, evaluates its policy impact, and propagates it through the same pipeline; it must not be dropped merely because no question was pending.
 
-**Guardrail:** an LLM may suggest how to interpret free-form language, but cannot unilaterally turn an ambiguous statement into binding scope, waive an approved rule, or downgrade an approval requirement. If materially unclear, ask a targeted follow-up. Preserving the full human text is mandatory even when a structured interpretation is accepted.
+**Guardrail:** an LLM may suggest how to interpret free-form language, but cannot pass its own interpretation off as a human statement, approval or waiver. In threshold modes, material ambiguity outside delegated authority requires targeted clarification. In `never_ask`, resolve the interpretation/assumption under explicit agent delegation, keep it separately attributed and traceable, and do not issue a follow-up question. Preserving the full original human text is mandatory in either path; corrections/supersessions use explicit lineage rather than altering that text.
 
 #### 8.6.2 Applicability and recipient determination
 
@@ -552,6 +651,8 @@ Resolve exact revisions to complete existing Git object IDs; reject an unknown o
 
 ### 9.2 Approval verifier
 
+Evaluate the resolution's declared origin: human votes use verified human-role/quorum rules; `delegated_autonomous` uses the applicable recorded user delegation and automated gate policy. Both bind the same subject/context and retain audit/reuse checks. A human vote and an autonomous resolution are not interchangeable evidence, even when both permit the next workflow transition.
+
 For each gate, check:
 
 1. Gate identity and policy digest are the expected ones.
@@ -603,6 +704,7 @@ Relevant threats: an agent silently ignoring or misrepresenting a human answer; 
 - Distinguish `local_trust` and `secure_approval` modes explicitly. Do not claim strong authorization from a text `--as` parameter or same-UID CLI invocation.
 - In secure mode, route approval via an independent broker/principal or protected signing key inaccessible to agent worker processes; verify against trusted approver identities and policies.
 - Enforce authorization at the Rust API boundary for approving, signing, changing policy, publishing decisions, and applying high-risk graph patches.
+- Recognize `never_ask` as explicit user-configured decision delegation, not verified human consent to each resulting choice. Authenticate/audit the mode change and autonomous resolution origin. A secure human-vote requirement cannot be satisfied by an agent signature presented as that person's signature; the gate contract must explicitly support delegated authority or report inability to execute without issuing a human prompt.
 - Treat the web client on `0.0.0.0` as remote-capable: require authentication, authorization, CSRF/origin protection where applicable, and appropriately scoped sessions for mutations.
 - Ensure agent runners cannot forge privileged event types in stdout; agent-origin events must be bound to supervised task sessions and sanitized.
 - Preserve raw evidence hashes and trusted source identifiers, but do not execute instructions embedded in evidence.
@@ -696,6 +798,48 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 - `/ops/console`: explicit blocked-reason states and restored-approval counts.
 - SSE notifications: `decision.requested`, `decision.resolved`, `decision.context.updated`, `task.context.issued`, `task.context.stale`, `decision.compliance.failed`, `approval.invalidated`, `graph.patch.committed`, `graph.projection.rebuilt`, `recovery.completed`.
 
+### 11.4 Required user-friendly, responsive Web and TUI decision interaction
+
+**Release-1 requirement:** while `macc coordinator` runs, both clients provide an understandable decision inbox and contextual popup/panel for performer/reviewer questions, approvals, clarifications and specific requests. Extend the existing approval dialog/window and shared service rather than showing raw logs or requiring the user to find a CLI command to answer. Web and TUI must offer equivalent meaning/actions even though their layouts differ. The user should understand what is needed, why, and what answering will change without reading technical protocol fields.
+
+#### 11.4.1 A clear question and appropriate response controls
+
+The primary view contains:
+
+- a plain-language title, originating task/performer and question/request type;
+- concise context, the unresolved point, why a human is being asked under the current mode, risk and affected work; advanced evidence/digests remain in expandable details;
+- available options, the recommended choice clearly labeled **as a recommendation**, expected consequences and relevant constraints;
+- subject revision/artifact/diff, required roles and current votes when it is a human approval; a question about implementation direction must not pretend to approve an artifact;
+- visible pending/answered/processing/stale status, with a clear primary action and access to decision history.
+
+Match controls to the request: select an alternative; enter a custom/free-text answer or remark; approve, reject or request changes with the required reason/evidence; or ask for complementary investigation. A performer-specific request can define a validated structured form, with readable field labels, required information and optional explanation. Preserve verbatim human input and attachments/evidence references alongside normalized effects. A recommended option may be preselected for convenience, but is **not submitted as consent** without an explicit user action.
+
+Show inline validation near the field and explain the corrective action. Never force users to edit task JSON, enter a digest or remember a shortcut to complete an ordinary response. The final action identifies its effect, such as “Send answer”, “Approve this revision” or “Request changes”; closing the popup is not a decision.
+
+#### 11.4.2 Responsive and accessible behavior
+
+| Web client | TUI client |
+|---|---|
+| Responsive dialog/side panel on larger screens, usable full-screen sheet/page on narrow/mobile viewports. Long content scrolls without hiding the question or making submit/cancel actions unreachable. No horizontal overflow of the normal answer form. | Size popup/pane to terminal width and height; reflow text, scroll long questions/evidence and keep input/actions reachable after resize. On terminals too small for a popup, use a compact full-screen question view with a visible way back rather than clipped controls. |
+| Semantic labels, keyboard navigation, visible focus, appropriate dialog focus handling/return, screen-reader status/error announcements and no color-only meaning. Multiline Enter edits text; submission is a deliberate control/shortcut. | Full keyboard operation with visible contextual shortcuts: move/select, edit, inspect details, submit and defer/back. Distinguish newline from submission for multiline answers. Do not hide required actions behind an undiscoverable command palette. |
+| Preserve answer drafts through SSE refresh, resizing, switching task/request and temporary disconnects. Reconnect reloads authoritative state before allowing stale submission. | Preserve drafts when leaving a popup, navigating logs, refreshing state or resizing the terminal. Do not steal keystrokes while the user edits another field or types a command. |
+
+Auto-present a new actionable request only at an appropriate interaction boundary. If the user is typing, reviewing another request, or a modal is already open, show a pending-count badge/nonintrusive notice and queue it instead of stacking dialogs or stealing focus. Users may defer/close and reopen from the inbox; the request remains pending and only dependent work waits. Handle multiple concurrent performer requests as a prioritized, deduplicated queue with originating tasks visible.
+
+#### 11.4.3 Reliable submission and cross-client consistency
+
+Use the same versioned request, authorization and resolution API for Web/TUI/CLI. Validate current request/subject/policy version and write idempotently; double-click, retry or reconnect must not duplicate a vote, answer or patch. Preserve project ownership and secure-mode access rules: another viewer cannot answer using an unauthenticated actor string or take over a controller's response silently.
+
+Show a submitting state and keep the draft on error. Confirm **“Answer recorded” only after the durable response commit**, then show propagation/application progress separately. The UI must distinguish response saved, relevant graph/context effects applied, context issued and implementation compliance; it must not promise that all agents understood merely because a popup closed. If the request changed, was superseded or another client answered first, explain the conflict and preserve the draft for comparison/review rather than overwriting the newer resolution. A reply to an obsolete revision cannot resume the wrong work.
+
+Publish updates to every connected client and reconcile from durable state on reconnect/restart; an ephemeral SSE event is not the only copy of a request. The history/detail view shows the response, source actor, delegated policy if any, affected tasks and where the current decision was distributed. Resolving a request does not stop or restart unrelated work.
+
+#### 11.4.4 Full-autonomy presentation and decision availability
+
+In `never_ask`, **do not open decision/approval popups or show a hidden “awaiting your answer” workflow**. Display the active autonomy mode and automatically resolved requests in a nonblocking timeline/inbox history, including recommendations, actual choices and effects. All material autonomous decisions remain inspectable/searchable through the same UI and shared service used by other agents. Pending interactive dialogs are withdrawn after their delegated resolution commits, preserving any unsent draft as unsent text; it must not be stored as a human vote.
+
+The user can inspect or introduce a later correction without having to acknowledge every automatic choice. Such feedback creates a new versioned event and follows the same applicability/propagation path; merely opening the decision view or changing presentation size does not interrupt autonomous execution.
+
 ## 12. Remaining open questions and recommended defaults
 
 **Statuses:** `REQUIRED` = must be resolved or explicitly accepted as a documented default before initial-release coding; `DESIGN` = can be settled during detailed design if interfaces are kept stable; `LATER` = not a release-1 dependency.
@@ -705,11 +849,11 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 | ID | Remaining question | Recommended default / design implication | Status |
 |---|---|---|---|
 | **Q01** | Which governance file has precedence when CODEOWNERS, RACI, ADR and project policy conflict? | Define a versioned precedence hierarchy and fail closed for contradictory authority. | REQUIRED |
-| **Q02** | Which risk classes and thresholds require human consent? | Explicit rule table per action, impact, reversibility and environment; no model confidence shortcut. | REQUIRED |
+| **Q02** | Which risk classes and thresholds require human consent? | User-visible `human_question_min_risk` with `low`/`medium`/`high`/`critical` thresholds and explicit full-autonomy mode `never_ask`; proposed default `high`. Section 7.3 defines filtering, threshold-mode human rules and delegated autonomous resolutions. | REQUIRED |
 | **Q03** | Which sources may submit a decision request? | Planner, performer, reviewer, operator; agents submit proposals, coordinator owns mutations. | REQUIRED |
 | **Q04** | Which human interaction kinds and response forms are supported? | `clarification`, `decision`, `approval`, `authorization`; options, custom answer and request investigation. | DESIGN |
 | **Q05** | Who may approve and what quorum is required? | Governance-derived identities, roles, quorum; distinguish individual votes from gate outcome. | REQUIRED |
-| **Q06** | When can MACC automatically resolve a request? | Only under explicit policy with safe, reversible defaults and traceable source requirements. | REQUIRED |
+| **Q06** | When can MACC automatically resolve a request? | Reuse a valid answer, delegate a below-threshold choice, or resolve any risk class under `never_ask`; record actual origin, rationale, delegation and propagated effects. | REQUIRED |
 | **Q07** | How to prevent repeated or duplicate questions from parallel workers? | Stable idempotency key plus bounded semantic deduplication, grouping only compatible cases. | DESIGN |
 | **Q08** | What happens if a human does not respond? | Wait without global freeze; impacted subgraph blocked; reminders only by user opt-in. | DESIGN |
 | **Q09** | Is preflight mandatory before each run and what code exploration budget applies? | Include configurable PRD preflight; do not block implementing runtime requests on exhaustive preflight. | DESIGN |
@@ -724,7 +868,7 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 | **Q13** | What is the exact policy for a running task invalidated by a new decision? | Classify continue/cancel/quarantine/review; quarantine uncertain completions before merge. | REQUIRED |
 | **Q14** | How should a finished task be changed without rewriting history? | Supersede task and create corrective/replacement task with lineage mapping. | REQUIRED |
 | **Q15** | How are patch conflicts, cycle detection and stale dependency references handled? | Deterministic validation; reject stale patch and require explicit rebase/reproposal. | REQUIRED |
-| **Q16** | Can agents propose patches automatically, and who applies high-risk ones? | Agents propose; authorized policy engine applies; high-risk mutations require human review. | REQUIRED |
+| **Q16** | Can agents propose patches automatically, and who applies high-risk ones? | Agents propose; trusted policy engine applies. Human-consulting modes enforce their review rules; `never_ask` uses audited delegated autonomous resolutions at every risk level. | REQUIRED |
 | **Q17** | How are `.macc` PRD files synchronized to DB graph changes safely? | Transactional DB commit plus durable outbox and idempotent projection, not dual uncoordinated writes. | REQUIRED |
 | **Q18** | How should reviewers verify decisions and prescribed design systems? | Evidence-linked binding, file/hash references, deterministic checks when possible plus semantic review. | DESIGN |
 
@@ -777,11 +921,11 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 | Question | Verdict | Validated implementation requirement / refinement |
 |---|---|---|
 | Q01 | G | Version authority precedence explicitly; CODEOWNERS, ADR and RACI are inputs, not automatically equivalent sources of approver entitlement. Conflicts block only affected authority. |
-| Q02 | G | Define an auditable action/risk/reversibility/environment matrix; no hardcoded universal threshold or model-confidence authorization. |
+| Q02 | G | Section 7.3 incorporates configurable autonomy and the owner-requested `never_ask` mode. Validate the proposed `high` default/matrix; full autonomy needs typed delegated resolutions, never fake human votes or agent self-editing of the mode. |
 | Q03 | V | Planner, performer, reviewer and operator may submit bounded proposals; trusted service code owns state transitions. Authenticate attempt provenance independently of payload claims. |
 | Q04 | R | Support the four distinct interaction kinds; keep current `approval::DecisionRequest` vote contract compatible and introduce a separate general request type. |
 | Q05 | G | Reuse current roles/quorum mechanics, adding explicit principal membership and separation-of-duties policy. Existing actor strings are not verified human identities. |
-| Q06 | G | Automatic resolution requires an explicit delegated policy and traceable safe default; no implicit authority from governance prose. |
+| Q06 | G | Coordinator resolves existing answers or delegates authorized below-threshold choices; `never_ask` delegates all risk classes and MACC approval requests under Section 7.3.5. All outcomes are durable/distributed without a human confirmation loop; unanswerable factual prerequisites remain diagnostics, not invented consent. |
 | Q07 | R | Use exact scoped idempotency first. Semantic deduplication may suggest a grouping, never silently merge different subjects, policy versions or conflicting human input. |
 | Q08 | V | Waiting must not hold SQLite transactions or global graph locks. Continue unrelated work; reminders remain opt-in. |
 | Q09 | R | Reuse existing readiness/checkpoint preparation. Optional exploratory preflight must be bounded and must not postpone runtime decision intake. |
@@ -791,7 +935,7 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 | Q13 | R | Specify safe continue/cancel/quarantine/review transitions and timeout/resource handling; never assume updating a file reaches a live model. |
 | Q14 | V | Preserve delivered task identity/history; corrective tasks reference the original task and decision/patch lineage. |
 | Q15 | V | Deterministic reference/cycle/scope checks; stale proposals require explicit rebase/revalidation, not last-writer-wins overwrites. |
-| Q16 | G | Agents propose; the configured authority applies. High-risk gate removal/scope changes require approval under the current policy, not a policy supplied by that patch. |
+| Q16 | G | Agents propose; configured authority applies. High-risk changes use human review or typed `never_ask` delegation according to the active mode, never a self-authorizing policy supplied by the patch. |
 | Q17 | R | One control-DB transaction plus idempotent outbox; coordinator DB and files are fenced projections, with at-least-once side effects rather than claimed cross-DB atomicity. |
 | Q18 | R | Use binding-level evidence and deterministic checks where possible; evidence links must be resolved/hashed, and semantic review remains fallible. |
 | Q19 | R | Common-Git-dir storage is feasible only with explicit project/plan/lineage namespaces, worktree resolution, relocation and authority-conflict behavior. Location alone is not security. |
@@ -803,10 +947,10 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 | Q25 | V | Verified local export/import before optional signed Git distribution; explicit ref sync, issuer trust and collision rules are required. |
 | Q26 | R | Keep present cross-PRD completed-dependency behavior. General cross-plan/branch decision reuse remains optional and requires explicit scope compatibility; matching task IDs are insufficient. |
 | Q27 | R | Local trust is an explicit limitation. Secure approval requires broker/key/principal isolation outside worker access; same-UID permissions or a text `--as` option cannot provide it. |
-| Q28 | R | Preserve project ownership checks, but add independent authentication, authorization and origin/CSRF policy for remote mutation. Do not advertise remotely exposed approval as secure before this exists. |
+| Q28 | R | Preserve project ownership checks and add independent authentication, authorization and origin/CSRF policy for remote mutation. This includes changing autonomy mode; `never_ask` is not permission for an anonymous client to alter policy. |
 | Q29 | R | Add explicit control-data retention, dry-run and save/restore coverage while preserving O2/session retention. Existing clear is managed-path based, not unconditional recursive deletion. |
 | Q30 | R | Fail closed for ambiguous authority/graph lineage; isolate a stale decision when the graph is sound. PRD projections reconcile through versioned patches, not silent overwrite. |
-| Q31 | V | Extend the existing subject/question/roles/risks/diff/evidence approval views rather than replacing them with a parallel inbox. |
+| Q31 | V | Extend existing approval views with Section 11.4's responsive Web/TUI question/request forms, drafts, discoverable actions and reliable submission; no interactive interruption in `never_ask`. |
 | Q32 | R | Add local correlation IDs and bounded metrics for blocked time, freshness and replay; omit raw human answers/secrets from metrics. Measure delivery and compliance separately. |
 | Q33 | G | Store original human text first. Binding/advisory interpretation and material waivers require traceable authority; unclear text cannot silently grant consent. |
 | Q34 | R | Derive deterministic applicability from explicit scope, graph and requirement bindings; uncertain semantic impact needs review, not automatic global broadcast. |
@@ -817,7 +961,7 @@ CLI naming and backwards compatibility are open questions; avoid exposing destru
 | Q39 | R | Never truncate mandatory constraints or silently rely on model memory. If the effective prompt cannot carry them, reduce task scope or fail before invocation with a clear budget diagnostic. |
 | Q40 | G | Record explicit supersession and configured authority precedence; a later remark does not silently override a protected decision or rewrite history. |
 | Q41 | R | Rebuild context from verified control events and graph lineage; bind recovered checkpoints/leases to current per-task versions. Existing O2 restoration alone is insufficient. |
-| Q42 | V | Extend CLI/TUI/web with exact source wording, applicability explanation, issued/acknowledged context and separate compliance evidence. |
+| Q42 | V | Extend CLI/TUI/web with source wording, autonomous/human provenance, applicability, issued/acknowledged context and separate compliance evidence. Every mode exposes the same durable decision history to affected agents/clients. |
 | Q43 | V | Accept authorized scoped feedback without an existing gate, using the same persistence, interpretation, impact and propagation contracts. |
 
 **Feasibility assessment:** the architecture fits the current Rust control plane and SQLite stack, but it is a substantial new subsystem, not an approval-persistence bug fix. Keep internal integration milestones/feature gating and negative/crash tests while retaining the complete release-1 capability required by ADR-DM-002/006. A deployment must declare whether it operates in local trust or implements the isolated secure boundary; missing secure authority must never fall back silently to local trust.
@@ -846,6 +990,7 @@ Because dynamic DAG mutation is required in the **first release**, no initial mi
 
 - Accept decision requests from performers/reviewers/planner.
 - Apply governance/risk/reversibility policy and human decision resolution.
+- Implement Section 7.3's performer request protocol, coordinator filter, four risk thresholds plus `never_ask`, typed delegated gate resolutions, bounded investigation and deduplication. Every mode uses the same durable decision/propagation pipeline; expose the effective policy to every adapter and all configuration clients.
 - Bind decisions **and verbatim human answers/remarks** to graph mutations, task-specific constraints, generated runner context packages and acceptance tests.
 - Implement DecisionApplicabilityResolver and TaskContextBuilder; deliver context to all tool adapters, capture receipts and prevent stale contexts from advancing.
 - Ensure new dynamically added tasks inherit all applicable decisions and reviewers verify binding-level compliance.
@@ -858,6 +1003,7 @@ Because dynamic DAG mutation is required in the **first release**, no initial mi
 - Update `macc clear` and startup recovery to preserve decisions, human feedback, graph journal and reconstructable context lineage.
 - Complete and test the work-package-A migration; do not relabel legacy local actor strings as verified secure principals.
 - Provide basic CLI/TUI and web Decision Center visibility for requests, votes, **downstream delivery/receipt/compliance**, history, graph changes and recovery results.
+- Implement Section 11.4's responsive Web/TUI request/approval popups, answer forms, pending queue, preserved drafts and authoritative cross-client submission. In full autonomy, present inspectable history without blocking response dialogs.
 - Add appropriate authorization for mutations in exposed web mode.
 - Test ordinary clear, dry-run, save/restore and destructive reset against the new authority, existing O2/session retention, dirty workers and linked worktrees. Remote privileged mutation must remain unavailable until the selected authentication/authorization boundary is implemented.
 
@@ -869,6 +1015,8 @@ Because dynamic DAG mutation is required in the **first release**, no initial mi
 - Rich decision analytics and broader enterprise approval integrations.
 
 **Release definition:** A first release is not complete until a running coordinator can accept a new decision request, persist verbatim human resolution and its structured effects, *dynamically alter the current DAG*, **deliver validated current human decisions to all affected performer/reviewer attempts and enforce compliance**, safely handle affected worktrees, continue unrelated tasks, survive `macc clear`, and restore valid approvals without re-prompting unnecessarily.
+
+It must also implement `never_ask` with typed delegated resolutions, the same durable decision/context propagation in every mode, and Section 11.4's responsive Web/TUI response flow for modes that consult the user. A fully autonomous run need not elicit a human answer to exercise these capabilities; its choices must be equally inspectable and recoverable.
 
 ## 14. Release-1 acceptance scenarios
 
@@ -929,6 +1077,44 @@ Additional requirements: unit property tests for acyclicity and stable identity;
 | AT43 | Crash occurs after reserving a one-shot authorization but before observing the external operation result | Recovery reconciles the same operation ID, retries only with verified idempotency, and blocks an unknown non-idempotent result; no second operation is authorized from the old consent. |
 | AT44 | An already approved human gate is the last remaining PRD entry | Queue advances and preserves its cross-PRD dependency evidence; logs, durable result and UI counts agree. Preserve the existing regression behavior. |
 
+### 14.2 Performer questions and configurable autonomy acceptance cases
+
+These are target acceptance cases for Section 7.3, not implemented tests.
+
+| ID | Test scenario | Expected result |
+|---|---|---|
+| AT45 | A performer encounters routine naming/local implementation choices, even with threshold `low` | Authorized routine choices are made autonomously; no systematic end-of-task questions or confirmation prompts. |
+| AT46 | A material unresolved choice has effective risk exactly equal to the configured threshold | After bounded investigation and existing-answer checks, coordinator presents one actionable question with options/recommendation, risk, policy reason and impact. |
+| AT47 | User raises threshold from `high` to `critical`, then a new high-risk choice within explicit delegated scope arises | More autonomy: coordinator may delegate/resolve it without a discretionary human question, recording rationale. Lowering the threshold increases consultation for subsequent qualifying choices. |
+| AT48 | Threshold is `critical` but an explicit human gate, binding-policy conflict or fresh operation authorization requires intervention | Mandatory rule prevails; no gate bypass or consent inferred from the autonomy setting. Prompt explains the exception. |
+| AT49 | High-risk task encounters a choice already answered by an applicable verified decision/policy | Reuse the valid answer and continue without re-asking solely because of the task risk label. |
+| AT50 | Model reports low confidence, or proposes an unsupported lower risk class | Confidence alone does not trigger a human question; trusted impact/reversibility policy determines risk and prevents agent self-downgrading. |
+| AT51 | User changes the threshold while human requests are pending | Policy version is recorded; requests are re-evaluated at a safe boundary without marking unanswered requests approved or rewriting historical decisions. |
+| AT52 | One performer asks an important question while independent tasks remain ready; response changes instructions but no dependencies | Only genuinely dependent work waits. Other tasks proceed; response/context is propagated without an unnecessary graph patch or new gate. |
+| AT53 | Invalid autonomy value is entered or the same policy is edited through CLI/TUI/web | Canonical validation rejects invalid values; clients show identical effective thresholds, direction of autonomy and mandatory-rule exceptions. |
+| AT54 | A below-threshold task lacks essential factual data and has no authorized safe default | Bounded investigation ends in a precise scoped prerequisite block; performer does not fabricate requirements or silently exceed scope to avoid asking. |
+| AT55 | Parallel/reused tool sessions discover the same unresolved decision, or a tool attempts a direct interactive question | Coordinator deduplicates by scoped decision/subject identity and filters centrally. Adapters use the structured request channel rather than bypassing policy; unchanged requests do not form retry/question loops. |
+
+### 14.3 Responsive interfaces and fully autonomous decisions
+
+These target cases extend Sections 7.3.5–7.3.6 and 11.4; they do not claim current implementation.
+
+| ID | Test scenario | Expected result |
+|---|---|---|
+| AT56 | A Web question with long context/options is opened on a narrow/mobile viewport and then resized | Readable layout without normal-form horizontal overflow; content scrolls, actions remain reachable and draft survives. |
+| AT57 | TUI receives a long question in a small terminal, then terminal dimensions change | Popup/pane reflows or switches to a usable full-screen view; visible shortcuts, scrolling, editing and explicit submission remain available without clipping or draft loss. |
+| AT58 | Performer submits a clarification, option choice, approval or specific structured request | Both clients show the appropriate readable controls, recommendation, free-text/custom answer and required evidence/reason fields; original human wording is stored without fabricated approval semantics. |
+| AT59 | A new request arrives while the operator is typing, another popup is open or the user defers a request | No focus/keystroke theft or stacked dialogs; pending queue/badge updates and saved draft can be reopened; close/defer does not submit a response. |
+| AT60 | Double-submit, transient disconnection, stale subject or two clients answering the same request | Idempotent durable resolution; stale/conflicting submission explains the issue and preserves the draft; UI confirms recording only after commit and shows propagation separately. |
+| AT61 | `never_ask` encounters low through critical questions, including a MACC human-approval declaration | No human prompt or waiting-for-human state. Performer/coordinator selects and implements a recommendation through typed delegated policy, logging actor/delegation/subject/outcome; no human votes or signatures are fabricated. |
+| AT62 | Human or autonomous decision occurs under each of the five selector values, then a downstream/reused/new task starts | Every material resolution is persisted with provenance and applicability; affected performers/reviewers receive its current context, and history survives restart/clear. |
+| AT63 | Operator enters `never_ask` with pending dialogs and unsent human text, then later returns to a threshold | Each pending request is resolved under the recorded delegation before its popup is withdrawn; draft remains unsent and no consent is inferred. Historical autonomous choices remain traceable. |
+| AT64 | User answers by keyboard/screen reader, with color unavailable and long multiline input | Labels/focus/status feedback and visible TUI shortcuts convey meaning; newline does not accidentally submit, and explicit submit/defer actions remain discoverable. |
+| AT65 | `never_ask` lacks necessary credentials, independent external approval evidence or indispensable factual input | Precise execution diagnostic and scoped blocking where unavoidable; no fabricated credential/evidence, no user question and no global freeze of independent work. |
+| AT66 | Parallel performers recommend conflicting autonomous changes to a shared contract | Trusted coordinator resolves/reconciles via versioned decision/graph authority; affected peers receive the chosen outcome, with no silent private choice or last-writer-wins mutation. |
+| AT67 | An autonomous choice cannot be durably recorded or required context projection is unavailable | Affected implementation/merge is fenced with a recoverable diagnostic; no unrecorded private decision or fallback human prompt. |
+| AT68 | User or another authorized agent inspects an autonomous decision from a different task/client | Shared scoped service/history exposes choice, rationale, actual actor, delegation, affected tasks and version; issuance/acknowledgement/compliance remain distinct. Opening history does not stop the run. |
+
 ## 15. Known risks and tradeoffs
 
 | Risk | Severity | Mitigation |
@@ -948,6 +1134,11 @@ Additional requirements: unit property tests for acyclicity and stable identity;
 | A runner's echoed digest is mistaken for understanding or compliance | High | Separate wrapper issuance, protocol acknowledgement and evidence-based compliance |
 | Migration discards the only existing human votes | High | Back up `coordinator.sqlite` consistently; verify ordered/idempotent import before cutover |
 | Shared Git-common-dir store mixes distinct plans with identical task IDs | High | Explicit project/plan/lineage keys, scoped reuse and one-controller execution fencing |
+| Too many discretionary questions undermine coordinator autonomy | High | Autonomous-first investigation, user-configurable minimum question risk, coordinator filtering and scoped deduplication |
+| Full autonomy is confused with a fabricated human approval | High | Four threshold modes retain their human rules; `never_ask` uses explicitly delegated, typed agent resolutions and audited policy provenance |
+| Suppressing low-risk questions causes fabricated requirements or silent scope expansion | High | Bounded investigation, authorized-choice checks and precise scoped prerequisite diagnostics |
+| Decisions stay private to an autonomous performer's conversation | High | Identical durable ledger, applicability/context delivery and shared discovery for human and autonomous resolutions |
+| Question popups interrupt typing or lose an answer on refresh/resize | Medium | Responsive layouts, interaction-boundary presentation, queued requests and preserved drafts |
 
 ## 16. Final implementation guidance
 
@@ -965,4 +1156,4 @@ Additional requirements: unit property tests for acyclicity and stable identity;
 
 ### Recommended next engineering artifact
 
-Transform this source-aligned baseline into an **implementation PRD organized by work packages A–D**, with schema/migration and coordinator state-machine contracts as blocking prerequisites. Use the verdicts in Section 12.6: implement validated mechanisms, include refinements as acceptance criteria, and leave project-specific governance explicit rather than inventing approvals. Every PRD task should cite its ADR, recommendation ID, existing extension point, migration impact and acceptance cases (AT01–AT44). Internal milestones may be tested behind a feature gate; the first completed release must demonstrate **dynamic DAG mutation, durable recovery, AND end-to-end human-decision propagation to performers and reviewers together**.
+Transform this source-aligned baseline into an **implementation PRD organized by work packages A–D**, with schema/migration and coordinator state-machine contracts as blocking prerequisites. Use the verdicts in Section 12.6: implement validated mechanisms, include refinements as acceptance criteria, and leave project-specific governance explicit rather than inventing approvals. Every PRD task should cite its ADR, recommendation ID, existing extension point, migration impact and acceptance cases (AT01–AT68), including Section 7.3's thresholds/full autonomy and Section 11.4's responsive Web/TUI interaction. Internal milestones may be tested behind a feature gate; the first completed release must demonstrate **dynamic DAG mutation, durable recovery, AND end-to-end propagation of human and autonomous decisions to performers and reviewers together**.
