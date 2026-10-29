@@ -41,6 +41,7 @@ impl<'a> Command for SupervisorCommand<'a> {
                 retry,
             } => self.start(*daemon, *attach, *coordinator_pid, *retry),
             SupervisorCommands::Stop => self.stop(),
+            SupervisorCommands::Prune { force } => self.prune(*force),
             SupervisorCommands::Status => self.status(),
             SupervisorCommands::Report => self.report(),
         }
@@ -292,7 +293,43 @@ impl<'a> SupervisorCommand<'a> {
         }
 
         let _ = fs::remove_file(&supervisor_pid_path);
+        let canonical = self.app.canonical_config().ok();
+        let retain = canonical
+            .as_ref()
+            .and_then(|c| c.automation.supervisor.as_ref())
+            .map(|s| s.retain_repair_branches)
+            .unwrap_or(false);
+        if !retain {
+            let ref_branch = canonical
+                .as_ref()
+                .and_then(|c| c.automation.coordinator.as_ref())
+                .and_then(|c| c.reference_branch.as_deref());
+            let _ = macc_core::git::prune_merged_supervisor_branches(&paths.root, ref_branch, false);
+        }
         println!("Supervisor stopped.");
+        Ok(())
+    }
+
+    fn prune(&self, force: bool) -> Result<()> {
+        let paths = self.app.project_paths()?;
+        let canonical = self.app.canonical_config().ok();
+        let reference_branch = canonical
+            .as_ref()
+            .and_then(|c| c.automation.coordinator.as_ref())
+            .and_then(|c| c.reference_branch.as_deref());
+        let deleted = macc_core::git::prune_merged_supervisor_branches(
+            &paths.root,
+            reference_branch,
+            force,
+        )?;
+        if deleted.is_empty() {
+            println!("No supervisor repair branches to prune.");
+        } else {
+            for b in &deleted {
+                println!("Pruned supervisor branch: {b}");
+            }
+            println!("Pruned {} supervisor branch(es).", deleted.len());
+        }
         Ok(())
     }
 

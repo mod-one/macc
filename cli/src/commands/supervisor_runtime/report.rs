@@ -170,13 +170,23 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
                         .unwrap_or(0)
                 ))
             });
+        let cfg = macc_core::load_canonical_config(&paths.config_path)?
+            .automation
+            .supervisor
+            .unwrap_or_default();
         if let Some(worktree) = value
             .pointer("/intervention/worktree")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
             .filter(|p| p.exists())
         {
-            if super::workspace::finish(&paths.root, &worktree, &dir, true)? {
+            if super::workspace::finish(
+                &paths.root,
+                &worktree,
+                &dir,
+                true,
+                cfg.retain_repair_branches,
+            )? {
                 value["intervention"]["detail"] = json!(
                     "Supervisor stopped during intervention; evidence archived; clean slot removed"
                 );
@@ -184,10 +194,6 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
             write_json(&latest, &value)?;
         }
         write_json(&dir.join("report.json"), &value)?;
-        let cfg = macc_core::load_canonical_config(&paths.config_path)?
-            .automation
-            .supervisor
-            .unwrap_or_default();
         let report = if cfg.report_output_path.is_absolute() {
             cfg.report_output_path
         } else {

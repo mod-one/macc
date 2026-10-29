@@ -291,7 +291,13 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                     if let Some(worktree) = report.worktree.as_ref().filter(|path| path.exists()) {
                         let close = pending.status != "retrying"
                             || pending.attempts >= config.max_restart_attempts;
-                        match workspace::finish(&paths.root, worktree, &dir, close) {
+                        match workspace::finish(
+                            &paths.root,
+                            worktree,
+                            &dir,
+                            close,
+                            config.retain_repair_branches,
+                        ) {
                             Ok(removed) => {
                                 if removed {
                                     report.detail.push_str(

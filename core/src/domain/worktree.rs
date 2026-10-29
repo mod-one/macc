@@ -146,6 +146,9 @@ pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize>
         }
         removed += 1;
     }
+    if remove_branches {
+        let _ = crate::git::prune_merged_supervisor_branches(root, None, true);
+    }
     Ok(removed)
 }
 

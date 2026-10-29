@@ -112,7 +112,9 @@ pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
 }
 
 pub fn prune_worktrees(root: &Path) -> Result<()> {
-    crate::git::worktree_prune(root)
+    crate::git::worktree_prune(root)?;
+    let _ = crate::git::prune_merged_supervisor_branches(root, None, false);
+    Ok(())
 }
 
 fn parse_porcelain(output: &str) -> Vec<WorktreeEntry> {

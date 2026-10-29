@@ -41,7 +41,7 @@ fn supervisor_integrates_only_prerequisite_then_resumes_original_dirty_branch() 
     edit_config(
         root,
         "    tool: fake\n",
-        "    tool: fake\n    auto_restart: false\n",
+        "    tool: fake\n    auto_restart: false\n    retain_repair_branches: true\n",
     );
     let supervisor = start(root);
     let r = settled(root, "repair_integrated");
@@ -124,7 +124,7 @@ fn large_incident_reaches_real_arg_mode_tool_with_complete_file_evidence() {
     edit_config(
         root,
         "    tool: fake\n",
-        "    tool: fake\n    auto_restart: false\n",
+        "    tool: fake\n    auto_restart: false\n    retain_repair_branches: true\n",
     );
     let paths = ProjectPaths::from_root(root);
     let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
@@ -162,5 +162,33 @@ case "$prompt" in"#,
             > 131072
     );
     assert!(root.join(".macc/complete-evidence.txt").exists());
+    drop(supervisor);
+}
+
+#[test]
+fn supervisor_deletes_merged_repair_branches_by_default() {
+    let tmp = fixture(false);
+    let root = tmp.path();
+    let _worker = attach_worker(root);
+    edit_config(
+        root,
+        "    tool: fake\n",
+        "    tool: fake\n    auto_restart: false\n",
+    );
+    let supervisor = start(root);
+    let _r = settled(root, "repair_integrated");
+    wait_for(|| !root.join(".macc/worktree/supervisor-01").exists());
+    let refs = git_out(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/macc/supervisor/",
+        ],
+    );
+    assert!(
+        refs.trim().is_empty(),
+        "Merged supervisor repair branches should be deleted by default: found {refs}"
+    );
     drop(supervisor);
 }
