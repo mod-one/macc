@@ -72,7 +72,7 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub validation_commands: Vec<String>,
     /// Retain supervisor repair branches in Git after integration or slot cleanup.
-    /// By default (false), merged or clean supervisor repair branches are deleted.
+    /// By default (false), only verified merged repair refs no longer checked out are deleted.
     #[serde(default)]
     pub retain_repair_branches: bool,
     /// How often the supervisor checks coordinator health (seconds).

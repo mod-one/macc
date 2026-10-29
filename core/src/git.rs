@@ -2,6 +2,9 @@ use crate::{MaccError, Result};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 
+mod supervisor_prune;
+pub use supervisor_prune::{prune_merged_supervisor_branch, prune_merged_supervisor_branches};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitGraphCommit {
     pub sha: String,
@@ -903,85 +906,6 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
         });
     }
     Ok(())
-}
-
-/// Prune local supervisor repair branches (`refs/heads/macc/supervisor/*`).
-///
-/// Branches currently checked out in any active worktree are never pruned.
-/// If `force` is false, only branches whose tip is an ancestor of `target_ref`
-/// (or repository HEAD / main / master) are pruned.
-/// If `force` is true, all un-checked-out supervisor repair branches are pruned.
-///
-/// Returns the list of pruned branch names.
-pub fn prune_merged_supervisor_branches(
-    repo_root: &Path,
-    target_ref: Option<&str>,
-    force: bool,
-) -> Result<Vec<String>> {
-    let pattern = "refs/heads/macc/supervisor/*";
-    let output = run_git_output(
-        repo_root,
-        &["for-each-ref", "--format=%(refname:short)", pattern],
-        "list supervisor repair branches",
-    )?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let branches: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    if branches.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let active_worktrees = worktree_list_porcelain(repo_root).unwrap_or_default();
-    let mut checked_out = std::collections::HashSet::new();
-    for line in active_worktrees.lines() {
-        if let Some(rest) = line.strip_prefix("branch refs/heads/") {
-            checked_out.insert(rest.trim().to_string());
-        }
-    }
-
-    let mut targets = Vec::new();
-    if let Some(t) = target_ref {
-        targets.push(t.to_string());
-    } else {
-        if let Ok(head) = run_git_output(repo_root, &["rev-parse", "HEAD"], "resolve HEAD") {
-            if head.status.success() {
-                targets.push(String::from_utf8_lossy(&head.stdout).trim().to_string());
-            }
-        }
-        for candidate in ["main", "master"] {
-            if resolve_ref(repo_root, &format!("refs/heads/{candidate}")).is_some() {
-                targets.push(candidate.to_string());
-            }
-        }
-    }
-
-    let mut pruned = Vec::new();
-    for branch in branches {
-        if checked_out.contains(&branch) {
-            continue;
-        }
-
-        let is_safe = if force {
-            true
-        } else {
-            targets.iter().any(|target| {
-                merge_base_is_ancestor(repo_root, &branch, target).unwrap_or(false)
-            })
-        };
-
-        if is_safe && delete_local_branch(repo_root, &branch, true).is_ok() {
-            pruned.push(branch);
-        }
-    }
-
-    Ok(pruned)
 }
 
 // ── Preflight gate helpers ────────────────────────────────────────────────────

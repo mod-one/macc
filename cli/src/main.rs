@@ -1184,7 +1184,7 @@ pub enum SupervisorCommands {
     Stop,
     /// Prune merged supervisor repair branches
     Prune {
-        /// Force removal of unmerged supervisor branches not in use
+        /// Override retention; still preserve unmerged or checked-out branches
         #[arg(long)]
         force: bool,
     },

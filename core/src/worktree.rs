@@ -112,9 +112,8 @@ pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
 }
 
 pub fn prune_worktrees(root: &Path) -> Result<()> {
-    crate::git::worktree_prune(root)?;
-    let _ = crate::git::prune_merged_supervisor_branches(root, None, false);
-    Ok(())
+    // Git metadata pruning must not implicitly remove retained repair refs.
+    crate::git::worktree_prune(root)
 }
 
 fn parse_porcelain(output: &str) -> Vec<WorktreeEntry> {

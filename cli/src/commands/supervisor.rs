@@ -293,18 +293,10 @@ impl<'a> SupervisorCommand<'a> {
         }
 
         let _ = fs::remove_file(&supervisor_pid_path);
-        let canonical = self.app.canonical_config().ok();
-        let retain = canonical
-            .as_ref()
-            .and_then(|c| c.automation.supervisor.as_ref())
-            .map(|s| s.retain_repair_branches)
-            .unwrap_or(false);
-        if !retain {
-            let ref_branch = canonical
-                .as_ref()
-                .and_then(|c| c.automation.coordinator.as_ref())
-                .and_then(|c| c.reference_branch.as_deref());
-            let _ = macc_core::git::prune_merged_supervisor_branches(&paths.root, ref_branch, false);
+        if let Err(error) =
+            macc_core::git::prune_merged_supervisor_branches(&paths.root, None, false)
+        {
+            eprintln!("Supervisor branches retained: {error}");
         }
         println!("Supervisor stopped.");
         Ok(())
@@ -312,18 +304,17 @@ impl<'a> SupervisorCommand<'a> {
 
     fn prune(&self, force: bool) -> Result<()> {
         let paths = self.app.project_paths()?;
-        let canonical = self.app.canonical_config().ok();
+        crate::commands::gate_cli_mutation(&paths.root)?;
+        let canonical = self.app.canonical_config()?;
         let reference_branch = canonical
+            .automation
+            .coordinator
             .as_ref()
-            .and_then(|c| c.automation.coordinator.as_ref())
             .and_then(|c| c.reference_branch.as_deref());
-        let deleted = macc_core::git::prune_merged_supervisor_branches(
-            &paths.root,
-            reference_branch,
-            force,
-        )?;
+        let deleted =
+            macc_core::git::prune_merged_supervisor_branches(&paths.root, reference_branch, force)?;
         if deleted.is_empty() {
-            println!("No supervisor repair branches to prune.");
+            println!("No eligible merged supervisor branches to prune; retained, unmerged and checked-out branches are preserved.");
         } else {
             for b in &deleted {
                 println!("Pruned supervisor branch: {b}");

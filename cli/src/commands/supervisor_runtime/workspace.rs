@@ -88,16 +88,19 @@ pub fn prepare(
             if !retain_branch {
                 if let Some(old_branch) = old_repair_branch {
                     if old_branch != branch && old_branch.starts_with("macc/supervisor/") {
-                        let _ = macc_core::git::delete_local_branch(root, &old_branch, true);
+                        macc_core::git::prune_merged_supervisor_branch(
+                            root,
+                            &old_branch,
+                            target.branch.as_deref(),
+                        )?;
                     }
                 }
             }
             branch
         } else {
-            owner["repair_branch"]
-                .as_str()
-                .map(String::from)
-                .unwrap_or_else(|| repair_branch(root, incident, head).unwrap_or_default())
+            // Older markers did not record the repair ref. Use the actual
+            // checkout rather than inventing a new, unrelated branch name.
+            git(&path, &["branch", "--show-current"])?
         };
         let marker = json!({
             "incident_id": incident,
@@ -224,6 +227,27 @@ pub fn safe_to_remove(root: &Path, path: &Path) -> Result<bool> {
     if !git(path, &["status", "--porcelain"])?.is_empty() {
         return Ok(false);
     }
+    let ignored = macc_core::git::run_git_output_mapped(
+        path,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        "inspect unarchived ignored repair files",
+    )?;
+    // .macc evidence is archived before removal. Any other ignored files
+    // (credentials, generated outputs, dependencies, etc.) keep the slot.
+    if !ignored.status.success()
+        || ignored
+            .stdout
+            .split(|b| *b == 0)
+            .any(|name| !name.is_empty() && !name.starts_with(b".macc/"))
+    {
+        return Ok(false);
+    }
     let head = git(path, &["rev-parse", "HEAD"])?;
     // Integrated means reachable from the branch the slot publishes to.
     let branch = std::fs::read_to_string(path.join(OWNER))
@@ -312,11 +336,20 @@ pub fn finish(
             "Refusing cleanup of an unowned supervisor slot".into(),
         ));
     }
-    let branch_to_delete = std::fs::read_to_string(path.join(OWNER))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|v| v.get("repair_branch").and_then(|s| s.as_str().map(String::from)))
-        .or_else(|| git(path, &["branch", "--show-current"]).ok().filter(|s| !s.is_empty()));
+    let owner: Value =
+        serde_json::from_str(&std::fs::read_to_string(path.join(OWNER)).map_err(|e| io(path, e))?)
+            .map_err(|e| MaccError::Validation(e.to_string()))?;
+    let branch = git(path, &["branch", "--show-current"])?;
+    if owner["repair_branch"]
+        .as_str()
+        .is_some_and(|expected| expected != branch)
+    {
+        return Err(MaccError::Validation(
+            "Supervisor checkout differs from its owner marker; worktree and branches retained"
+                .into(),
+        ));
+    }
+    let target = owner["branch"].as_str();
 
     git(
         root,
@@ -329,12 +362,9 @@ pub fn finish(
     )?;
 
     if !retain_branch {
-        if let Some(branch) = branch_to_delete {
-            if branch.starts_with("macc/supervisor/") {
-                let _ = macc_core::git::delete_local_branch(root, &branch, true);
-            }
+        if branch.starts_with("macc/supervisor/") {
+            macc_core::git::prune_merged_supervisor_branch(root, &branch, target)?;
         }
-        let _ = macc_core::git::prune_merged_supervisor_branches(root, None, false);
     }
     Ok(true)
 }
@@ -390,7 +420,14 @@ mod tests {
         assert!(logs.join("evidence/untracked.txt").exists());
         let (other, _) = open(root, "incident-b").unwrap();
         assert_eq!(other, root.join(".macc/worktree/supervisor-02"));
-        assert!(finish(root, &other, &root.join(".macc/log/supervisor/other"), true, false).unwrap());
+        assert!(finish(
+            root,
+            &other,
+            &root.join(".macc/log/supervisor/other"),
+            true,
+            false
+        )
+        .unwrap());
         assert!(!other.exists());
         let branches = git(root, &["branch", "--list", "macc/supervisor/*"]).unwrap();
         assert!(!branches.contains("incident-b"));
@@ -406,6 +443,63 @@ mod tests {
         assert!(!slot.exists());
         let branches = git(root, &["branch", "--list", "macc/supervisor/*"]).unwrap();
         assert!(branches.contains("incident-c"));
+    }
+    #[test]
+    fn ignored_files_outside_archived_evidence_keep_the_slot_and_branch() {
+        let temp = fixture();
+        let root = temp.path();
+        let (slot, _) = open(root, "ignored").unwrap();
+        let exclude = git(root, &["rev-parse", "--git-path", "info/exclude"]).unwrap();
+        let exclude = root.join(exclude);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(exclude)
+            .unwrap()
+            .write_all(b"\n.env\n")
+            .unwrap();
+        std::fs::write(slot.join(".env"), "private work\n").unwrap();
+        assert!(!finish(
+            root,
+            &slot,
+            &root.join(".macc/log/supervisor/ignored"),
+            true,
+            false
+        )
+        .unwrap());
+        assert_eq!(
+            std::fs::read_to_string(slot.join(".env")).unwrap(),
+            "private work\n"
+        );
+        assert!(git(root, &["branch", "--list", "macc/supervisor/*"])
+            .unwrap()
+            .contains("ignored"));
+    }
+    #[test]
+    fn legacy_owner_marker_reuses_the_actual_branch() {
+        let temp = fixture();
+        let root = temp.path();
+        let (slot, _) = open(root, "legacy").unwrap();
+        let branch = git(&slot, &["branch", "--show-current"]).unwrap();
+        let mut owner: Value =
+            serde_json::from_str(&std::fs::read_to_string(slot.join(OWNER)).unwrap()).unwrap();
+        owner.as_object_mut().unwrap().remove("repair_branch");
+        write_json(&slot.join(OWNER), &owner).unwrap();
+        open(root, "legacy").unwrap();
+        let owner: Value =
+            serde_json::from_str(&std::fs::read_to_string(slot.join(OWNER)).unwrap()).unwrap();
+        assert_eq!(owner["repair_branch"].as_str(), Some(branch.as_str()));
+        assert!(finish(
+            root,
+            &slot,
+            &root.join(".macc/log/supervisor/legacy"),
+            true,
+            false
+        )
+        .unwrap());
+        assert!(git(root, &["branch", "--list", "macc/supervisor/*"])
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn archive_failure_never_removes_the_slot() {
@@ -425,7 +519,14 @@ mod tests {
         std::fs::write(slot.join("source.txt"), "repair\n").unwrap();
         git(&slot, &["add", "."]).unwrap();
         git(&slot, &["commit", "-qm", "repair"]).unwrap();
-        assert!(!finish(root, &slot, &root.join(".macc/log/supervisor/a"), true, false).unwrap());
+        assert!(!finish(
+            root,
+            &slot,
+            &root.join(".macc/log/supervisor/a"),
+            true,
+            false
+        )
+        .unwrap());
         std::fs::write(root.join("source.txt"), "new base\n").unwrap();
         git(root, &["add", "."]).unwrap();
         git(root, &["commit", "-qm", "advance"]).unwrap();

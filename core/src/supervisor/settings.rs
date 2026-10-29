@@ -26,7 +26,7 @@ fields![
     ("ai_verification_enabled", "AI verification", "bool", "Off: skip the separate AI review; integration relies on the remaining enabled checks."),
     ("auto_restart", "Automatic restart", "bool", "Off: integrate a successful repair and requeue tasks, but leave the coordinator stopped. Also disables restart-only recovery."),
     ("validation_commands", "Validation commands", "commands", "Commands run from the isolated worktree root. Adding commands enables tests; an empty list disables tests. Use relative subproject paths. TUI: separate commands with ;; ."),
-    ("retain_repair_branches", "Retain repair branches", "bool", "Off (default): automatically delete merged macc/supervisor/* branches after clean integration. On: preserve branches in Git for manual inspection."),
+    ("retain_repair_branches", "Retain repair branches", "bool", "Off (default): delete only verified merged repair branches after clean, archived slot removal. Checked-out/unmerged repairs and unarchived files are preserved. On: retain repair branches; explicit supervisor prune --force overrides retention only, never these safety checks."),
     ("intervention_timeout_seconds", "AI call timeout (seconds)", "number", "Positive timeout per AI invocation."),
     ("validation_timeout_seconds", "Check timeout (seconds)", "number", "Positive timeout per validation command."),
     ("max_repair_rounds", "Repair rounds", "number", "Maximum repair/check/review rounds per attempt; at least 1."),
