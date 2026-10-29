@@ -71,6 +71,10 @@ pub struct SupervisorConfig {
     /// Explicit validation commands. An empty list disables automatic tests.
     #[serde(default)]
     pub validation_commands: Vec<String>,
+    /// Retain supervisor repair branches in Git after integration or slot cleanup.
+    /// By default (false), only verified merged repair refs no longer checked out are deleted.
+    #[serde(default)]
+    pub retain_repair_branches: bool,
     /// How often the supervisor checks coordinator health (seconds).
     #[serde(default = "default_watchdog_interval_seconds")]
     pub watchdog_interval_seconds: u64,
@@ -170,6 +174,7 @@ impl Default for SupervisorConfig {
             auto_restart: true,
             validation_timeout_seconds: default_intervention_timeout(),
             validation_commands: Vec::new(),
+            retain_repair_branches: false,
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             max_restart_attempts: default_max_restart_attempts(),
             log_analysis_window_seconds: default_log_analysis_window_seconds(),

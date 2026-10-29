@@ -324,6 +324,7 @@ export interface SupervisorConfig {
   ai_verification_enabled: boolean;
   auto_restart: boolean;
   validation_commands: string[];
+  retain_repair_branches?: boolean;
   intervention_timeout_seconds: number;
   validation_timeout_seconds: number;
   max_repair_rounds: number;

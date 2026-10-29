@@ -72,7 +72,12 @@ pub(super) async fn intervene(
     report.tool = Some(agent.id.clone());
     let target = super::workspace::target(&paths.root, canonical.automation.coordinator.as_ref())?;
     report.target_branch = target.branch.clone();
-    let worktree = super::workspace::prepare(&paths.root, &report.incident.id, &target)?;
+    let worktree = super::workspace::prepare(
+        &paths.root,
+        &report.incident.id,
+        &target,
+        config.retain_repair_branches,
+    )?;
     report.worktree = Some(worktree.clone());
     let activity = if report.diagnosis.is_some() {
         "Reusing the recorded diagnosis".to_string()

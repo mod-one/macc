@@ -476,9 +476,18 @@ The supervisor is a watchdog process that monitors the coordinator and restarts 
 ```bash
 macc supervisor start [--daemon] [--attach] [--coordinator-pid <pid>]
 macc supervisor stop
+macc supervisor prune [--force]
 macc supervisor status
 macc supervisor report
 ```
+
+`supervisor prune` removes only repair branches verified as integrated into the
+coordinator reference branch and no longer checked out in any worktree.
+`retain_repair_branches: true` preserves repair refs during automatic cleanup;
+an explicit `supervisor prune --force` overrides retention only. It never deletes
+unmerged or checked-out branches. Generic worktree pruning does not remove repair
+refs. Dirty worktrees and ignored files not archived as supervisor evidence are
+preserved; bulk worker cleanup also retains unfinished files and unmerged work.
 
 The coordinator can automatically start the supervisor with `macc coordinator --supervisor`.
 

@@ -112,6 +112,7 @@ pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
 }
 
 pub fn prune_worktrees(root: &Path) -> Result<()> {
+    // Git metadata pruning must not implicitly remove retained repair refs.
     crate::git::worktree_prune(root)
 }
 

@@ -41,6 +41,7 @@ impl<'a> Command for SupervisorCommand<'a> {
                 retry,
             } => self.start(*daemon, *attach, *coordinator_pid, *retry),
             SupervisorCommands::Stop => self.stop(),
+            SupervisorCommands::Prune { force } => self.prune(*force),
             SupervisorCommands::Status => self.status(),
             SupervisorCommands::Report => self.report(),
         }
@@ -292,7 +293,34 @@ impl<'a> SupervisorCommand<'a> {
         }
 
         let _ = fs::remove_file(&supervisor_pid_path);
+        if let Err(error) =
+            macc_core::git::prune_merged_supervisor_branches(&paths.root, None, false)
+        {
+            eprintln!("Supervisor branches retained: {error}");
+        }
         println!("Supervisor stopped.");
+        Ok(())
+    }
+
+    fn prune(&self, force: bool) -> Result<()> {
+        let paths = self.app.project_paths()?;
+        crate::commands::gate_cli_mutation(&paths.root)?;
+        let canonical = self.app.canonical_config()?;
+        let reference_branch = canonical
+            .automation
+            .coordinator
+            .as_ref()
+            .and_then(|c| c.reference_branch.as_deref());
+        let deleted =
+            macc_core::git::prune_merged_supervisor_branches(&paths.root, reference_branch, force)?;
+        if deleted.is_empty() {
+            println!("No eligible merged supervisor branches to prune; retained, unmerged and checked-out branches are preserved.");
+        } else {
+            for b in &deleted {
+                println!("Pruned supervisor branch: {b}");
+            }
+            println!("Pruned {} supervisor branch(es).", deleted.len());
+        }
         Ok(())
     }
 

@@ -1182,6 +1182,12 @@ pub enum SupervisorCommands {
     },
     /// Stop the supervisor watchdog
     Stop,
+    /// Prune merged supervisor repair branches
+    Prune {
+        /// Override retention; still preserve unmerged or checked-out branches
+        #[arg(long)]
+        force: bool,
+    },
     /// Show supervisor and coordinator health
     Status,
     /// Show the latest supervisor report summary

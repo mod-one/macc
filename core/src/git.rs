@@ -2,6 +2,9 @@ use crate::{MaccError, Result};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 
+mod supervisor_prune;
+pub use supervisor_prune::{prune_merged_supervisor_branch, prune_merged_supervisor_branches};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitGraphCommit {
     pub sha: String,

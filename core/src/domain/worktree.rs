@@ -131,6 +131,10 @@ pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize>
     for entry in entries {
         if entry.path == root_canon
             || entry
+                .branch
+                .as_deref()
+                .is_some_and(|b| b.starts_with("refs/heads/macc/supervisor/"))
+            || entry
                 .path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -140,9 +144,42 @@ pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize>
             continue;
         }
         let branch = entry.branch.clone();
-        crate::remove_worktree(root, &entry.path, true)?;
+        let status = crate::git::run_git_output_mapped(
+            &entry.path,
+            &[
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            "verify clean worktree before cleanup",
+        )?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            continue;
+        }
+        let ignored = crate::git::run_git_output_mapped(
+            &entry.path,
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ],
+            "inspect ignored worktree files before cleanup",
+        )?;
+        if !ignored.status.success() || !ignored.stdout.is_empty() {
+            continue;
+        }
+        let Some(head) = entry.head.as_deref() else {
+            continue;
+        };
+        if !crate::git::merge_base_is_ancestor(root, head, "HEAD")? {
+            continue;
+        }
+        crate::remove_worktree(root, &entry.path, false)?;
         if remove_branches {
-            delete_branch(root, branch.as_deref(), true)?;
+            delete_branch(root, branch.as_deref(), false)?;
         }
         removed += 1;
     }
