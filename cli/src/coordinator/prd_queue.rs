@@ -1,9 +1,59 @@
 use macc_core::{prd_queue, MaccError, ProjectPaths, Result};
 
+/// Explain the reset and ask for an explicit "y". Never auto-confirms: without
+/// an interactive terminal the caller must pass `--confirm`.
+fn confirm_reset(root: &std::path::Path) -> Result<bool> {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    ask_reset(root, stdin.is_terminal(), &mut stdin.lock())
+}
+
+fn ask_reset(
+    root: &std::path::Path,
+    interactive: bool,
+    input: &mut dyn std::io::BufRead,
+) -> Result<bool> {
+    use std::io::Write;
+    let progress = prd_queue::load(root)?;
+    println!("This resets the PRD queue progress:");
+    println!(
+        "  - the cursor returns to the first PRD (currently {}/{} completed, status: {})",
+        progress.next,
+        progress.entries.len(),
+        if progress.status.is_empty() {
+            "not started"
+        } else {
+            &progress.status
+        }
+    );
+    println!("  - the recorded PRD fingerprints are cleared, so the current queue is accepted as the new baseline");
+    println!("  - delivered tasks and their state are NOT undone; the queue file list is unchanged");
+    if !interactive {
+        return Err(MaccError::Validation(
+            "Confirmation required: run `macc coordinator prds reset --confirm` in non-interactive mode".into(),
+        ));
+    }
+    print!("Reset PRD queue progress? [y/N]: ");
+    std::io::stdout().flush().map_err(|e| MaccError::Io {
+        path: "stdout".into(),
+        action: "flush prompt".into(),
+        source: e,
+    })?;
+    let mut answer = String::new();
+    input
+        .read_line(&mut answer)
+        .map_err(|e| MaccError::Io {
+            path: "stdin".into(),
+            action: "read confirmation".into(),
+            source: e,
+        })?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
 pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
     let action = args.first().map(String::as_str).unwrap_or("list");
     if matches!(action, "help" | "--help") {
-        println!("macc coordinator prds [list|check|status|edit|add PATH|remove POSITION|move FROM TO|reset --confirm]\nPositions start at 1. Directories import immediate JSON files in lexical order. edit opens the visual terminal editor. reset resets progress only; it does not undo delivered tasks.");
+        println!("macc coordinator prds [list|check|status|edit|add PATH|remove POSITION|move FROM TO|reset [--confirm]]\nPositions start at 1. Directories import immediate JSON files in lexical order. edit opens the visual terminal editor. reset resets progress only; it does not undo delivered tasks. Without --confirm it explains the action and asks for y; non-interactive use requires --confirm.");
         return Ok(());
     }
     let mut config = macc_core::load_canonical_config(&paths.config_path)?;
@@ -100,7 +150,13 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
             Some(edited) => files = edited,
             None => return Ok(()),
         },
-        "reset" if args.get(1).map(String::as_str) == Some("--confirm") => {
+        "reset" => {
+            let confirmed = args.get(1).map(String::as_str) == Some("--confirm")
+                || confirm_reset(&paths.root)?;
+            if !confirmed {
+                println!("Reset cancelled; queue progress unchanged.");
+                return Ok(());
+            }
             prd_queue::save(&paths.root, &prd_queue::Progress::default())?;
             println!("Queue progress reset; existing task delivery state is preserved.");
             return Ok(());
@@ -180,7 +236,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(command(&["reset"]).is_err());
+        assert!(ask_reset(root.path(), false, &mut std::io::empty()).is_err());
+        assert!(!ask_reset(root.path(), true, &mut "n\n".as_bytes()).unwrap());
+        assert!(!ask_reset(root.path(), true, &mut "".as_bytes()).unwrap());
+        assert_eq!(prd_queue::load(root.path()).unwrap().next, 1);
+        assert!(ask_reset(root.path(), true, &mut "y\n".as_bytes()).unwrap());
         assert_eq!(prd_queue::load(root.path()).unwrap().next, 1);
         command(&["reset", "--confirm"]).unwrap();
         assert_eq!(prd_queue::load(root.path()).unwrap().next, 0);
