@@ -797,3 +797,44 @@ fn review_records_negative_evidence_and_publication_is_bound_to_the_reviewed_com
         .contains("DM_STALE"));
     store.verify().unwrap();
 }
+#[test]
+fn repeated_operator_feedback_is_idempotent_and_does_not_silently_demote_a_binding() {
+    let (_tmp, mut store, plan, _, p) = fixture();
+    let first = store
+        .feedback(
+            &plan,
+            "*",
+            "Conserver les relations historiques.\nGarder le contrat public.",
+            "Human",
+            false,
+            &p,
+        )
+        .unwrap();
+    let retry = store
+        .feedback(
+            &plan,
+            "*",
+            "Conserver les relations historiques.\nGarder le contrat public.",
+            "Human",
+            false,
+            &p,
+        )
+        .unwrap();
+    assert_eq!(first.id, retry.id);
+    assert_eq!(retry.status, "resolved");
+    assert_eq!(store.decisions(&plan.id).unwrap().len(), 1);
+    assert!(store
+        .feedback(
+            &plan,
+            "*",
+            "Conserver les relations historiques.\nGarder le contrat public.",
+            "Human",
+            true,
+            &p
+        )
+        .is_err());
+    assert!(store
+        .feedback(&plan, "*", "  ", "Human", false, &p)
+        .is_err());
+    store.verify().unwrap();
+}

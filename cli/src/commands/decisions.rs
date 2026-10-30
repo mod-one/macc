@@ -293,19 +293,9 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             advisory,
         } => {
             let actor = operator(root)?;
-            let request:dm::Request=serde_json::from_value(json!({"idempotency_key":uuid_key(),"task_id":task,"kind":"feedback","scope":if task=="*"{"project"}else{"task"},"question":"New operator direction","recommendation":text,"context":text,"investigated":["Direct operator instruction"],"risk":"high","impact":{"evidence":["Operator input"]}})).map_err(|e|dm::error(e.to_string()))?;
-            let mut human = p.clone();
-            human.human_question_min_risk = dm::Consultation::Low;
-            let decision = store.submit(&plan, request, &actor, "human", &human)?;
-            Ok(json!(store.answer(
-                &decision.id,
-                decision.version,
-                text,
-                None,
-                &actor,
-                *advisory,
-                &p
-            )?))
+            Ok(json!(
+                store.feedback(&plan, task, text, &actor, *advisory, &p)?
+            ))
         }
         Action::Revoke {
             id,
@@ -388,10 +378,4 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
         }
         Action::Config { .. } | Action::List => unreachable!(),
     }
-}
-fn uuid_key() -> String {
-    format!(
-        "operator-feedback-{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    )
 }

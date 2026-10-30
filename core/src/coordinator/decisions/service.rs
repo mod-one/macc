@@ -139,6 +139,44 @@ pub fn snapshot(root: &Path) -> Result<Value> {
 }
 
 impl Store {
+    /// Shared operator feedback path. Exact retries reuse the recorded human
+    /// direction; they must not try to answer an already resolved question.
+    pub fn feedback(
+        &mut self,
+        plan: &Plan,
+        task: &str,
+        text: &str,
+        actor: &str,
+        advisory: bool,
+        policy: &Policy,
+    ) -> Result<Decision> {
+        if text.trim().is_empty() {
+            return Err(error("Operator guidance must not be empty"));
+        }
+        let request:Request=serde_json::from_value(json!({"idempotency_key":format!("feedback-{}",uuid::Uuid::new_v4()),"task_id":task,"kind":"feedback","scope":if task=="*"{"project"}else{"task"},"question":"Operator guidance","context":text,"recommendation":text,"investigated":["Direct operator instruction"],"impact":{"evidence":["Local operator"]}})).map_err(|e|error(e.to_string()))?;
+        let mut human = policy.clone();
+        human.human_question_min_risk = Consultation::Low;
+        let decision = self.submit(plan, request, actor, "human", &human)?;
+        if decision.status == "resolved" {
+            if decision
+                .resolution
+                .as_ref()
+                .is_some_and(|r| r.text == text && r.advisory == advisory)
+            {
+                return Ok(decision);
+            }
+            return Err(error("This guidance already has a different binding status; revoke or explicitly revise it instead of silently changing its authority"));
+        }
+        self.answer(
+            &decision.id,
+            decision.version,
+            text,
+            None,
+            actor,
+            advisory,
+            policy,
+        )
+    }
     pub fn import_planner_requests(&mut self, plan: &Plan, policy: &Policy) -> Result<()> {
         if let Some(proposals) = plan.graph.get("decision_requests") {
             let requests: Vec<Request> = serde_json::from_value(proposals.clone())

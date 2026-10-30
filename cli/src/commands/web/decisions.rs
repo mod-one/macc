@@ -69,10 +69,7 @@ pub(super) async fn mutate(
             Mutation::Answer{id,version,text,option,advisory}=>json!(store.answer(&id,version,&text,option,&actor,advisory,&p)?),
             Mutation::Feedback{text,task,advisory}=>{
                 let task=task.unwrap_or_else(||"*".into());
-                let request:dm::Request=serde_json::from_value(json!({"idempotency_key":format!("feedback-{}",chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()),"task_id":task,"scope":if task=="*"{"project"}else{"task"},"kind":"feedback","question":"Operator guidance","context":text,"recommendation":text,"investigated":["Direct operator direction"],"impact":{"evidence":["Local operator"]}})).map_err(|e|ApiError::validation(e.to_string()))?;
-                let mut human=p.clone();human.human_question_min_risk=dm::Consultation::Low;
-                let d=store.submit(&plan,request,&actor,"human",&human)?;
-                json!(store.answer(&d.id,d.version,&text,None,&actor,advisory,&p)?)
+                json!(store.feedback(&plan,&task,&text,&actor,advisory,&p)?)
             }
             Mutation::Revoke{id,version,reason}=>json!(store.revoke(&id,version,&actor,&reason)?),
             Mutation::PatchPreview{patch}=>json!({"proposed":store.preview_patch(&plan,&patch,&dm::registry(root)?)?,"base":plan.graph_version,"projection":store.projection_diff(root,&plan)?}),

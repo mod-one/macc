@@ -353,11 +353,7 @@ impl Center {
                         store.answer(&id, version, &text, option, &actor, advisory, &p)?;
                     }
                     Action::Feedback(text) => {
-                        let request:dm::Request=serde_json::from_value(json!({"idempotency_key":format!("feedback-{}",chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()),"task_id":"*","scope":"project","kind":"feedback","question":"Operator guidance","context":text,"recommendation":text,"investigated":["Direct operator input"],"impact":{"evidence":["Local operator"]}})).map_err(|e|dm::error(e.to_string()))?;
-                        let mut human = p.clone();
-                        human.human_question_min_risk = dm::Consultation::Low;
-                        let d = store.submit(&plan, request, &actor, "human", &human)?;
-                        store.answer(&d.id, d.version, &text, None, &actor, false, &p)?;
+                        store.feedback(&plan, "*", &text, &actor, false, &p)?;
                     }
                     Action::Policy(_) | Action::InspectContext(_) => unreachable!(),
                 }
