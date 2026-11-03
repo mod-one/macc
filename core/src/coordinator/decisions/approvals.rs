@@ -130,12 +130,15 @@ impl Store {
                 .map_err(|e| error(e.to_string()))?
                 .timestamp();
             if record.revision.as_deref() != Some(revision.as_str())
-                || at < proof.body.issued_at.saturating_sub(30)
+                || at < proof.body.issued_at.saturating_sub(3600)
+                || at > chrono::Utc::now().timestamp().saturating_add(30)
                 || at > proof.body.expires_at
             {
-                return Err(error("Secure votes require the exact full commit and a timestamp within their isolated attestation window"));
+                return Err(error("Secure votes require the exact full commit and a nonfuture request timestamp within one hour of the isolated attestation"));
             }
         }
+        // A broker can require minutes of independent human review. The exact
+        // signed request timestamp can predate issuance; it must never extend TTL.
         let payload = json!({"task_id":task,"decision":record.decision,"role":record.role,"actor":record.actor,"revision":revision,"evidence":record.evidence,"reason":record.reason,"recorded_at":record.recorded_at,"trust":p.trust_mode,"attestation":proof,"binding_verified":true,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(&p),"manifest":approval_manifest(root,plan,task,Some(&revision)).ok(),"execution_id":registry(root)?.extra.get("decision_execution_id")});
         let tx = sql(self
             .db

@@ -37,6 +37,18 @@ impl Consultation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub similarity_hints: bool,
+    #[serde(
+        default = "default_candidates",
+        skip_serializing_if = "candidates_default"
+    )]
+    pub similarity_max_candidates: usize,
+    #[serde(
+        default = "default_similarity",
+        skip_serializing_if = "similarity_default"
+    )]
+    pub similarity_min_percent: u8,
     pub enabled: bool,
     pub human_question_min_risk: Consultation,
     pub max_context_bytes: usize,
@@ -60,6 +72,9 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             enabled: false,
+            similarity_hints: false,
+            similarity_max_candidates: 128,
+            similarity_min_percent: 75,
             human_question_min_risk: Consultation::High,
             max_context_bytes: 32768,
             max_request_bytes: 65536,
@@ -88,6 +103,13 @@ impl Policy {
         {
             return Err(super::error(
                 "Investigation budget must be 1..10 rounds and 1024..262144 source bytes",
+            ));
+        }
+        if !(1..=512).contains(&self.similarity_max_candidates)
+            || !(1..=100).contains(&self.similarity_min_percent)
+        {
+            return Err(super::error(
+                "Similarity hints require 1..512 candidates and a 1..100 percent threshold",
             ));
         }
         let mut ids = std::collections::BTreeSet::new();
@@ -168,6 +190,10 @@ pub struct Impact {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OptionChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_patch: Option<Patch>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_replan: bool,
     pub id: String,
     pub label: String,
     #[serde(default)]
@@ -178,6 +204,10 @@ pub struct OptionChoice {
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_of: Option<DecisionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     pub task_id: String,
     #[serde(default = "default_scope")]
     pub scope: String,
@@ -232,6 +262,12 @@ fn default_scope() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resolution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_patch: Option<Patch>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effects: String,
     pub text: String,
     pub selected_option_id: Option<String>,
     pub actor: String,
@@ -253,6 +289,8 @@ pub struct Resolution {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Decision {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects_commit: Option<EffectCommit>,
     #[serde(default)]
     pub requester_actor: String,
     #[serde(default)]
@@ -265,6 +303,8 @@ pub struct Decision {
     pub effective_risk: Risk,
     pub resolution: Option<Resolution>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_human_renewal: bool,
     pub subject_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission_digest: Option<String>,
@@ -325,6 +365,8 @@ pub struct Patch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextPackage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub graph_version: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -392,6 +434,10 @@ pub struct AnswerInput {
     pub option: Option<String>,
     pub advisory: bool,
     pub apply_patch: bool,
+    #[serde(default, skip_serializing_if = "effects_auto")]
+    pub effects: AnswerEffects,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<Patch>,
     pub fields: BTreeMap<String, String>,
     pub outcome: AnswerOutcome,
 }
@@ -519,4 +565,76 @@ pub struct OperationExecution {
     pub output_digest: Option<String>,
     pub output_path: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerEffects {
+    #[default]
+    Auto,
+    NoGraphChange,
+    Replan,
+}
+fn effects_auto(e: &AnswerEffects) -> bool {
+    *e == AnswerEffects::Auto
+}
+impl AnswerEffects {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::NoGraphChange => "no_graph_change",
+            Self::Replan => "replan",
+        }
+    }
+}
+impl Request {
+    pub fn patch_for(&self, option: Option<&str>) -> Option<&Patch> {
+        option
+            .and_then(|id| self.options.iter().find(|o| o.id == id))
+            .and_then(|o| o.proposed_patch.as_ref())
+            .or_else(|| {
+                if option == self.recommended_option_id.as_deref() {
+                    self.proposed_patch.as_ref()
+                } else {
+                    None
+                }
+            })
+    }
+    pub fn has_effects(&self) -> bool {
+        self.proposed_patch.is_some()
+            || self
+                .options
+                .iter()
+                .any(|o| o.proposed_patch.is_some() || o.requires_replan)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EffectCommit {
+    pub patch_digest: String,
+    pub graph_version: u64,
+    pub actor: String,
+    pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<super::secure::Attestation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PlanningContext {
+    pub requests: Vec<DecisionRef>,
+    pub worktree: String,
+    pub artifact_digest: Option<String>,
+}
+
+fn default_candidates() -> usize {
+    128
+}
+fn candidates_default(n: &usize) -> bool {
+    *n == 128
+}
+fn default_similarity() -> u8 {
+    75
+}
+fn similarity_default(n: &u8) -> bool {
+    *n == 75
 }

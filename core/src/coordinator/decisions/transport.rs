@@ -10,7 +10,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
-const TABLES: &[&str] = &[
+pub(super) const TABLES: &[&str] = &[
     "metadata",
     "plans",
     "events",
@@ -36,7 +36,7 @@ pub struct SignedArchive {
     pub principal: String,
     pub signature: String,
 }
-fn roots(root: &Path) -> crate::Result<Vec<String>> {
+pub(super) fn roots(root: &Path) -> crate::Result<Vec<String>> {
     let output = crate::git::run_git_output_mapped(
         root,
         &["rev-list", "--max-parents=0", "HEAD"],

@@ -5,13 +5,15 @@ import { useCoordinatorStore } from '../store';
 import { useNotificationStore } from '../stores/notificationStore';
 import { ApprovalCenter } from './ApprovalDialog';
 
-const api = vi.hoisted(() => ({ list: vi.fn(), decide: vi.fn(), status: vi.fn() }));
+const api = vi.hoisted(() => ({ list: vi.fn(), decide: vi.fn(), status: vi.fn(), approvalSnapshot:vi.fn(), approvalMutation:vi.fn() }));
 vi.mock('../api/client', () => ({
   getApprovals: api.list,
   postGateDecision: api.decide,
   getStatus: api.status,
   postCoordinatorAction: vi.fn(),
 }));
+
+vi.mock('../api/decisions',()=>({getDecisions:api.approvalSnapshot,mutateDecisions:api.approvalMutation}));
 
 function gate(overrides: Partial<ApiPendingApproval> = {}): ApiPendingApproval {
   return {
@@ -161,4 +163,12 @@ it('shows nothing when no gate awaits a decision', async () => {
   });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(screen.queryByText(/approval waiting/)).not.toBeInTheDocument();
+});
+
+it('routes the existing secure gate form through independent review and deliberate apply',async()=>{
+ setPending([gate()]);api.list.mockResolvedValue({pending_approvals:[],default_actor:'Ann <ann@x>',decision_trust_mode:'secure_approval'});api.approvalSnapshot.mockResolvedValue({plan:{id:'p'},approval_broker_available:true});api.approvalMutation.mockResolvedValueOnce({id:'ticket',status:'pending',message:'Authenticate and review exact gate',approval_url:'https://approver.example/review',intent:{action:'gate_vote'}}).mockResolvedValueOnce({id:'ticket',status:'approved',message:'Independent proof verified',approval_url:null,intent:{action:'gate_vote'}}).mockResolvedValueOnce({id:'ticket',status:'applied',message:'Recorded',approval_url:null,intent:{action:'gate_vote'}});
+ await act(async()=>{render(<ApprovalCenter/>);});fireEvent.change(screen.getByPlaceholderText(/pull request review/),{target:{value:'https://git/pr/7'}});fireEvent.click(screen.getByRole('button',{name:'Approve…'}));await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Confirm'}));});expect(api.decide).not.toHaveBeenCalled();expect(api.approvalMutation).toHaveBeenCalledWith(expect.objectContaining({action:'approval_begin',intent:expect.objectContaining({action:'gate_vote',task:'FIN-APP-001'})}));expect(screen.getByRole('link',{name:'Open independent approval page'})).toBeInTheDocument();await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Check independent approval'}));});expect(api.approvalMutation).toHaveBeenCalledTimes(2);await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Apply independent gate response'}));});expect(api.approvalMutation).toHaveBeenLastCalledWith({action:'approval_apply',id:'ticket'});
+});
+it('keeps an unsent gate draft after deciding later and reopening',async()=>{
+ setPending([gate()]);await act(async()=>{render(<ApprovalCenter/>);});fireEvent.change(screen.getByPlaceholderText(/pull request review/),{target:{value:'https://git/pr/keep-draft'}});fireEvent.click(screen.getByRole('button',{name:/Decide later/}));const button=screen.getByRole('button',{name:/approval waiting/i});fireEvent.click(button);expect(screen.getByPlaceholderText(/pull request review/)).toHaveValue('https://git/pr/keep-draft');expect(api.decide).not.toHaveBeenCalled();
 });

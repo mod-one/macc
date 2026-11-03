@@ -29,11 +29,13 @@ pub struct Attestation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustRegistry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker: Option<BrokerConfig>,
     pub allowed_signers: PathBuf,
     pub roles: BTreeMap<String, Vec<String>>,
     pub required_roles: BTreeMap<String, Vec<String>>,
 }
-fn protected(path: &Path) -> crate::Result<()> {
+pub(super) fn protected(path: &Path) -> crate::Result<()> {
     if !path.is_absolute() {
         return Err(error("Secure registry paths must be absolute"));
     }
@@ -58,7 +60,38 @@ fn protected(path: &Path) -> crate::Result<()> {
         Err(error("This platform requires an isolated approval broker; Unix protected-registry verification is unavailable"))
     }
 }
+// Unit fixtures inject only the registry source; production filesystem isolation and
+// the complete cryptographic/action verifier remain unchanged.
+#[cfg(test)]
+thread_local! { static TEST_REGISTRY: std::cell::RefCell<std::collections::BTreeMap<PathBuf,TrustRegistry>> = Default::default(); }
+#[cfg(test)]
+pub(super) struct TestRegistryGuard(PathBuf);
+#[cfg(test)]
+impl Drop for TestRegistryGuard {
+    fn drop(&mut self) {
+        TEST_REGISTRY.with(|r| {
+            r.borrow_mut().remove(&self.0);
+        });
+    }
+}
+#[cfg(test)]
+pub(super) fn test_registry(path: PathBuf, registry: TrustRegistry) -> TestRegistryGuard {
+    TEST_REGISTRY.with(|r| {
+        r.borrow_mut().insert(path.clone(), registry);
+    });
+    TestRegistryGuard(path)
+}
 fn registry(policy: &Policy) -> crate::Result<TrustRegistry> {
+    #[cfg(test)]
+    if let Some(registry) = TEST_REGISTRY.with(|r| {
+        policy
+            .trust_registry
+            .as_ref()
+            .and_then(|path| r.borrow().get(path).cloned())
+    }) {
+        return Ok(registry);
+    }
+
     let path = policy
         .trust_registry
         .as_ref()
@@ -241,8 +274,17 @@ impl Store {
         }
         let proof=r.attestation.as_ref().ok_or_else(||error("Historic local-trust guidance requires independently verified renewal before secure execution"))?;
         let mut previous = d.clone();
-        previous.version = previous.version.saturating_sub(1);
+        previous.version = r
+            .answered_version
+            .unwrap_or(previous.version.saturating_sub(1));
         let input = AnswerInput {
+            effects: serde_json::from_value(serde_json::json!(if r.effects.is_empty() {
+                "auto"
+            } else {
+                &r.effects
+            }))
+            .map_err(|e| error(e.to_string()))?,
+            patch: r.applied_patch.clone(),
             text: r.text.clone(),
             option: r.selected_option_id.clone(),
             advisory: r.advisory,
@@ -259,12 +301,31 @@ impl Store {
         let at = chrono::DateTime::parse_from_rfc3339(&r.recorded_at)
             .map_err(|e| error(e.to_string()))?
             .timestamp();
+        if matches!(d.request.kind.as_str(), "approval" | "authorization")
+            && r.policy_digest != digest(p)
+        {
+            return Err(error(
+                "DM_STALE: approval policy changed; renew the bound subject",
+            ));
+        }
+        let mut challenge = if r.origin == "human_feedback_secure" {
+            feedback_challenge(
+                &self.plan(&d.plan_id)?,
+                &d.request.task_id,
+                &r.text,
+                r.advisory,
+                p,
+            )?
+        } else {
+            answer_challenge(&previous, &input, p)
+        };
+        challenge["policy_digest"] = serde_json::json!(r.policy_digest);
         verify_attestation(
             &self.root,
             p,
             proof,
-            "decision.answer",
-            &digest(&answer_challenge(&previous, &input, p)),
+            challenge["action"].as_str().unwrap(),
+            &digest(&challenge),
             at,
         )?;
         Ok(())
@@ -347,6 +408,7 @@ mod tests {
         )
         .unwrap();
         let registry = TrustRegistry {
+            broker: None,
             allowed_signers: signers,
             roles: BTreeMap::from([("approver".into(), vec!["OWNER".into()])]),
             required_roles: BTreeMap::from([("decision.answer".into(), vec!["OWNER".into()])]),
@@ -446,4 +508,88 @@ mod tests {
 pub fn canonical_bytes(value: &impl Serialize) -> crate::Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::to_value(value).map_err(|e| error(e.to_string()))?)
         .map_err(|e| error(e.to_string()))
+}
+
+/// Every privileged mutation binds its exact version, intent and policy.
+pub fn mutation_challenge(
+    action: &str,
+    subject: serde_json::Value,
+    p: &Policy,
+) -> serde_json::Value {
+    serde_json::json!({"action":action,"subject":subject,"policy_digest":digest(p)})
+}
+pub(super) fn mutation_authority(
+    root: &Path,
+    action: &str,
+    challenge: &serde_json::Value,
+    actor: &str,
+    proof: Option<&Attestation>,
+    p: &Policy,
+) -> crate::Result<String> {
+    if actor.trim().is_empty() {
+        return Err(error("Mutation requires an attributed operator"));
+    }
+    if p.trust_mode != "secure_approval" {
+        return Ok(actor.into());
+    }
+    verify_attestation(
+        root,
+        p,
+        proof.ok_or_else(|| {
+            error(format!(
+                "{action} requires an isolated approver attestation"
+            ))
+        })?,
+        action,
+        &digest(challenge),
+        chrono::Utc::now().timestamp(),
+    )
+}
+pub fn revoke_challenge(d: &Decision, reason: &str, p: &Policy) -> serde_json::Value {
+    mutation_challenge(
+        "decision.revoke",
+        serde_json::json!({"id":d.id,"version":d.version,"subject_digest":d.subject_digest,"resolution":d.resolution,"reason":reason}),
+        p,
+    )
+}
+pub fn operation_challenge(
+    op: &OperationExecution,
+    state: OperationState,
+    evidence: &str,
+    p: &Policy,
+) -> serde_json::Value {
+    mutation_challenge(
+        "operation.reconcile",
+        serde_json::json!({"operation":op,"outcome":state,"evidence":evidence}),
+        p,
+    )
+}
+
+pub(super) fn broker_configuration(p: &Policy) -> crate::Result<BrokerConfig> {
+    registry(p)?.broker.ok_or_else(||error("No independent approver is configured; use an externally signed attestation or configure the protected broker"))
+}
+pub fn broker_available(p: &Policy) -> bool {
+    broker_configuration(p).is_ok()
+}
+
+pub fn feedback_challenge(
+    plan: &Plan,
+    task: &str,
+    text: &str,
+    advisory: bool,
+    p: &Policy,
+) -> crate::Result<serde_json::Value> {
+    let subject = if task == "*" {
+        digest(&serde_json::json!(plan.id))
+    } else {
+        digest(&super::graph::contract(super::graph::task(
+            &plan.graph,
+            task,
+        )?))
+    };
+    Ok(mutation_challenge(
+        "decision.feedback",
+        serde_json::json!({"plan_id":plan.id,"task_id":task,"subject_digest":subject,"text":text,"advisory":advisory}),
+        p,
+    ))
 }

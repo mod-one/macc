@@ -50,6 +50,8 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
     let mut plan = store.ensure_plan(root, prd, &reference, registry)?;
     store.import_legacy(root, &plan)?;
     store.import_planner_requests(&plan, &p)?;
+    store.reconcile_waiting_decisions(&plan, &p)?;
+    store.expire_requests(&plan)?;
     store.reevaluate_pending(&plan, &p)?;
     plan = store.plan(&plan.id)?;
     store.project(root)?;
@@ -82,9 +84,51 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
         let pending = decisions.iter().find(|d| {
             matches!(
                 d.status.as_str(),
-                "pending_human" | "rejected" | "conflict" | "investigating"
+                "pending_human"
+                    | "rejected"
+                    | "conflict"
+                    | "investigating"
+                    | "expired"
+                    | "awaiting_effects"
+                    | "waiting_dependency"
             ) && store.decision_applies(&plan, d, &task.id).unwrap_or(false)
         });
+        if let Some(decision) = pending.filter(|d| {
+            d.status == "awaiting_effects"
+                && d.request.task_id == task.id
+                && !task.is_human_approval_gate()
+        }) {
+            let allowed =
+                store.planning_attempts(&decision.id)? < p.investigation.max_rounds as usize;
+            if allowed || active {
+                if !active {
+                    if task
+                        .task_runtime
+                        .extra
+                        .get("decision_planning")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(decision.id.as_str())
+                        && task.has_worktree_attached()
+                    {
+                        let base =
+                            crate::coordinator::repair_handoff::reconcile(root, task, &reference)?;
+                        task.task_runtime.extra.insert(crate::coordinator::repair_handoff::RESUME_KEY.into(),json!({"base":base,"evidence":"Prepare only the recorded answer's graph effects; retained source is read-only"}));
+                    }
+                    task.set_workflow_state(WorkflowState::Todo);
+                    task.task_runtime.set_status(RuntimeStatus::Idle);
+                    task.task_runtime.clear_last_error_details();
+                    task.task_runtime.last_error = None;
+                }
+                task.task_runtime
+                    .extra
+                    .insert("decision_planning".into(), json!(decision.id));
+                task.task_runtime
+                    .extra
+                    .insert("decision_wait".into(), json!(decision.id));
+                continue;
+            }
+        }
+        task.task_runtime.extra.remove("decision_planning");
         if let Some(decision) = pending {
             task.task_runtime
                 .extra
@@ -95,8 +139,8 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                     "DM_PENDING",
                     "decisions",
                     format!(
-                        "Decision {} awaits a human answer: {}",
-                        decision.id, decision.request.question
+                        "Decision {} is {}: {}. {}",
+                        decision.id,decision.status, decision.request.question,decision.investigation.as_ref().map(|r|r.diagnosis.as_str()).unwrap_or("Inspect the recorded answer and outstanding graph effects; no consent is inferred")
                     ),
                 );
                 task.task_runtime.set_status(RuntimeStatus::Idle);
@@ -293,9 +337,19 @@ impl Store {
     }
     pub fn resolve_by_policy(&mut self, id: &str, policy: &Policy) -> Result<Decision> {
         let _fence = self.mutation_lock()?;
+        self.resolve_by_policy_locked(id, policy)
+    }
+    pub(super) fn resolve_by_policy_locked(
+        &mut self,
+        id: &str,
+        policy: &Policy,
+    ) -> Result<Decision> {
         use super::store::*;
         use rusqlite::TransactionBehavior;
         let pending = self.decision(id)?;
+        if pending.requires_human_renewal {
+            return Err(error("An earlier human rejection requires a new explicit human response; delegation cannot fabricate it"));
+        }
         let latest = self.plan(&pending.plan_id)?;
         if pending.request.task_id != "*"
             && digest(&super::graph::contract(super::graph::task(
@@ -334,7 +388,7 @@ impl Store {
         let reuse = triage.reuse.as_ref();
         let apply_graph = reuse.is_none() && triage.standing.is_none();
         let proposed_graph = if apply_graph {
-            if let Some(patch) = &request.proposed_patch {
+            if let Some(patch) = request.patch_for(request.recommended_option_id.as_deref()) {
                 Some(self.preview_patch(&latest, patch, &registry(&self.root)?)?)
             } else {
                 None
@@ -355,7 +409,24 @@ impl Store {
         }
         d.version += 1;
         d.request = request;
-        d.status = "resolved".into();
+        d.status = if reuse
+            .is_some_and(|d| matches!(d.status.as_str(), "awaiting_effects" | "waiting_dependency"))
+        {
+            "waiting_dependency"
+        } else if proposed_graph.is_none()
+            && reuse.is_none()
+            && triage.standing.is_none()
+            && d.request
+                .options
+                .iter()
+                .find(|o| Some(&o.id) == d.request.recommended_option_id.as_ref())
+                .is_some_and(|o| o.requires_replan)
+        {
+            "awaiting_effects"
+        } else {
+            "resolved"
+        }
+        .into();
         d.domain = triage.domain;
         d.policy_reason = triage.reason;
         d.reused_from = reuse.map(|old| DecisionRef {
@@ -364,6 +435,9 @@ impl Store {
         });
         d.investigation = Some(triage.report);
         d.resolution = Some(Resolution {
+            answered_version: None,
+            applied_patch: None,
+            effects: String::new(),
             text: reuse
                 .and_then(|d| d.resolution.as_ref())
                 .map(|r| r.text.clone())
@@ -397,7 +471,7 @@ impl Store {
             attestation: None,
             fields: Default::default(),
             outcome: String::new(),
-            patch_applied: apply_graph && d.request.proposed_patch.is_some(),
+            patch_applied: apply_graph && proposed_graph.is_some(),
         });
         sql(tx.execute(
             "UPDATE requests SET payload=?2 WHERE id=?1",
@@ -409,8 +483,17 @@ impl Store {
             |r| r.get::<_, String>(0),
         ))?)?;
         plan.decision_epoch += 1;
-        Self::supersede_in_transaction(&tx, &d, &mut plan)?;
-        if let (Some(patch), Some(graph)) = (&d.request.proposed_patch, proposed_graph) {
+        if d.status == "resolved" {
+            Self::supersede_in_transaction(&tx, &d, &mut plan)?;
+        }
+        if let (Some(patch), Some(graph)) = (
+            d.request.patch_for(
+                d.resolution
+                    .as_ref()
+                    .and_then(|r| r.selected_option_id.as_deref()),
+            ),
+            proposed_graph,
+        ) {
             super::graph::commit_graph(
                 &tx,
                 &mut plan,

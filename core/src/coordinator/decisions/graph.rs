@@ -215,7 +215,9 @@ impl Store {
         }
         for id in &patch.decision_refs {
             let decision = self.decision(id)?;
-            if decision.plan_id != plan.id || decision.status != "resolved" {
+            if decision.plan_id != plan.id
+                || !matches!(decision.status.as_str(), "resolved" | "awaiting_effects")
+            {
                 return Err(error("Patch cites an unresolved or foreign decision"));
             }
         }
@@ -374,7 +376,7 @@ impl Store {
                     let decision = self.decision(decision_id)?;
                     if decision.plan_id != plan.id
                         || decision.version != *version
-                        || decision.status != "resolved"
+                        || !matches!(decision.status.as_str(), "resolved" | "awaiting_effects")
                     {
                         return Err(error(
                             "Decision binding is unresolved, stale or from another plan",
@@ -704,8 +706,15 @@ pub(super) fn commit_graph(
         let stale_patch = decision
             .request
             .proposed_patch
-            .as_ref()
-            .is_some_and(|p| p.base_graph_version != current.graph_version);
+            .iter()
+            .chain(
+                decision
+                    .request
+                    .options
+                    .iter()
+                    .filter_map(|o| o.proposed_patch.as_ref()),
+            )
+            .any(|p| p.base_graph_version != current.graph_version);
         if changed || stale_patch || !patch.metadata_changes.is_empty() {
             decision.version += 1;
             decision.status = "superseded".into();

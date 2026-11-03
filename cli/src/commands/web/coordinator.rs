@@ -840,6 +840,7 @@ pub(super) async fn coordinator_preflight_create_branch_handler(
 
 #[derive(Debug, Serialize)]
 pub(super) struct ApiApprovals {
+    pub decision_trust_mode: String,
     pub pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
     /// Identity a decision is recorded under when the request names none:
     /// the git identity of the machine serving the Web UI.
@@ -892,6 +893,7 @@ pub(super) async fn list_approvals_handler(
             .pending_approvals
             .unwrap_or_default();
         Ok::<_, macc_core::MaccError>(ApiApprovals {
+            decision_trust_mode: macc_core::coordinator::decisions::policy(&paths.root)?.trust_mode,
             pending_approvals: pending,
             default_actor: macc_core::service::coordinator_workflow::operator_identity(&paths.root),
         })

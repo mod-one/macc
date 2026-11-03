@@ -96,6 +96,14 @@ impl Store {
         Ok(values)
     }
     fn save_operation(&mut self, op: &OperationExecution, actor: &str) -> crate::Result<()> {
+        self.save_operation_authorized(op, actor, None)
+    }
+    fn save_operation_authorized(
+        &mut self,
+        op: &OperationExecution,
+        actor: &str,
+        authority: Option<serde_json::Value>,
+    ) -> crate::Result<()> {
         let tx = sql(self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -104,7 +112,7 @@ impl Store {
             &tx,
             &op.plan_id,
             "operation.transition",
-            &serde_json::json!({"actor":actor,"operation":op}),
+            &serde_json::json!({"actor":actor,"operation":op,"authority":authority}),
         )?;
         sql(tx.commit())?;
         Ok(())
@@ -246,10 +254,49 @@ impl Store {
         evidence: &str,
         actor: &str,
     ) -> crate::Result<OperationExecution> {
+        self.reconcile_operation_attested(plan, id, version, state, evidence, actor, None)
+    }
+    pub fn reconcile_operation_attested(
+        &mut self,
+        plan: &str,
+        id: &str,
+        version: u64,
+        state: OperationState,
+        evidence: &str,
+        actor: &str,
+        proof: Option<&Attestation>,
+    ) -> crate::Result<OperationExecution> {
+        self.reconcile_operation_inner(plan, id, version, state, evidence, actor, proof, false)
+    }
+    fn reconcile_operation_inner(
+        &mut self,
+        plan: &str,
+        id: &str,
+        version: u64,
+        state: OperationState,
+        evidence: &str,
+        actor: &str,
+        proof: Option<&Attestation>,
+        trusted_probe: bool,
+    ) -> crate::Result<OperationExecution> {
         let _lock = self.mutation_lock()?;
         let mut op = self
             .operation(plan, id)?
             .ok_or_else(|| error("Unknown operation"))?;
+        let p = policy(&self.root)?;
+        let actor = if trusted_probe {
+            actor.to_owned()
+        } else {
+            super::secure::mutation_authority(
+                &self.root,
+                "operation.reconcile",
+                &super::secure::operation_challenge(&op, state, evidence, &p),
+                actor,
+                proof,
+                &p,
+            )?
+        };
+        let actor = actor.as_str();
         if op.version != version {
             return Err(error("Operation changed; refresh before reconciliation"));
         }
@@ -287,7 +334,7 @@ impl Store {
         op.child_identity = None;
         op.updated_at = now();
         op.evidence = evidence.into();
-        self.save_operation(&op, actor)?;
+        self.save_operation_authorized(&op, actor,Some(serde_json::json!({"origin":if trusted_probe{"trusted_adapter_probe"}else{"operator"},"attestation":proof})))?;
         Ok(op)
     }
     pub fn probe_operation(
@@ -323,7 +370,7 @@ impl Store {
                 "Probe did not establish a conclusive external outcome; operation remains blocked",
             )),
         };
-        self.reconcile_operation(
+        self.reconcile_operation_inner(
             plan,
             id,
             version,
@@ -333,6 +380,8 @@ impl Store {
                 result.0, result.1
             ),
             "trusted outcome probe",
+            None,
+            true,
         )
     }
     fn run_operation_command<F>(
@@ -487,7 +536,7 @@ fn kill_operation(child: &mut std::process::Child) {
 
 /// Drain both streams without blocking, enforcing a combined hard disk budget.
 #[cfg(unix)]
-fn capture_unix(
+pub(super) fn capture_unix(
     child: &mut std::process::Child,
     mut file: std::fs::File,
     path: &Path,

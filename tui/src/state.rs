@@ -1186,6 +1186,11 @@ impl AppState {
 
     /// Record a decision collected by the approval window.
     pub fn submit_approval(&mut self, decision: crate::approval::Decision) {
+        if self.decision_center.policy().enabled && self.decision_center.policy().trust_mode=="secure_approval" {
+            self.decision_center.prepare_gate(&decision);
+            self.approval_window=None;
+            return;
+        }
         let command = CoordinatorCommand::GateDecision {
             task_id: decision.task_id.clone(),
             decision: decision.decision,
@@ -3504,6 +3509,15 @@ impl AppState {
         "Supervisor",
     ];
 
+    // Keep navigation aligned with the shared typed settings contract when
+    // supervisor fields are inserted; no trailing field may become unreachable.
+    const SUPERVISOR_CONFIG_FIELDS: [(u8,usize); macc_core::supervisor::settings::FIELDS.len()] = {
+        let mut fields=[(2,0);macc_core::supervisor::settings::FIELDS.len()];
+        let mut index=0;
+        while index<fields.len(){fields[index]=(2,index);index+=1;}
+        fields
+    };
+
     /// Returns the field list for the given tab as `(source, field_index)` pairs.
     /// `source` 0 = global (settings), 1 = coordinator (automation).
     pub fn config_tab_fields(tab: usize) -> &'static [(u8, usize)] {
@@ -3561,25 +3575,7 @@ impl AppState {
                 (1, 22),
                 (1, 25),
             ],
-            6 => &[
-                (2, 0),
-                (2, 1),
-                (2, 2),
-                (2, 3),
-                (2, 4),
-                (2, 5),
-                (2, 6),
-                (2, 7),
-                (2, 8),
-                (2, 9),
-                (2, 10),
-                (2, 11),
-                (2, 12),
-                (2, 13),
-                (2, 14),
-                (2, 15),
-                (2, 16),
-            ],
+            6 => &Self::SUPERVISOR_CONFIG_FIELDS,
             _ => &[],
         }
     }

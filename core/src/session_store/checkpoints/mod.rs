@@ -293,3 +293,17 @@ pub fn precondition_reason(output: &str) -> Option<String> {
         }
     ))
 }
+
+pub(crate) fn decision_planning_evidence(root: &Path) -> Result<String> {
+    let state = git_state::snapshot(root)?;
+    Ok(digest(
+        serde_json::json!([
+            state.revision,
+            state.branch,
+            state.digest,
+            state.content_digest
+        ])
+        .to_string()
+        .as_bytes(),
+    ))
+}

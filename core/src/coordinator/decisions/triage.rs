@@ -249,7 +249,7 @@ impl Store {
                 .into_iter()
                 .filter(|d| {
                     d.domain.as_ref() == Some(domain)
-                        && d.status == "resolved"
+                        && matches!(d.status.as_str(), "resolved" | "awaiting_effects")
                         && !superseded.contains(&d.id)
                         && !matches!(d.request.kind.as_str(), "approval" | "authorization")
                         && !d.resolution.as_ref().is_some_and(|r| r.advisory)
@@ -292,6 +292,9 @@ impl Store {
     /// Re-evaluate unanswered requests at a safe scheduler boundary. Never
     /// reinterpret an existing human rejection as delegated consent.
     pub fn reevaluate_pending(&mut self, plan: &Plan, policy: &Policy) -> crate::Result<()> {
+        let _fence=self.mutation_lock()?;self.reevaluate_pending_locked(plan,policy)
+    }
+    pub(super) fn reevaluate_pending_locked(&mut self, plan: &Plan, policy: &Policy) -> crate::Result<()> {
         let ids = self
             .applicable_decisions(plan)?
             .into_iter()
@@ -316,16 +319,16 @@ impl Store {
             let result = self.triage(&owner, &mut request, policy)?;
             let unresolved =
                 !result.report.missing_sources.is_empty() || !request.missing_facts.is_empty();
-            let automatic = !unresolved
+            let automatic = !d.requires_human_renewal
+                && !unresolved
                 && (policy.human_question_min_risk == Consultation::NeverAsk
                     || result.reuse.is_some()
                     || result.standing.is_some()
                     || (!result.mandatory && !policy.human_question_min_risk.asks(result.risk)));
             if automatic {
-                self.resolve_by_policy(&id, policy)?;
+                self.resolve_by_policy_locked(&id, policy)?;
                 continue;
             }
-            let _fence = self.mutation_lock()?;
             let mut latest = self.decision(&id)?;
             if latest.version != d.version
                 || !matches!(latest.status.as_str(), "pending_human" | "investigating")
@@ -337,9 +340,11 @@ impl Store {
             // Scheduler freshness checks must not consume the performer's
             // complementary investigation budget before it can supply evidence.
             report.rounds = rounds.max(1);
-            let status = if unresolved
-                && (policy.human_question_min_risk == Consultation::NeverAsk
-                    || !policy.human_question_min_risk.asks(result.risk))
+            let status = if (d.requires_human_renewal
+                && policy.human_question_min_risk == Consultation::NeverAsk)
+                || unresolved
+                    && (policy.human_question_min_risk == Consultation::NeverAsk
+                        || !policy.human_question_min_risk.asks(result.risk))
             {
                 "investigating"
             } else {

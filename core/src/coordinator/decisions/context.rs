@@ -138,14 +138,44 @@ impl Store {
                 "DM_STALE: task was retired/quarantined by a graph decision; preserve its work",
             ));
         }
+        if let Some(refs) = node.get("decision_refs") {
+            for id in refs
+                .as_array()
+                .ok_or_else(|| error("Invalid task decision references"))?
+            {
+                self.decision(
+                    id.as_str()
+                        .ok_or_else(|| error("Invalid task decision identity"))?,
+                )?;
+            }
+        }
         let mut bindings = Vec::new();
+        let mut planning_requests = Vec::new();
         for decision in self.applicable_decisions(plan)? {
             if !self.decision_applies(plan, &decision, task)? {
                 continue;
             }
+            if decision.status == "awaiting_effects"
+                && decision.request.task_id == task
+                && matches!(phase, "dev" | "fix")
+            {
+                self.verify_human_binding(&decision, policy)?;
+                planning_requests.push(DecisionRef {
+                    id: decision.id.clone(),
+                    version: decision.version,
+                });
+                bindings.push(decision);
+                continue;
+            }
             if matches!(
                 decision.status.as_str(),
-                "pending_human" | "rejected" | "conflict" | "investigating"
+                "pending_human"
+                    | "rejected"
+                    | "conflict"
+                    | "investigating"
+                    | "expired"
+                    | "awaiting_effects"
+                    | "waiting_dependency"
             ) {
                 return Err(error(format!(
                     "DM_PENDING: task {task} waits for decision {}",
@@ -193,6 +223,15 @@ impl Store {
             digest(&json!([super::graph::contract(node), dependency_contracts]))
         };
         let mut context = ContextPackage {
+            planning: if planning_requests.is_empty() {
+                None
+            } else {
+                Some(PlanningContext {
+                    requests: planning_requests,
+                    worktree: String::new(),
+                    artifact_digest: None,
+                })
+            },
             graph_version: plan.graph_version,
             decision_epoch: plan.decision_epoch,
             schema_version: 2,
@@ -241,6 +280,11 @@ impl Store {
         {
             return Err(error("Invalid context attempt/phase"));
         }
+        if let Some(planning) = &mut context.planning {
+            planning.worktree = worktree.to_string_lossy().into();
+            planning.artifact_digest =
+                Some(crate::session_store::checkpoints::decision_planning_evidence(worktree)?);
+        }
         let tx = sql(self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -265,6 +309,24 @@ impl Store {
                 "An attempt's context is immutable; create a new attempt after decision changes",
             ));
         }
+        if old.is_none() {
+            if let Some(planning) = &context.planning {
+                for reference in &planning.requests {
+                    let key = format!("planning:{}", reference.id);
+                    let count: usize = sql(tx
+                        .query_row("SELECT value FROM metadata WHERE key=?1", [&key], |r| {
+                            r.get::<_, String>(0)
+                        })
+                        .optional())?
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                    if count >= policy.investigation.max_rounds as usize {
+                        return Err(error("Decision planning budget exhausted; preserve source and inspect the proposed effects"));
+                    }
+                    sql(tx.execute("INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",rusqlite::params![key,(count+1).to_string()]))?;
+                }
+            }
+        }
         sql(tx.execute(
             "INSERT OR IGNORE INTO contexts(plan_id,attempt_id,phase,payload) VALUES(?1,?2,?3,?4)",
             rusqlite::params![plan.id, attempt, phase, encode(&context)?],
@@ -273,7 +335,7 @@ impl Store {
             &tx,
             &plan.id,
             "task.context.prepared",
-            &json!({"task":task,"attempt":attempt,"phase":phase,"digest":context.context_digest}),
+            &json!({"task":task,"attempt":attempt,"phase":phase,"digest":context.context_digest,"context":context}),
         )?;
         sql(tx.commit())?;
         let paths = crate::ProjectPaths::from_root(worktree);
@@ -434,6 +496,10 @@ impl Store {
                 verification_error=Some(match result{Err(e)=>format!("DM_STALE: {e}"),_=>"DM_STALE: context changed during execution; preserve work and revalidate against current decisions".into()});
             }
         }
+        if context.planning.is_some() {
+            receipt.completion_status = "planning_only".into();
+            verification_error=Some("DM_STALE: this was a decision-planning invocation, not implementation. Preserve work; the coordinator must re-dispatch with the applied graph.".into());
+        }
         for line in output.lines() {
             if let Some(value) = line.trim().strip_prefix("MACC_DECISION_COMPLIANCE:") {
                 let checks: std::collections::BTreeMap<String, Compliance> =
@@ -496,13 +562,20 @@ fn context_hash(context: &ContextPackage) -> String {
     v.as_object_mut().unwrap().remove("context_digest");
     v.as_object_mut().unwrap().remove("graph_version");
     v.as_object_mut().unwrap().remove("decision_epoch");
+    if let Some(planning) = v.get_mut("planning").and_then(Value::as_object_mut) {
+        planning.remove("worktree");
+        planning.remove("artifact_digest");
+    }
     digest(&v)
 }
 impl ContextPackage {
     pub fn render(&self) -> String {
         let mode = serde_json::to_value(self.policy.human_question_min_risk).unwrap();
         let mut out=format!("\n## MACC decision protocol v2\nContext digest: {}\nAutonomy: {}\nInvestigate the code, PRD and applicable decisions first. Decide routine implementation details autonomously. Do not ask interactive tool questions.\n",self.context_digest,mode);
-        out.push_str("For a material unresolved choice, write a JSON Request proposal under .macc/tmp/ with idempotency_key, task_id, question, context, investigated, options, recommended_option_id, recommendation, affected_tasks, risk and impact evidence. For a required DAG change include proposed_patch (plan_id, base_graph_version, idempotency_key, reason, operations); never edit PRD files directly. This proposal file is explicitly permitted; do not edit other MACC state. Invoke `\"$MACC_DECISION_CLI\" --cwd \"$MACC_DECISION_ROOT\" decisions request --file <absolute-file>` with the inherited decision environment; do not substitute an older installed macc. Read its JSON result: resolved -> apply the recorded choice; superseded/revoked -> refresh the task context and investigate a new scoped request (never treat this as consent); pending_human -> preserve all work and return MACC_TASK_RESULT: precondition_unmet with MACC_TASK_PRECONDITION: decision <id> pending. A newly recorded resolution may rotate this attempt automatically to refresh context. For shared material choices specify a stable topic (or requirement_refs/affected_paths), consult existing bindings, and use supersedes:[{id,version}] to propose replacing one. Never privately override a recorded choice. Use response_fields:[{id,label,required,multiline,choices}] for structured input; missing_facts lists essential facts that cannot safely be assumed. The coordinator applies trusted governance rules, bounded source checks and current risk thresholds; investigating/rejected/conflict means preserve work and stop dependent work just like pending_human. For destructive/external execution use kind authorization with a stable operation_id and operation_spec:{adapter,target,source_revision,arguments}, referring to a trusted configured adapter. Invoke decisions operations execute <decision-id>; the native runner, not the performer, controls execution, persistent outcome and idempotency. Do not execute the external action directly after a reservation. A reservation is not proof of external completion: after an unknown result, reconcile rather than repeating a non-idempotent operation. To resolve a declared missing fact, use decisions investigate <id> --version <version> --facts-file <file>, a JSON map from the exact missing fact to {source_path,source_digest,excerpt}. source_digest is sha256: followed by the ordinary SHA-256 of exact source file bytes (sha256sum). Evidence must match actual bounded UTF-8 source bytes; exhausted investigation remains a scoped prerequisite block. Never keep the provider process waiting for a person.\n");
+        out.push_str("For a material unresolved choice, write a JSON Request proposal under .macc/tmp/ with idempotency_key, task_id, question, context, investigated, options, recommended_option_id, recommendation, affected_tasks, risk and impact evidence. For a required DAG change include proposed_patch (plan_id, base_graph_version, idempotency_key, reason, operations); never edit PRD files directly. This proposal file is explicitly permitted; do not edit other MACC state. Invoke `\"$MACC_DECISION_CLI\" --cwd \"$MACC_DECISION_ROOT\" decisions request --file <absolute-file>` with the inherited decision environment; do not substitute an older installed macc. Read its JSON result: resolved -> apply the recorded choice; superseded/revoked -> refresh the task context and investigate a new scoped request (never treat this as consent); waiting_dependency/expired/rejected/awaiting_effects -> preserve work and stop dependent implementation (only a native planning context may prepare effects); pending_human -> preserve all work and return MACC_TASK_RESULT: precondition_unmet with MACC_TASK_PRECONDITION: decision <id> pending. A newly recorded resolution may rotate this attempt automatically to refresh context. A rejected or expired request may be revised using decisions revise <id> --version <version> --file <request>; retain its task/kind, use a fresh idempotency_key, and preserve the prior rejection as history. Revision is a proposal, never inferred consent. For shared material choices specify a stable topic (or requirement_refs/affected_paths), consult existing bindings, and use supersedes:[{id,version}] to propose replacing one. Never privately override a recorded choice. Use response_fields:[{id,label,required,multiline,choices}] for structured input; missing_facts lists essential facts that cannot safely be assumed. The coordinator applies trusted governance rules, bounded source checks and current risk thresholds; investigating/rejected/conflict means preserve work and stop dependent work just like pending_human. For destructive/external execution use kind authorization with a stable operation_id and operation_spec:{adapter,target,source_revision,arguments}, referring to a trusted configured adapter. Invoke decisions operations execute <decision-id>; the native runner, not the performer, controls execution, persistent outcome and idempotency. Do not execute the external action directly after a reservation. A reservation is not proof of external completion: after an unknown result, reconcile rather than repeating a non-idempotent operation. To resolve a declared missing fact, use decisions investigate <id> --version <version> --facts-file <file>, a JSON map from the exact missing fact to {source_path,source_digest,excerpt}. source_digest is sha256: followed by the ordinary SHA-256 of exact source file bytes (sha256sum). Evidence must match actual bounded UTF-8 source bytes; exhausted investigation remains a scoped prerequisite block. Never keep the provider process waiting for a person.\n");
+        if let Some(planning) = &self.planning {
+            out.push_str(&format!("PLANNING ONLY — do not edit, stage, commit or implement source. The user choice is recorded but its graph effects must be applied first. For each pending answer {:?}, prepare a bounded Patch under .macc/tmp, using this plan {} at graph version {}. Preserve the recorded choice verbatim, scope and all governance gates. Invoke \"$MACC_DECISION_CLI\" --cwd \"$MACC_DECISION_ROOT\" decisions effects propose <decision-id> --version <version> --file <patch>. A successful proposal atomically applies the graph; end this invocation without implementation. The coordinator will start a fresh attempt. If the answer cannot be represented safely within its declared boundary, record a precise scoped prerequisite rather than guessing.\n",planning.requests,self.plan_id,self.graph_version));
+        }
         if self.policy.human_question_min_risk == Consultation::NeverAsk {
             out.push_str("NEVER ASK: select and implement your recommendation at any risk level, recording every material choice through the decision request command BEFORE dependent work relies on it. Never fabricate a human vote.\n");
         }

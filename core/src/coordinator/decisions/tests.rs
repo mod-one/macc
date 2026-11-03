@@ -405,7 +405,7 @@ fn autonomous_graph_proposal_is_committed_atomically_with_its_decision() {
 fn human_can_apply_recommended_graph_proposal_explicitly() {
     let (_tmp, mut store, plan, _, p) = fixture();
     let mut r = question("plan-change");
-    r.options = vec![OptionChoice {
+    r.options = vec![OptionChoice {proposed_patch:None,requires_replan:false,
         id: "apply".into(),
         label: "Apply the shown patch".into(),
         consequences: vec!["Adds a follow-up task".into()],
@@ -912,7 +912,7 @@ fn concurrent_human_answers_cannot_silently_override_subject_authority() {
 fn free_text_and_rejection_never_implicitly_apply_proposed_patch() {
     let (_tmp, mut s, plan, _, p) = fixture();
     let mut r = question("custom-answer");
-    r.options = vec![OptionChoice {
+    r.options = vec![OptionChoice {proposed_patch:None,requires_replan:false,
         id: "yes".into(),
         label: "Apply".into(),
         consequences: vec![],
@@ -1607,3 +1607,6 @@ fn wildcard_governance_cannot_be_bypassed_by_low_reported_risk() {
     assert_eq!(d.effective_risk, Risk::Critical);
     assert_eq!(d.status, "pending_human");
 }
+
+#[path = "tests_workflows.rs"]
+mod workflows;

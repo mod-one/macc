@@ -329,7 +329,10 @@ _replace_model_in_args() {
     fi
   done
   _arr_ref=("${_new[@]}")
-  $_found && _tier_model_applied_via_args=true
+  # Absence of a CLI model flag selects the config-file strategy. Under
+  # set -e it must not terminate Vibe (or another config-driven adapter).
+  if $_found; then _tier_model_applied_via_args=true; fi
+  return 0
 }
 
 # Strategy B: write the tier model directly to the tool's config file.

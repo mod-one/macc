@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub enum Action {
     /// Show current policy, pending requests and durable resolutions (JSON)
     List,
+    Analytics,
+    Related,
     Show {
         id: String,
     },
@@ -50,6 +52,48 @@ pub enum Action {
         challenge: bool,
         #[arg(long, default_value = "answer")]
         outcome: String,
+        #[arg(long, default_value = "auto")]
+        effects: String,
+        #[arg(long)]
+        patch_file: Option<PathBuf>,
+    },
+    Operator {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
+    },
+    Revise {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
+    },
+    Withdraw {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
+    },
+    Effects {
+        #[command(subcommand)]
+        action: EffectsAction,
+    },
+    Approval {
+        #[command(subcommand)]
+        action: ApprovalAction,
     },
     Transport {
         #[command(subcommand)]
@@ -85,6 +129,10 @@ pub enum Action {
         version: u64,
         #[arg(long)]
         reason: String,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
     },
     /// Reserve the exact authorized operation; retry only with verified idempotency
     Authorize {
@@ -128,7 +176,66 @@ pub enum Action {
     },
 }
 #[derive(Subcommand)]
+pub enum EffectsAction {
+    Propose {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    Apply {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
+    },
+}
+#[derive(Subcommand)]
+pub enum ApprovalAction {
+    Begin {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    Poll {
+        id: String,
+    },
+    Apply {
+        id: String,
+    },
+    List,
+}
+#[derive(Subcommand)]
 pub enum TransportAction {
+    /// Inspect signed divergence and explicitly choose local/remote for each conflict
+    ReconcilePreview {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        allowed_signers: PathBuf,
+        #[arg(long)]
+        choices_file: Option<PathBuf>,
+    },
+    /// Apply only the reviewed merged graph; incoming approvals remain evidence
+    ReconcileApply {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        allowed_signers: PathBuf,
+        #[arg(long)]
+        choices_file: Option<PathBuf>,
+        #[arg(long)]
+        expected_head: String,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
+    },
     Sign {
         #[arg(long)]
         key: PathBuf,
@@ -169,6 +276,10 @@ pub enum OperationAction {
         state: String,
         #[arg(long)]
         evidence: String,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
     },
 }
 #[derive(Subcommand)]
@@ -268,6 +379,15 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
         }
         return Ok(json!(policy));
     }
+    if matches!(action, Action::Analytics | Action::Related) {
+        let value = dm::snapshot(root)?;
+        return Ok(value[if matches!(action, Action::Analytics) {
+            "analytics"
+        } else {
+            "similar_requests"
+        }]
+        .clone());
+    }
     if matches!(action, Action::List) {
         return dm::snapshot(root);
     }
@@ -305,6 +425,12 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             | Action::Recover
             | Action::Export { .. }
             | Action::Graph { .. }
+            | Action::Transport { .. }
+            | Action::Operator { .. }
+            | Action::Approval { .. }
+            | Action::Revise { .. }
+            | Action::Withdraw { .. }
+            | Action::Effects { .. }
     ) {
         dm::inspect_plan(root)?
     } else {
@@ -316,6 +442,142 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
     | Action::Authorize { id, .. } = action
     {
         store.decision_in_scope(&plan, id)?;
+    }
+    if let Action::Operator {
+        file,
+        attestation_file,
+        challenge,
+    } = action
+    {
+        let actor = operator(root)?;
+        let intent = read(file, 262144)?;
+        if *challenge {
+            return store.operator_challenge(&intent);
+        }
+        let proof = attestation_file
+            .as_ref()
+            .map(|file| read(file, 65536))
+            .transpose()?;
+        return store.apply_operator(&intent, proof.as_ref(), &actor);
+    }
+    if let Action::Revise {
+        id,
+        version,
+        file,
+        attestation_file,
+        challenge,
+    } = action
+    {
+        let request = read(file, p.max_request_bytes)?;
+        if std::env::var_os("MACC_DECISION_ATTEMPT").is_some() {
+            let c = store.read_context(
+                &env("MACC_DECISION_PLAN")?,
+                &env("MACC_DECISION_ATTEMPT")?,
+                &env("MACC_DECISION_PHASE")?,
+            )?;
+            let d = store.decision_in_scope(&plan, id)?;
+            if c.task_id != d.request.task_id || c.plan_id != d.plan_id {
+                return Err(dm::error("Revision is outside this pinned task"));
+            }
+            return Ok(json!(store.revise_request(
+                id,
+                *version,
+                request,
+                &format!("agent:{}", c.task_id),
+                "agent",
+                &p,
+                None
+            )?));
+        }
+        let actor = operator(root)?;
+        let intent = dm::OperatorIntent::Revise {
+            id: id.clone(),
+            version: *version,
+            request,
+        };
+        if *challenge {
+            return store.operator_challenge(&intent);
+        }
+        let proof = attestation_file
+            .as_ref()
+            .map(|file| read(file, 65536))
+            .transpose()?;
+        return store.apply_operator(&intent, proof.as_ref(), &actor);
+    }
+    if let Action::Withdraw {
+        id,
+        version,
+        reason,
+        attestation_file,
+        challenge,
+    } = action
+    {
+        let actor = operator(root)?;
+        let intent = dm::OperatorIntent::Withdraw {
+            id: id.clone(),
+            version: *version,
+            reason: reason.clone(),
+        };
+        if *challenge {
+            return store.operator_challenge(&intent);
+        }
+        let proof = attestation_file
+            .as_ref()
+            .map(|file| read(file, 65536))
+            .transpose()?;
+        return store.apply_operator(&intent, proof.as_ref(), &actor);
+    }
+    if let Action::Effects { action } = action {
+        match action {
+            EffectsAction::Propose { id, version, file } => {
+                let patch = read(file, 262144)?;
+                if env("MACC_DECISION_PLAN")? != plan.id {
+                    return Err(dm::error("Effects proposal belongs to another plan"));
+                }
+                let d = store.propose_effects(
+                    id,
+                    *version,
+                    &patch,
+                    &env("MACC_DECISION_ATTEMPT")?,
+                    &env("MACC_DECISION_PHASE")?,
+                )?;
+                store.project(root)?;
+                return Ok(json!(d));
+            }
+            EffectsAction::Apply {
+                id,
+                version,
+                file,
+                attestation_file,
+                challenge,
+            } => {
+                let actor = operator(root)?;
+                let intent = dm::OperatorIntent::Effects {
+                    id: id.clone(),
+                    version: *version,
+                    patch: read(file, 262144)?,
+                };
+                if *challenge {
+                    return store.operator_challenge(&intent);
+                }
+                let proof = attestation_file
+                    .as_ref()
+                    .map(|file| read(file, 65536))
+                    .transpose()?;
+                return store.apply_operator(&intent, proof.as_ref(), &actor);
+            }
+        }
+    }
+    if let Action::Approval { action } = action {
+        let actor = operator(root)?;
+        return match action {
+            ApprovalAction::Begin { file } => {
+                Ok(json!(store.begin_approval(read(file, 262144)?, &actor)?))
+            }
+            ApprovalAction::Poll { id } => Ok(json!(store.poll_approval(id, &actor)?)),
+            ApprovalAction::Apply { id } => Ok(json!(store.apply_approval(id, &actor)?)),
+            ApprovalAction::List => Ok(json!(store.approval_tickets()?)),
+        };
     }
     match action {
         Action::Authorize { id, operation } => {
@@ -356,6 +618,65 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
         Action::Transport { action } => {
             operator(root)?;
             match action {
+                TransportAction::ReconcilePreview {
+                    file,
+                    allowed_signers,
+                    choices_file,
+                } => {
+                    let bundle = read(file, 4 * 1024 * 1024)?;
+                    let choices = choices_file
+                        .as_ref()
+                        .map(|f| read(f, 65536))
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok(json!(store.archive_review(
+                        &bundle,
+                        allowed_signers,
+                        &plan.id,
+                        &choices
+                    )?))
+                }
+                TransportAction::ReconcileApply {
+                    file,
+                    allowed_signers,
+                    choices_file,
+                    expected_head,
+                    attestation_file,
+                    challenge,
+                } => {
+                    let bundle = read(file, 4 * 1024 * 1024)?;
+                    let choices = choices_file
+                        .as_ref()
+                        .map(|f| read(f, 65536))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let review =
+                        store.archive_review(&bundle, allowed_signers, &plan.id, &choices)?;
+                    if review.local_head != *expected_head {
+                        return Err(dm::error("Local history changed since preview"));
+                    }
+                    if *challenge {
+                        let patch = review.patch.as_ref().ok_or_else(|| {
+                            dm::error("Resolve all conflicts; no graph change is ready")
+                        })?;
+                        return Ok(dm::graph_challenge(&plan, patch, None, &p));
+                    }
+                    let proof = attestation_file
+                        .as_ref()
+                        .map(|f| read(f, 65536))
+                        .transpose()?;
+                    let result = store.apply_archive_review(
+                        &bundle,
+                        allowed_signers,
+                        &plan.id,
+                        &choices,
+                        expected_head,
+                        &operator(root)?,
+                        proof.as_ref(),
+                    )?;
+                    store.project(root)?;
+                    Ok(json!(result))
+                }
                 TransportAction::Sign {
                     key,
                     principal,
@@ -433,13 +754,27 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                 version,
                 state,
                 evidence,
+                attestation_file,
+                challenge,
             } => {
                 let actor = operator(root)?;
                 let state = serde_json::from_value(json!(state))
                     .map_err(|_| dm::error("State must be succeeded, failed or reserved"))?;
-                Ok(json!(store.reconcile_operation(
-                    &plan.id, operation, *version, state, evidence, &actor
-                )?))
+                let intent = dm::OperatorIntent::Reconcile {
+                    plan_id: plan.id.clone(),
+                    operation: operation.clone(),
+                    version: *version,
+                    state,
+                    evidence: evidence.clone(),
+                };
+                if *challenge {
+                    return store.operator_challenge(&intent);
+                }
+                let proof = attestation_file
+                    .as_ref()
+                    .map(|file| read(file, 65536))
+                    .transpose()?;
+                store.apply_operator(&intent, proof.as_ref(), &actor)
             }
         },
         Action::Show { id } => Ok(json!(store.decision(id)?)),
@@ -495,6 +830,8 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             advisory,
             apply_patch,
             fields_file,
+            effects,
+            patch_file,
             attestation_file,
             challenge,
             outcome,
@@ -511,7 +848,15 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                 .as_ref()
                 .map(|path| read(path, p.max_request_bytes))
                 .transpose()?;
+            let effects = serde_json::from_value(json!(effects))
+                .map_err(|_| dm::error("Effects must be auto, no_graph_change or replan"))?;
+            let patch = patch_file
+                .as_ref()
+                .map(|file| read(file, 262144))
+                .transpose()?;
             let input = dm::AnswerInput {
+                effects,
+                patch,
                 attestation,
                 text: text.clone(),
                 option: option.clone(),
@@ -580,12 +925,24 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             id,
             version,
             reason,
-        } => Ok(json!(store.revoke(
-            id,
-            *version,
-            &operator(root)?,
-            reason
-        )?)),
+            attestation_file,
+            challenge,
+        } => {
+            let actor = operator(root)?;
+            let intent = dm::OperatorIntent::Revoke {
+                id: id.clone(),
+                version: *version,
+                reason: reason.clone(),
+            };
+            if *challenge {
+                return store.operator_challenge(&intent);
+            }
+            let proof = attestation_file
+                .as_ref()
+                .map(|file| read(file, 65536))
+                .transpose()?;
+            store.apply_operator(&intent, proof.as_ref(), &actor)
+        }
         Action::Graph { action } => {
             if matches!(action, GraphAction::Show) {
                 return Ok(json!(plan));
@@ -677,6 +1034,14 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             .map_err(|e| dm::error(e.to_string()))?;
             Ok(json!({"exported":file,"digest":dm::digest(&bundle)}))
         }
-        Action::Config { .. } | Action::List => unreachable!(),
+        Action::Config { .. }
+        | Action::List
+        | Action::Analytics
+        | Action::Related
+        | Action::Operator { .. }
+        | Action::Revise { .. }
+        | Action::Withdraw { .. }
+        | Action::Effects { .. }
+        | Action::Approval { .. } => unreachable!(),
     }
 }

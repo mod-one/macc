@@ -221,6 +221,7 @@ export interface ApiPendingApproval {
 }
 
 export interface ApiApprovalsResponse {
+  decision_trust_mode?: string;
   pending_approvals: ApiPendingApproval[];
   /** Identity decisions are recorded under when none is given. */
   default_actor: string;

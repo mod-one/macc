@@ -28,6 +28,10 @@ pub(super) enum Mutation {
         #[serde(default)]
         outcome: dm::AnswerOutcome,
         #[serde(default)]
+        effects: dm::AnswerEffects,
+        #[serde(default)]
+        patch: Option<dm::Patch>,
+        #[serde(default)]
         attestation: Option<dm::Attestation>,
         #[serde(default)]
         challenge: bool,
@@ -43,6 +47,8 @@ pub(super) enum Mutation {
         id: String,
         version: u64,
         reason: String,
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
     },
     PatchPreview {
         patch: dm::Patch,
@@ -70,6 +76,24 @@ pub(super) enum Mutation {
         version: u64,
         state: dm::OperationState,
         evidence: String,
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
+    },
+    Operator {
+        intent: dm::OperatorIntent,
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
+        #[serde(default)]
+        challenge: bool,
+    },
+    ApprovalBegin {
+        intent: dm::OperatorIntent,
+    },
+    ApprovalPoll {
+        id: String,
+    },
+    ApprovalApply {
+        id: String,
     },
     Recover,
 }
@@ -116,6 +140,10 @@ pub(super) async fn mutate(
                 | Mutation::PatchApply { .. }
                 | Mutation::PatchReconcile { .. }
                 | Mutation::Recover
+                | Mutation::Operator { .. }
+                | Mutation::ApprovalBegin { .. }
+                | Mutation::ApprovalPoll { .. }
+                | Mutation::ApprovalApply { .. }
         ) {
             dm::inspect_plan(root)?
         } else {
@@ -125,6 +153,30 @@ pub(super) async fn mutate(
             store.decision_in_scope(&plan, id)?;
         }
         let value = match action {
+            Mutation::Operator {
+                intent,
+                attestation,
+                challenge,
+            } => {
+                store.operator_in_scope(&plan, &intent)?;
+                if challenge {
+                    store.operator_challenge(&intent)?
+                } else {
+                    store.apply_operator(&intent, attestation.as_ref(), &actor)?
+                }
+            }
+            Mutation::ApprovalBegin { intent } => {
+                store.operator_in_scope(&plan, &intent)?;
+                json!(store.begin_approval(intent, &actor)?)
+            }
+            Mutation::ApprovalPoll { id } => {
+                store.operator_in_scope(&plan, &store.approval_ticket(&id)?.intent)?;
+                json!(store.poll_approval(&id, &actor)?)
+            }
+            Mutation::ApprovalApply { id } => {
+                store.operator_in_scope(&plan, &store.approval_ticket(&id)?.intent)?;
+                json!(store.apply_approval(&id, &actor)?)
+            }
             Mutation::Answer {
                 id,
                 version,
@@ -134,10 +186,14 @@ pub(super) async fn mutate(
                 apply_patch,
                 fields,
                 outcome,
+                effects,
+                patch,
                 attestation,
                 challenge,
             } => {
                 let input = dm::AnswerInput {
+                    effects,
+                    patch,
                     attestation,
                     text,
                     option,
@@ -164,7 +220,10 @@ pub(super) async fn mutate(
                 id,
                 version,
                 reason,
-            } => json!(store.revoke(&id, version, &actor, &reason)?),
+                attestation,
+            } => {
+                json!(store.revoke_attested(&id, version, &actor, &reason, attestation.as_ref())?)
+            }
             Mutation::PatchPreview { patch } => store.graph_preview(&plan, &patch)?,
             Mutation::PatchApply { patch, attestation } => {
                 let applied = store.apply_patch_attested(
@@ -204,8 +263,16 @@ pub(super) async fn mutate(
                 version,
                 state,
                 evidence,
-            } => json!(store
-                .reconcile_operation(&plan.id, &operation, version, state, &evidence, &actor)?),
+                attestation,
+            } => json!(store.reconcile_operation_attested(
+                &plan.id,
+                &operation,
+                version,
+                state,
+                &evidence,
+                &actor,
+                attestation.as_ref()
+            )?),
             Mutation::Recover => {
                 store.verify()?;
                 dm::recover(root)?;

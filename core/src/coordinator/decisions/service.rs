@@ -140,6 +140,15 @@ pub fn configure_attested(
         )?;
         sql(tx.commit())?;
     }
+    if updated.enabled {
+        if let Some(store) = control.as_mut() {
+            for plan in store.plans()? {
+                store.reevaluate_pending_locked(&plan, &updated)?;
+            }
+            store.project(root)?;
+        }
+    }
+
     Ok(updated)
 }
 pub fn snapshot(root: &Path) -> Result<Value> {
@@ -150,7 +159,7 @@ pub fn snapshot(root: &Path) -> Result<Value> {
     let (store, plan) = inspect_plan(root)?;
     let projection_error = active_plan(root).err().map(|e| e.to_string());
     Ok(
-        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?,"operations":store.operations(&plan.id)?,"delivery":store.delivery_status(&plan,&p)?}),
+        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?,"operations":store.operations(&plan.id)?,"delivery":store.delivery_status(&plan,&p)?,"approval_broker_available":super::secure::broker_available(&p),"approval_tickets":store.approval_tickets()?.into_iter().filter(|t|store.operator_in_scope(&plan,&t.intent).is_ok()).collect::<Vec<_>>(),"pending_approvals":crate::coordinator::approval::current_pending_approvals(root,&registry(root)?),"operator_identity":crate::service::coordinator_workflow::operator_identity(root),"analytics":store.decision_analytics(&plan)?,"similar_requests":store.similar_requests(&plan,&p)?}),
     )
 }
 
@@ -166,9 +175,30 @@ impl Store {
         advisory: bool,
         policy: &Policy,
     ) -> Result<Decision> {
+        self.feedback_attested(plan, task, text, actor, advisory, policy, None)
+    }
+    pub fn feedback_attested(
+        &mut self,
+        plan: &Plan,
+        task: &str,
+        text: &str,
+        actor: &str,
+        advisory: bool,
+        policy: &Policy,
+        proof: Option<&Attestation>,
+    ) -> Result<Decision> {
         if text.trim().is_empty() {
             return Err(error("Operator guidance must not be empty"));
         }
+        let actor = super::secure::mutation_authority(
+            &self.root,
+            "decision.feedback",
+            &super::secure::feedback_challenge(plan, task, text, advisory, policy)?,
+            actor,
+            proof,
+            policy,
+        )?;
+        let actor = actor.as_str();
         let request:Request=serde_json::from_value(json!({"idempotency_key":format!("feedback-{}",uuid::Uuid::new_v4()),"task_id":task,"kind":"feedback","scope":if task=="*"{"project"}else{"task"},"question":"Operator guidance","context":text,"recommendation":text,"investigated":["Direct operator instruction"],"impact":{"evidence":["Local operator"]}})).map_err(|e|error(e.to_string()))?;
         let mut human = policy.clone();
         human.human_question_min_risk = Consultation::Low;
@@ -183,13 +213,16 @@ impl Store {
             }
             return Err(error("This guidance already has a different binding status; revoke or explicitly revise it instead of silently changing its authority"));
         }
-        self.answer(
+        self.answer_details(
             &decision.id,
             decision.version,
-            text,
-            None,
+            &AnswerInput {
+                text: text.into(),
+                advisory,
+                attestation: proof.cloned(),
+                ..Default::default()
+            },
             actor,
-            advisory,
             policy,
         )
     }
@@ -208,7 +241,7 @@ impl Store {
                 {
                     continue;
                 }
-                if request.proposed_patch.is_some() {
+                if request.has_effects() {
                     return Err(error("Initial planner intake cannot apply runtime patches before its plan identity is issued"));
                 }
                 self.submit(plan, request, "planner baseline proposal", "agent", policy)?;
@@ -219,13 +252,28 @@ impl Store {
     pub fn submit(
         &mut self,
         plan: &Plan,
-        mut request: Request,
+        request: Request,
         actor: &str,
         origin: &str,
         policy: &Policy,
     ) -> Result<Decision> {
         let _fence = self.mutation_lock()?;
+        self.submit_locked(plan, request, actor, origin, policy, None, None)
+    }
+    pub(super) fn submit_locked(
+        &mut self,
+        plan: &Plan,
+        mut request: Request,
+        actor: &str,
+        origin: &str,
+        policy: &Policy,
+        previous: Option<&Decision>,
+        revision_audit: Option<&Value>,
+    ) -> Result<Decision> {
         policy.validate()?;
+        if previous.is_none() && request.revision_of.is_some() {
+            return Err(error("Use the versioned revision API to replace a request"));
+        }
         if actor.trim().is_empty() || !matches!(origin, "human" | "agent" | "coordinator") {
             return Err(error(
                 "Decision intake requires an attributed requester and recognized origin",
@@ -390,7 +438,12 @@ impl Store {
         {
             return Err(error("Shared-contract choices require a stable topic, requirement reference or affected path for cross-performer arbitration"));
         }
-        let proposed_graph = if let Some(patch) = &request.proposed_patch {
+        for patch in request.proposed_patch.iter().chain(
+            request
+                .options
+                .iter()
+                .filter_map(|o| o.proposed_patch.as_ref()),
+        ) {
             if origin != "human" {
                 if !patch.metadata_changes.is_empty() {
                     return Err(error(
@@ -430,13 +483,27 @@ impl Store {
                     }
                 }
             }
-            Some(self.preview_patch(plan, patch, &registry(&self.root)?)?)
+            self.preview_patch(plan, patch, &registry(&self.root)?)?;
+        }
+        let proposed_graph = request
+            .patch_for(request.recommended_option_id.as_deref())
+            .map(|patch| self.preview_patch(plan, patch, &registry(&self.root)?))
+            .transpose()?;
+        let requires_human_renewal =
+            previous.is_some_and(|d| d.status == "rejected" || d.requires_human_renewal);
+        let expired = if let Some(at) = &request.expires_at {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .map_err(|_| error("Request expiry must be RFC3339"))?
+                .timestamp()
+                <= chrono::Utc::now().timestamp()
         } else {
-            None
+            false
         };
         let unresolved =
             !triage.report.missing_sources.is_empty() || !request.missing_facts.is_empty();
         let automatic = !unresolved
+            && !requires_human_renewal
+            && !expired
             && (policy.human_question_min_risk == Consultation::NeverAsk
                 || triage.reuse.is_some()
                 || triage.standing.is_some()
@@ -459,6 +526,9 @@ impl Store {
             && (triage.standing.is_none()
                 || selected.is_some() && selected == request.recommended_option_id);
         let resolution = automatic.then(|| Resolution {
+            answered_version: None,
+            applied_patch: None,
+            effects: String::new(),
             text: reuse
                 .and_then(|d| d.resolution.as_ref())
                 .map(|r| r.text.clone())
@@ -485,15 +555,33 @@ impl Store {
             attestation: None,
             fields: Default::default(),
             outcome: String::new(),
-            patch_applied: apply_graph && request.proposed_patch.is_some(),
+            patch_applied: apply_graph && proposed_graph.is_some(),
         });
         let decision = Decision {
+            effects_commit: None,
             requester_actor: actor.into(),
             requester_origin: origin.into(),
             id: uuid::Uuid::new_v4().to_string(),
             plan_id: plan.id.clone(),
             version: 1,
-            status: if automatic {
+            status: if automatic && reuse.is_some_and(|d| d.status == "awaiting_effects") {
+                "waiting_dependency"
+            } else if automatic
+                && request
+                    .options
+                    .iter()
+                    .find(|o| Some(&o.id) == request.recommended_option_id.as_ref())
+                    .is_some_and(|o| o.requires_replan)
+                && proposed_graph.is_none()
+            {
+                "awaiting_effects"
+            } else if expired {
+                "expired"
+            } else if requires_human_renewal
+                && policy.human_question_min_risk == Consultation::NeverAsk
+            {
+                "investigating"
+            } else if automatic {
                 "resolved"
             } else if unresolved
                 && (policy.human_question_min_risk == Consultation::NeverAsk
@@ -508,6 +596,7 @@ impl Store {
             effective_risk: triage.risk,
             resolution,
             created_at: now(),
+            requires_human_renewal,
             subject_digest: subject,
             submission_digest: Some(submission_digest),
             domain: triage.domain,
@@ -536,11 +625,49 @@ impl Store {
             |r| r.get::<_, String>(0),
         ))?)?;
         current.decision_epoch += 1;
-        if automatic {
+        if let Some(old) = previous {
+            if old.status != "resolved" {
+                let mut retired: Decision = decode(&sql(tx.query_row(
+                    "SELECT payload FROM requests WHERE id=?1",
+                    [&old.id],
+                    |r| r.get::<_, String>(0),
+                ))?)?;
+                if retired.version != old.version || retired.status != old.status {
+                    return Err(error("Request changed during revision"));
+                }
+                retired.version += 1;
+                retired.status = "superseded".into();
+                sql(tx.execute(
+                    "UPDATE requests SET payload=?2 WHERE id=?1",
+                    rusqlite::params![retired.id, encode(&retired)?],
+                ))?;
+                event(
+                    &tx,
+                    &retired.plan_id,
+                    "decision.lifecycle",
+                    &json!({"actor":actor,"action":"revised","replacement":decision.id,"decision":retired}),
+                )?;
+            }
+        }
+        if let Some(audit) = revision_audit {
+            let mut audit = audit.clone();
+            audit["result_id"] = json!(decision.id);
+            audit["result_version"] = json!(decision.version);
+            event(&tx, &plan.id, "decision.mutation", &audit)?;
+        }
+        if decision.status == "resolved" {
             Self::supersede_in_transaction(&tx, &decision, &mut current)?;
         }
         if apply_graph {
-            if let (Some(patch), Some(graph)) = (&decision.request.proposed_patch, proposed_graph) {
+            if let (Some(patch), Some(graph)) = (
+                decision.request.patch_for(
+                    decision
+                        .resolution
+                        .as_ref()
+                        .and_then(|r| r.selected_option_id.as_deref()),
+                ),
+                proposed_graph,
+            ) {
                 super::graph::commit_graph(&tx, &mut current, patch, graph, actor)?;
             }
         }
@@ -596,11 +723,14 @@ impl Store {
         if actor.trim().is_empty() || text.trim().is_empty() {
             return Err(error("An attributed nonempty answer is required"));
         }
-        if text.len() > policy.max_request_bytes {
+        if encode(input)?.len() > policy.max_request_bytes {
             return Err(error("Answer exceeds configured decision budget"));
         }
         let pending = self.decision(id)?;
-        if pending.status == "resolved" || pending.status == "rejected" {
+        if matches!(
+            pending.status.as_str(),
+            "resolved" | "rejected" | "awaiting_effects"
+        ) {
             if pending.version == version + 1
                 && pending.resolution.as_ref().is_some_and(|r| {
                     r.actor
@@ -620,13 +750,43 @@ impl Store {
                             r.outcome.as_str()
                         }) == input.outcome.as_str()
                         && r.patch_applied == input.apply_patch
+                        && r.applied_patch == input.patch
+                        && (if r.effects.is_empty() {
+                            "auto"
+                        } else {
+                            r.effects.as_str()
+                        }) == input.effects.as_str()
                 })
             {
                 return Ok(pending);
             }
         }
+        let feedback_proof = pending.request.kind == "feedback"
+            && pending.request.context == text
+            && input
+                .attestation
+                .as_ref()
+                .is_some_and(|proof| proof.body.action == "decision.feedback");
         let secure_actor = if policy.trust_mode == "secure_approval" {
-            Some(super::secure::verify_attestation(&self.root,policy,input.attestation.as_ref().ok_or_else(||error("Secure response requires a signed attestation from an isolated approver; request an answer challenge"))?,"decision.answer",&digest(&super::secure::answer_challenge(&pending,input,policy)),chrono::Utc::now().timestamp())?)
+            let challenge = if feedback_proof {
+                super::secure::feedback_challenge(
+                    &self.plan(&pending.plan_id)?,
+                    &pending.request.task_id,
+                    text,
+                    advisory,
+                    policy,
+                )?
+            } else {
+                super::secure::answer_challenge(&pending, input, policy)
+            };
+            Some(super::secure::mutation_authority(
+                &self.root,
+                challenge["action"].as_str().unwrap(),
+                &challenge,
+                actor,
+                input.attestation.as_ref(),
+                policy,
+            )?)
         } else {
             None
         };
@@ -642,6 +802,14 @@ impl Store {
         {
             return Err(error(
                 "Approval artifact changed; obtain a fresh subject-bound request",
+            ));
+        }
+        if pending.request.expires_at.as_ref().is_some_and(|at| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .is_ok_and(|at| at.timestamp() <= chrono::Utc::now().timestamp())
+        }) {
+            return Err(error(
+                "The request expired; submit a reviewed revision before answering",
             ));
         }
         let mut current_request = pending.request.clone();
@@ -678,8 +846,12 @@ impl Store {
         if encode(&input.fields)?.len() + text.len() > policy.max_request_bytes {
             return Err(error("Response fields exceed the decision budget"));
         }
-        if input.apply_patch && pending.request.proposed_patch.is_none() {
-            return Err(error("There is no displayed graph patch to accept"));
+        let selected_patch = input
+            .patch
+            .as_ref()
+            .or_else(|| pending.request.patch_for(option.as_deref()));
+        if input.apply_patch && selected_patch.is_none() {
+            return Err(error("There is no displayed patch for this choice"));
         }
         if input.outcome == AnswerOutcome::Answer && !advisory {
             if let Some(domain) = &pending.domain {
@@ -706,24 +878,27 @@ impl Store {
         if input.apply_patch
             && (advisory
                 || input.outcome != AnswerOutcome::Answer
-                || option.is_none()
-                || option != pending.request.recommended_option_id)
+                || input.effects != AnswerEffects::Auto)
         {
-            return Err(error("Applying a patch requires an explicit binding acceptance of its displayed recommended option"));
+            return Err(error(
+                "Patch acceptance requires a binding answer and an unambiguous graph effect",
+            ));
         }
         let proposed_graph = if input.apply_patch {
-            if let Some(patch) = &pending.request.proposed_patch {
-                Some(self.preview_patch(
-                    &self.plan(&pending.plan_id)?,
-                    patch,
-                    &registry(&self.root)?,
-                )?)
-            } else {
-                None
-            }
+            Some(self.preview_patch(
+                &self.plan(&pending.plan_id)?,
+                selected_patch.unwrap(),
+                &registry(&self.root)?,
+            )?)
         } else {
             None
         };
+        let awaiting = input.outcome == AnswerOutcome::Answer
+            && !advisory
+            && !input.apply_patch
+            && (input.effects == AnswerEffects::Replan
+                || input.effects == AnswerEffects::Auto
+                    && (pending.request.has_effects() || input.patch.is_some()));
         let tx = sql(self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -759,17 +934,24 @@ impl Store {
             ));
         }
         decision.version += 1;
-        decision.status = if input.outcome == AnswerOutcome::Answer {
+        decision.status = if awaiting {
+            "awaiting_effects"
+        } else if input.outcome == AnswerOutcome::Answer {
             "resolved"
         } else {
             "rejected"
         }
         .into();
         decision.resolution = Some(Resolution {
+            answered_version: Some(version),
+            applied_patch: input.patch.clone(),
+            effects: input.effects.as_str().into(),
             text: text.into(),
             selected_option_id: option,
             actor: actor.into(),
-            origin: if secure_actor.is_some() {
+            origin: if secure_actor.is_some() && feedback_proof {
+                "human_feedback_secure"
+            } else if secure_actor.is_some() {
                 "human_secure_approval"
             } else {
                 "human_local_trust"
@@ -792,7 +974,7 @@ impl Store {
         if decision.status == "resolved" {
             Self::supersede_in_transaction(&tx, &decision, &mut plan)?;
         }
-        if let (Some(patch), Some(graph)) = (&decision.request.proposed_patch, proposed_graph) {
+        if let (Some(patch), Some(graph)) = (selected_patch, proposed_graph) {
             super::graph::commit_graph(&tx, &mut plan, patch, graph, actor)?;
         }
         save_plan(&tx, &plan)?;
@@ -807,10 +989,37 @@ impl Store {
         actor: &str,
         reason: &str,
     ) -> Result<Decision> {
+        self.revoke_attested(id, version, actor, reason, None)
+    }
+    pub fn revoke_attested(
+        &mut self,
+        id: &str,
+        version: u64,
+        actor: &str,
+        reason: &str,
+        proof: Option<&Attestation>,
+    ) -> Result<Decision> {
         let _fence = self.mutation_lock()?;
         if reason.trim().is_empty() {
             return Err(error("Revocation needs a reason"));
         }
+        if let Some(d) =
+            self.mutation_replay(id, version, "revoke", &json!(reason), actor, proof)?
+        {
+            return Ok(d);
+        }
+        let subject = self.decision(id)?;
+        let p = policy(&self.root)?;
+        let actor = super::secure::mutation_authority(
+            &self.root,
+            "decision.revoke",
+            &super::secure::revoke_challenge(&subject, reason, &p),
+            actor,
+            proof,
+            &p,
+        )?;
+        let actor = actor.as_str();
+        let audit = Self::mutation_audit(id, version, "revoke", &json!(reason), actor, proof);
         let tx = sql(self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate))?;
@@ -839,8 +1048,12 @@ impl Store {
             &tx,
             &plan.id,
             "decision.revoked",
-            &json!({"actor":actor,"reason":reason,"decision":decision}),
+            &json!({"actor":actor,"reason":reason,"attestation":proof,"decision":decision}),
         )?;
+        let mut audit = audit;
+        audit["result_id"] = json!(decision.id);
+        audit["result_version"] = json!(decision.version);
+        event(&tx, &plan.id, "decision.mutation", &audit)?;
         let mut descendants = std::collections::BTreeSet::from([decision.id.clone()]);
         let mut aliases: Vec<Decision> = {
             let mut statement = sql(tx.prepare("SELECT payload FROM requests"))?;
@@ -850,7 +1063,7 @@ impl Store {
         loop {
             let mut changed = false;
             for alias in &mut aliases {
-                if alias.status == "resolved"
+                if matches!(alias.status.as_str(), "resolved" | "waiting_dependency")
                     && alias
                         .reused_from
                         .as_ref()

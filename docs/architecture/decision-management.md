@@ -1,6 +1,6 @@
 # Decision management: local implementation
 
-The implementation is opt-in. `local_trust` attributes operator actions using Git identity. `secure_approval` verifies externally issued SSH attestations against an isolated, protected role registry; MACC holds no approver signing key. Signed archive/Git Notes transport is explicit and rejects divergent histories. Deployment qualification is distinct from implemented capability; see the [acceptance matrix](decision-management-acceptance.md).
+The implementation is opt-in. `local_trust` attributes operator actions using Git identity. `secure_approval` verifies externally issued SSH attestations against an isolated, protected role registry; MACC holds no approver signing key. Signed archive/Git Notes transport is explicit; divergent histories use a separate guided reconciliation workflow. Deployment qualification is distinct from implemented capability; see the [acceptance matrix](decision-management-acceptance.md).
 
 ## Enable and operate
 
@@ -98,7 +98,7 @@ macc decisions graph reconcile patch.json --source-digest sha256:INSPECTED_DIGES
 
 Operations support add/update, dependency add/remove, disable, supersede and decision bindings. Validation rejects cycles, dangling dependencies, ID reuse, forged execution history and changes to delivered tasks. Consumers of a retired task must be rewired/retired in the same patch. Active contracts require a stopped worker; explicit retirement quarantines incompatible completions without deleting their worktrees. Replaced tasks inherit applicable decisions through the supersession mapping.
 
-A performer may attach `proposed_patch` to a structured request. The same risk policy routes it. Autonomous resolution and graph commit share one SQLite transaction. For human intake, selecting an option and applying its patch are separate actions. Patch application additionally requires the explicit checkbox/TUI `F10` or CLI `--apply-patch`, the displayed recommended option, a binding answer and a current graph version. Free text, advisory responses, rejection and request-changes cannot implicitly apply a patch. Agent proposals cannot remove approval dependencies or rewrite governance. The standalone audit produces patch proposals rather than rewriting protected PRDs.
+A performer may attach `proposed_patch` to a structured request. The same risk policy routes it. Autonomous resolution and graph commit share one SQLite transaction. For human intake, selecting an option and applying its patch are separate actions. Patch application additionally requires the explicit checkbox/TUI `F10` or CLI `--apply-patch`, the displayed selected option’s patch, a binding answer and a current graph version. Free text, advisory responses, rejection and request-changes cannot implicitly apply a patch. Agent proposals cannot remove approval dependencies or rewrite governance. The standalone audit produces patch proposals rather than rewriting protected PRDs.
 
 CAS rejects competing graph versions; idempotency prevents duplicate commits. An outbox projects accepted graphs into the PRD and updates queue fingerprints. Recovery recognizes earlier accepted projections, repairs missing exports and refuses to overwrite unknown edits. Explicit reconciliation preserves the inspected external JSON in the journal.
 
@@ -140,7 +140,7 @@ These keys belong under `automation.coordinator.decisions`. Rules may also match
 
 A performer can supply a fact map through `decisions investigate ID --version N --facts-file facts.json`. Each exact missing fact maps to `{source_path, source_digest, excerpt}`. `source_digest` is `sha256:` plus ordinary SHA-256 of the UTF-8 file bytes, compatible with `sha256sum`. MACC verifies actual bounded source bytes and the exact excerpt before resolving it, retaining attribution and evidence. Exhaustion produces a scoped prerequisite diagnostic rather than repeated AI calls or invented facts.
 
-The first resolved binding for a typed subject governs later proposals. A competing performer receives its recorded outcome and a `reused_from` reference; it cannot privately apply a contradictory proposal. Replacing that outcome requires `supersedes: [{id, version}]`. Native reconciliation also replaces derived aliases; revoking their originating authority revokes those aliases too. Independent human bindings require explicit references. Existing guidance cannot supply a fresh approval/operation authorization. Rejections remain blocking until explicitly addressed/revoked. Changed policy thresholds re-evaluate unanswered requests at a scheduler boundary without rewriting old human choices.
+The first resolved binding for a typed subject governs later proposals. A competing performer receives its recorded outcome and a `reused_from` reference; it cannot privately apply a contradictory proposal. Replacing that outcome requires `supersedes: [{id, version}]`. Native reconciliation also replaces derived aliases; revoking their originating authority revokes those aliases too. Independent human bindings require explicit references. Existing guidance cannot supply a fresh approval/operation authorization. Rejections remain blocking until explicitly addressed/revoked. Changed policy thresholds re-evaluate unanswered requests under the publication fence before configuration returns without rewriting old human choices.
 
 The CLI accepts `--fields-file response.json`, `--outcome answer|reject|request_changes` and `--apply-patch`. Approvals/authorizations need explicit evidence for a positive human answer. Web and TUI preserve multiline text, structured fields and unsent drafts. Web exposes distinct delivery, acknowledgement and independent compliance status; exact context/receipt inspection remains available in both clients.
 
@@ -246,3 +246,108 @@ Import requires the same repository ancestry and a verified signature. Existing 
 Executed local suites cover native governance/intake, arbitration with concurrent stores, exact responses, graph CAS/history, editing, context/checkpoint/lease safeguards, receipt/ACK/review, operation output/timeout/unknown outcomes, SSH signature negatives, signed transfer into a Git clone, backup/recovery and client drafts/accessibility. A fake provider exercises the actual performer shell/shared runner/CLI path. See the [AT01–AT68 matrix](decision-management-acceptance.md) for the evidence and its limits.
 
 Live provider qualification, a deployed organization's human-authenticated approver, real browser/device visual checks, and production-scale/cross-platform fault qualification remain deployment work. The matrix deliberately does not label all 68 full scenarios passed from unit tests alone.
+
+## Request lifecycle and answer effects
+
+Options may each carry their own `proposed_patch` and `requires_replan`. A selected alternative uses that alternative's patch. The legacy request-level patch belongs to the recommended choice; it is never silently applied for another answer. Positive human responses accept `effects: auto | no_graph_change | replan` and optional explicit `patch`. The CLI exposes `--effects` and `--patch-file`; the Web form and TUI Home actions expose the same choices.
+
+`awaiting_effects` means the answer is durably recorded but dependent implementation cannot resume yet. The coordinator can dispatch the originating development task in **planning-only** mode, within `investigation.max_rounds`. Its delivered context authorizes a mechanical DAG proposal through:
+
+```sh
+"$MACC_DECISION_CLI" --cwd "$MACC_DECISION_ROOT" decisions effects propose ID --version N --file effects.json
+```
+
+The native service verifies the issued planning receipt, unchanged retained source/Git state, current decision/version, affected tasks, path boundary and governance. Planning cannot rewrite project policy, remove an approval requirement or change an unrelated task. New tasks inherit the recorded answer even when they are independent of the old dependency chain. Applying effects and resolving the answer share one control transaction. Planning completion cannot count as implementation success: the coordinator must issue a fresh implementation context. Other tasks continue. A derived answer stays `waiting_dependency` until its originating effects are resolved; revocation also invalidates derived answers.
+
+A human may explicitly confirm `no_graph_change` when the current DAG is adequate. Advisory feedback and rejected/request-changes responses never apply a graph patch. Their exact text remains immutable evidence. Separate `answered_version` and `effects_commit` preserve the original signed response after planning changes the decision version.
+
+```sh
+macc decisions revise ID --version N --file revised-request.json
+macc decisions withdraw ID --version N --reason 'Superseded proposal'
+macc decisions revoke ID --version N --reason 'Binding no longer applies'
+macc decisions effects apply ID --version N --file reviewed-effects.json
+```
+
+A revision has a new idempotency key and `revision_of` lineage. Replacement of an already resolved binding uses explicit supersession. Revision of a rejected request retains the need for a new human answer; `never_ask` cannot turn the earlier rejection into consent. Optional `expires_at` is RFC3339; an expired request remains a scoped prerequisite until reviewed revision/withdrawal. Exact lifecycle retries are idempotent and signed revision/revocation/withdrawal evidence is retained transactionally. Web provides guided revision/reason forms; TUI **Home** opens lifecycle, gates/roles, external operations, independent approvals and diagnostics. Very small terminals use a full-screen fallback with visible send/escape keys.
+
+## Independent approval connector
+
+The protected registry may configure an external command connector:
+
+```json
+{
+  "allowed_signers": "/etc/macc/allowed_signers",
+  "roles": {"owner@example.test": ["OWNER"]},
+  "required_roles": {
+    "decision.answer": ["OWNER"], "decision.feedback": ["OWNER"],
+    "decision.revise": ["OWNER"], "decision.withdraw": ["OWNER"],
+    "decision.revoke": ["OWNER"], "decision.effects.apply": ["OWNER"],
+    "operation.reconcile": ["OWNER"], "gate.vote": ["OWNER"],
+    "graph.mutate": ["OWNER"], "policy.configure": ["OWNER"],
+    "transport.import": ["OWNER"]
+  },
+  "broker": {"command": ["/opt/macc-approver/bin/connector"], "timeout_seconds": 30}
+}
+```
+
+The executable and its implementation/dependencies must remain outside performer control. The administrator installs the connector under the independent service/principal; MACC does not install a signing key or invent an organization's authentication policy. No network credential is inherited automatically. MACC invokes the protected executable with a clean environment, bounded output and a 1–120 second deadline per exchange. It never holds a control mutation lock while waiting for a human or connector response.
+
+The connector reads one canonical JSON object from stdin:
+
+```json
+{"protocol":1,"operation":"begin","request_id":null,"challenge":{"action":"decision.answer"},"action_digest":"sha256:..."}
+```
+
+`challenge` is the **complete native action**, not the abbreviated illustration above. Poll uses `operation: "poll"` and the connector's previously returned request ID. The response is exactly one of:
+
+```json
+{"status":"pending","request_id":"opaque-request-id","approval_url":"https://approver.example.test/review/42"}
+{"status":"approved","attestation":{"body":{},"signature":"..."}}
+{"status":"rejected","reason":"Required independent review declined"}
+```
+
+An approved response contains the complete signed attestation defined earlier. The connector must independently authenticate the person, display the exact challenge, require deliberate approval and preserve its subject/action digest. It must not sign every request automatically. Approval links require HTTPS, apart from explicit localhost HTTP callbacks. No connector process waits open for the person: it returns `pending`, and later polls are separate bounded invocations.
+
+MACC persists a versioned ticket with `pending`, `approved`, `applying`, `applied`, `rejected`, `expired` or `stale` state. Repeated begin requests deduplicate; concurrent ticket updates use CAS. A verified external approval still requires explicit **Apply**. Changed subjects/policies invalidate the ticket. Crash recovery recognizes an already committed exact action before replaying anything. Ticket state alone cannot grant authority; the native mutation verifies the isolated signature. Revocations and manual operation reconciliation now require their own exact action proofs in secure mode. A trusted configured outcome probe remains distinct from an operator claim.
+
+The Web/TUI normally show the approval page, current status, **Check**, and explicit **Apply**; draft text is retained. The ordinary gate window also routes secure votes through this connector. Gate principal/role must match the independently authenticated identity. A signed gate request may predate the approver's attestation by up to one hour to accommodate review; future timestamps are rejected, and the earlier request time does not extend vote TTL. Manual challenge/attestation entry remains an advanced fallback when no connector is configured.
+
+```sh
+macc decisions approval begin --file operator-intent.json
+macc decisions approval list
+macc decisions approval poll TICKET_ID
+macc decisions approval apply TICKET_ID
+macc decisions operator --file operator-intent.json --challenge
+```
+
+`OperatorIntent` is the shared typed API for answer, feedback, revision, withdrawal, revocation, effects, graph editing, gate vote, policy and operation reconciliation. HTTP mutations retain owner/authentication checks and reject actions/tickets from a different selected plan/reference branch. The native gate route repeats the established readiness, role, revision, evidence/reason and quorum validation.
+
+## Guided signed-history reconciliation and diagnostics
+
+Fast-forward signed import still refuses to replace a diverged local ledger. A separate operator workflow now verifies the full incoming archive in an isolated in-memory database, finds the common event ancestor and constructs a three-way graph review:
+
+```sh
+macc decisions transport reconcile-preview --file incoming.json --allowed-signers /trusted/signers
+# choices.json: {"/tasks/A/title":"local", "/tasks/C/title":"remote"}
+macc decisions transport reconcile-preview --file incoming.json --allowed-signers /trusted/signers --choices-file choices.json
+macc decisions transport reconcile-apply --file incoming.json --allowed-signers /trusted/signers --choices-file choices.json --expected-head sha256:REVIEWED_LOCAL_HEAD
+```
+
+Every conflicting field needs an explicit local/remote choice. The apply command requires stopped execution, the reviewed local event head, ordinary graph invariants and isolated graph approval when configured (`--challenge` / `--attestation-file`). It records the signed incoming evidence and graph mutation in the same transaction. Incoming votes, decisions, contexts, reservations and process ownership do **not** become local authority. Directions in the incoming evidence can be adopted through the normal local revision/answer workflow. Delivered/archived history cannot be overwritten. No branch or worktree deletion is added. This supports reviewed stopped-history reconciliation, not distributed simultaneous coordinator ownership.
+
+`macc decisions analytics` reports observed state/risk/provenance counts, response latency, reused answers, planning attempts and operation outcomes. Web/TUI expose the same diagnostics. Optional `similarity_hints: true`, `similarity_max_candidates: 128` (maximum 512) and `similarity_min_percent: 75` enable bounded lexical/domain suggestions. They consume the configured source-byte budget, return at most 32 pairs and never merge consent. No additional model call or speculative token/cost saving is inferred. Advanced semantic models, paid AI triage and vendor-specific enterprise connectors remain the explicitly optional post-release work package E; the generic isolated connector is available now.
+
+## Reproducing qualification
+
+The acceptance matrix includes exact tests for alternative patches, rejection/revision, bounded planning, broker signature/staleness/recovery, 20 simultaneous native context workers and actual child-process death after graph commit/external effects. The adapter matrix executes all five shipped shell wrappers and their ToolSpecs twice, replacing only provider executables with controlled processes. This validates MACC's prompt/receipt path; it does not certify changing live provider behavior.
+
+```sh
+cargo test -p macc-core --lib
+cargo test -p macc-cli --test session_store_runner
+cargo test -p macc-tui decision
+npm --prefix web test -- src/components/DecisionCenter.test.tsx src/components/ApprovalDialog.test.tsx
+npm --prefix web run build
+python3 automat/tests/decision_browser.py --browser /path/to/chromium --report /tmp/decision-browser.json
+```
+
+The browser harness serves a local component fixture with mocked API responses, checks actual 320/768/1440-pixel viewport layout and deferred drafts, and downloads nothing. Missing Chromium produces `not_run` and exit 77. It does not certify screen-reader behavior or native backend deployment. Existing `automat/tests/o2_real_tools.py` remains an explicitly opt-in, budgeted real-provider transport qualification tool; its default validates the plan without model calls. Deployed independent identity/authentication, screen readers, live providers and non-Unix operation capture still require their actual environment.

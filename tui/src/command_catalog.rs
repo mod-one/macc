@@ -100,6 +100,7 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
     if state.decision_center.open {
         return rows(vec![
             ("F1", "All decision shortcuts"),
+            ("Home", "Lifecycle / approvals / operations"),
             ("F2", "Next decision / history"),
             ("Tab", "Choose option"),
             ("F5", "Send answer"),

@@ -1,6 +1,6 @@
 # Decision management acceptance evidence
 
-Updated 2026-11-03. This tracks the [baseline](../prd/MACC_Decision_Management_Architecture_Baseline.md) without changing its accepted requirements or its historical source audit.
+Updated 2026-11-03, extended implementation. This tracks the [baseline](../prd/MACC_Decision_Management_Architecture_Baseline.md) without changing its accepted requirements or its historical source audit.
 
 `Component/integration coverage` means the named tests exercise the implemented contract. It is **not** a claim that the full production scenario, all providers, a deployed isolated broker or all operating systems were certified. The source test names below are directly searchable.
 
@@ -14,23 +14,28 @@ Updated 2026-11-03. This tracks the [baseline](../prd/MACC_Decision_Management_A
 | G6 | Persistence, projection replay, backup, migration and approval reuse | `backup_is_consistent_restores_identity_and_never_rolls_back_newer_history`, `projection_tampering_and_event_corruption_fail_closed`, `content_equivalent_approval_requires_manifest_and_current_matching_bytes`, existing recovery/session suites |
 | G7 | One-shot execution, unknown outcomes, missing authority | `operation_runner_persists_success_and_never_blindly_repeats_unknown`, `journal_detects_forged_operation_state_and_recovery_preserves_ambiguity`, `bounded_investigation_blocks_without_fabricating_missing_sources` |
 | G8 | Isolated approval, signed import and remote API access | `secure_mode_rejects_missing_or_same_principal_registry`, `signature_verifier_checks_exact_payload_principal_and_namespace`, `signed_transport_enrolls_empty_clone_and_rejects_tampering_or_rollback`; Web remote-auth tests |
-| G9 | Responsive editing, no focus theft, multiline input and accessibility | Web `DecisionCenter.test.tsx` (10 tests including axe); TUI `decision_center` tests (6 cases, multiple terminal dimensions) |
-| G10 | Parallel scheduling and subtree fencing | Concurrent two-store arbitration plus independent-scope/context tests; 20-worker production-scale qualification remains outstanding |
+| G9 | Responsive editing, no focus theft, multiline input and accessibility | Web `DecisionCenter.test.tsx` and `ApprovalDialog.test.tsx` (including axe, exact alternative/replan effects, broker flow, deferred drafts and `never_ask` ordering); TUI lifecycle/structured tests, actual buffer assertions for visible F5/Esc at small dimensions. `automat/tests/decision_browser.py` provides opt-in real Chromium layout checks. |
+| G10 | Parallel scheduling and subtree fencing | `twenty_parallel_workers_share_authority_and_only_affected_subtree_waits` executes 20 simultaneous native context workers; full production scheduler/load qualification remains distinct. |
+| G11 | Alternative effects, explicit replanning, lifecycle and renewal | `alternative_option_b_applies_its_own_patch_and_exact_negative_constraint`, `custom_answer_waits_for_effects_new_tasks_inherit_and_planning_never_completes_implementation`, `planning_rejects_retained_source_edits_and_unrelated_graph_mutations`, `rejection_revision_withdrawal_and_revocation_are_versioned_and_idempotent`, `expired_requests_and_bounded_planning_remain_scoped_prerequisites`, `delegation_waits_for_replan_and_shared_alias_waits_for_parent_effects` |
+| G12 | Persistent independent approval connector and privileged lifecycle | `broker_workflow_persists_deduplicates_checks_signatures_and_recovers_committed_action`, `broker_marks_changed_subject_stale_and_secure_revocation_requires_exact_proof`, `secure_feedback_remains_bound_after_risk_threshold_change_but_not_forged`, `independent_gate_review_can_take_minutes_without_forging_later_vote_time`. Fixtures inject the registry source only; SSH signature/action/role checks execute normally. This does not certify OS isolation or real human authentication. |
+| G13 | Guided signed divergence and bounded diagnostics | `signed_divergence_has_explicit_three_way_choices_and_preserves_local_authority`, `analytics_and_related_candidates_never_create_consent_or_unbounded_work` |
+| G14 | Actual process death, committed WAL/outbox and ambiguous external effects | `process_crash_replays_committed_wal_outbox_and_clear_retains_decisions_and_source`, `actual_owner_death_after_external_effect_is_unknown_and_never_reexecutes` |
+| G15 | Every shipped runner/provider contract | `all_five_shipped_adapters_deliver_exact_decisions_on_initial_and_reused_invocations`: actual Claude/Codex/Gemini/AGY/Vibe shell wrappers and ToolSpecs, two calls per adapter, controlled provider processes, native receipts/ACKs, passive and structured capture where declared. Live provider behavior is not inferred. |
 
-Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [isolated verification tests](../../core/src/coordinator/decisions/secure.rs), [runner integration](../../cli/tests/support/performer_lifecycle.rs), [Web](../../web/src/components/DecisionCenter.test.tsx), [TUI](../../tui/src/decision_center.rs).
+Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [new lifecycle/fault/approval scenarios](../../core/src/coordinator/decisions/tests_workflows.rs), [isolated verification tests](../../core/src/coordinator/decisions/secure.rs), [runner integration](../../cli/tests/support/performer_lifecycle.rs), [five-adapter matrix](../../cli/tests/support/decision_adapter_matrix.rs), [Web](../../web/src/components/DecisionCenter.test.tsx), [TUI](../../tui/src/decision_center.rs), [browser qualification harness](../../automat/tests/decision_browser.py).
 
 | Acceptance ID | Baseline scenario | Evidence / qualification |
 |---|---|---|
-| AT01 | Planner creates a known sensitive decision gate | G1 — component/integration coverage; real planner/provider behavior must be qualified. |
+| AT01 | Planner creates a known sensitive decision gate | G1 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT02 | Performer encounters an unplanned architecture decision | G2 — component/integration coverage. |
-| AT03 | Reviewer discovers policy conflict during review | G2 — component/integration coverage; real planner/provider behavior must be qualified. |
-| AT04 | Human chooses option B instead of agent recommendation A, with extra remark | G3 — component/integration coverage. |
+| AT03 | Reviewer discovers policy conflict during review | G2 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
+| AT04 | Human chooses option B instead of agent recommendation A, with extra remark | G3/G11/G12 — exact native and client workflow coverage; independent deployment remains separately qualified. |
 | AT05 | New task and dependency are inserted during active run | G4 — component/integration coverage. |
 | AT06 | A patch introduces a dependency cycle | G4 — component/integration coverage. |
 | AT07 | Two agents propose patches against the same graph version | G4 — component/integration coverage. |
 | AT08 | Patch affects an active worktree/task | G4 — component/integration coverage. |
 | AT09 | Patch changes an already merged task | G4 — component/integration coverage. |
-| AT10 | Coordinator process crashes after graph DB commit but before PRD projection | G6 — component/integration coverage. |
+| AT10 | Coordinator process crashes after graph DB commit but before PRD projection | G6/G14 — a separate process exits after native graph commit without dropping the SQLite connection; committed WAL/outbox is recovered. |
 | AT11 | `macc clear` runs after an approval and dynamic patch | G6 — component/integration coverage. |
 | AT12 | Coordinator restarts after clear on unchanged subject | G6 — component/integration coverage. |
 | AT13 | Same artifact, different SHA under `content_equivalent` | G6 — component/integration coverage. |
@@ -40,12 +45,12 @@ Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [
 | AT17 | Unsigned forged Git note claims human approval | G8 — component/integration coverage; isolated deployment and human authentication require external qualification. |
 | AT18 | Same-UID agent calls a privileged approval CLI in local-trust mode | G8 — component/integration coverage; isolated deployment and human authentication require external qualification. |
 | AT19 | PRD manually edited while coordinator runs | G4 — component/integration coverage. |
-| AT20 | `audit-prd` suggests changing an approved ADR | G2 — component/integration coverage; real planner/provider behavior must be qualified. |
+| AT20 | `audit-prd` suggests changing an approved ADR | G2 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT21 | Restart with missing/corrupt graph event segment | G6 — component/integration coverage. |
-| AT22 | 20 parallel workers and a decision affects only one feature subtree | G10 — component/integration coverage; full-scale/cross-process crash exercise remains a release qualification. |
+| AT22 | 20 parallel workers and a decision affects only one feature subtree | G10 — 20 simultaneous native context workers exercised; production coordinator scheduling/throughput still needs load qualification. |
 | AT23 | Approval quorum contains multiple required roles | G1 — component/integration coverage; isolated deployment and human authentication require external qualification. |
 | AT24 | Web server exposed beyond localhost attempts anonymous mutation | G8 — component/integration coverage. |
-| AT25 | User selects B and adds a negative constraint while performer expected A | G3 — component/integration coverage. |
+| AT25 | User selects B and adds a negative constraint while performer expected A | G3/G11/G12 — exact native and client workflow coverage; independent deployment remains separately qualified. |
 | AT26 | User adds an applicable remark after a task is already running; DAG topology unchanged | G5 — component/integration coverage. |
 | AT27 | Graph patch dynamically inserts a new task | G4 — component/integration coverage. |
 | AT28 | Reviewer receives the same affected task as the performer | G5 — component/integration coverage. |
@@ -62,15 +67,15 @@ Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [
 | AT39 | An unrelated graph branch or advisory note changes while another task runs | G5 — component/integration coverage. |
 | AT40 | Context is regenerated twice with unchanged pinned content but different issuance timestamps/rendering | G5 — component/integration coverage. |
 | AT41 | A runner echoes the right digest but never receives a mandatory constraint in its effective prompt | G5 — component/integration coverage. |
-| AT42 | Migration or clear races an active SQLite writer, including uncheckpointed WAL data | G6 — component/integration coverage; full-scale/cross-process crash exercise remains a release qualification. |
-| AT43 | Crash occurs after reserving a one-shot authorization but before observing the external operation result | G7 — component/integration coverage; full-scale/cross-process crash exercise remains a release qualification. |
+| AT42 | Migration or clear races an active SQLite writer, including uncheckpointed WAL data | G6/G14 — consistent backup, uncheckpointed committed WAL and post-clear projection recovery exercised. The complete live clear/migration race remains release qualification; these are distinct scenarios. |
+| AT43 | Crash occurs after reserving a one-shot authorization but before observing the external operation result | G7/G14 — actual execution owner is killed after a controlled external effect; recovery records unknown and refuses a second execution. Trusted service-specific outcome/idempotency still requires deployment evidence. |
 | AT44 | An already approved human gate is the last remaining PRD entry | G4 — component/integration coverage. |
-| AT45 | A performer encounters routine naming/local implementation choices, even with threshold `low` | G3 — component/integration coverage; real planner/provider behavior must be qualified. |
-| AT46 | A material unresolved choice has effective risk exactly equal to the configured threshold | G1 — component/integration coverage; real planner/provider behavior must be qualified. |
+| AT45 | A performer encounters routine naming/local implementation choices, even with threshold `low` | G3 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
+| AT46 | A material unresolved choice has effective risk exactly equal to the configured threshold | G1 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT47 | User raises threshold from `high` to `critical`, then a new high-risk choice within explicit delegated scope arises | G3 — component/integration coverage. |
 | AT48 | Threshold is `critical` but an explicit human gate, binding-policy conflict or fresh operation authorization requires intervention | G1 — component/integration coverage. |
 | AT49 | High-risk task encounters a choice already answered by an applicable verified decision/policy | G2 — component/integration coverage. |
-| AT50 | Model reports low confidence, or proposes an unsupported lower risk class | G1 — component/integration coverage; real planner/provider behavior must be qualified. |
+| AT50 | Model reports low confidence, or proposes an unsupported lower risk class | G1 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT51 | User changes the threshold while human requests are pending | G3 — component/integration coverage. |
 | AT52 | One performer asks an important question while independent tasks remain ready; response changes instructions but no dependencies | G5 — component/integration coverage. |
 | AT53 | Invalid autonomy value is entered or the same policy is edited through CLI/TUI/web | G1 — component/integration coverage. |
@@ -78,14 +83,14 @@ Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [
 | AT55 | Parallel/reused tool sessions discover the same unresolved decision, or a tool attempts a direct interactive question | G2 — component/integration coverage. |
 | AT56 | A Web question with long context/options is opened on a narrow/mobile viewport and then resized | G9 — component/integration coverage; real browser/device/terminal visual qualification remains. |
 | AT57 | TUI receives a long question in a small terminal, then terminal dimensions change | G9 — component/integration coverage; real browser/device/terminal visual qualification remains. |
-| AT58 | Performer submits a clarification, option choice, approval or specific structured request | G3 — component/integration coverage. |
+| AT58 | Performer submits a clarification, option choice, approval or specific structured request | G3/G11/G12 — exact native and client workflow coverage; independent deployment remains separately qualified. |
 | AT59 | A new request arrives while the operator is typing, another popup is open or the user defers a request | G9 — component/integration coverage. |
-| AT60 | Double-submit, transient disconnection, stale subject or two clients answering the same request | G3 — component/integration coverage. |
-| AT61 | `never_ask` encounters low through critical questions, including a MACC human-approval declaration | G3 — component/integration coverage; real planner/provider behavior must be qualified. |
+| AT60 | Double-submit, transient disconnection, stale subject or two clients answering the same request | G3/G11/G12 — exact native and client workflow coverage; independent deployment remains separately qualified. |
+| AT61 | `never_ask` encounters low through critical questions, including a MACC human-approval declaration | G3 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT62 | Human or autonomous decision occurs under each of the five selector values, then a downstream/reused/new task starts | G3 — component/integration coverage. |
-| AT63 | Operator enters `never_ask` with pending dialogs and unsent human text, then later returns to a threshold | G3 — component/integration coverage. |
+| AT63 | Operator enters `never_ask` with pending dialogs and unsent human text, then later returns to a threshold | G3/G11/G12 — exact native and client workflow coverage; independent deployment remains separately qualified. |
 | AT64 | User answers by keyboard/screen reader, with color unavailable and long multiline input | G9 — component/integration coverage; real browser/device/terminal visual qualification remains. |
-| AT65 | `never_ask` lacks necessary credentials, independent external approval evidence or indispensable factual input | G7 — component/integration coverage; real planner/provider behavior must be qualified. |
+| AT65 | `never_ask` lacks necessary credentials, independent external approval evidence or indispensable factual input | G7 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT66 | Parallel performers recommend conflicting autonomous changes to a shared contract | G2 — component/integration coverage. |
 | AT67 | An autonomous choice cannot be durably recorded or required context projection is unavailable | G5 — component/integration coverage. |
 | AT68 | User or another authorized agent inspects an autonomous decision from a different task/client | G5 — component/integration coverage. |
@@ -96,8 +101,16 @@ Reproduction commands:
 cargo test -p macc-core --lib
 cargo test -p macc-cli -p macc-tui decision
 cargo test -p macc-cli --test session_store_runner
-npm --prefix web test -- src/components/DecisionCenter.test.tsx
+npm --prefix web test -- src/components/DecisionCenter.test.tsx src/components/ApprovalDialog.test.tsx
 npm --prefix web run build
 ```
 
-The complete core suite passed 1,209 tests (2 deliberately opt-in external installation tests ignored), the runner suite passed 22, and the Web decision suite passed 10. The final coordinator suite, including scoped-plan and wildcard-policy regressions, passed 471 tests. The workspace check also passed. Client and runner checks are reported separately. No live provider calls, installed organization approver, production deployment or Git network publication is inferred from those results.
+Validation results are recorded only for the executed checkout below. A passing component or harness is not blanket certification of all 68 production acceptance scenarios.
+
+The complete core run passed **1,228 tests**, with **2 intentionally opt-in external-installation cases ignored**. The focused decision suite passed **63**, the full runner integration suite passed **23**, and the Web decision/approval suites passed **23**. The Web production build and browser-fixture TypeScript check passed. The full TUI suite passed **146** tests and `cargo check --workspace` passed. The shared-runner Bash syntax and browser-harness Python syntax checks also passed. No live provider call, deployed independent human-authentication service, Git network publication or screen-reader certification is inferred.
+
+The real Chromium harness was invoked in this environment and returned `not_run` (exit 77): no compatible browser executable is installed. Its fixture and report mechanism are present; a visual pass is **not** claimed. Existing JSDOM/axe and native terminal-buffer tests remain separate evidence.
+
+Optional work package E is tracked explicitly: stopped signed-history reconciliation, observed analytics, bounded advisory lexical/domain hints and the generic isolated connector are implemented. Advanced semantic/paid AI triage, richer inter-PRD governance-delegation UX and vendor-specific enterprise connectors remain optional extensions rather than completed first-release acceptance claims.
+
+The full TUI pass also caught and fixed an existing settings-list drift: Supervisor navigation now derives all field indices from the shared `settings::FIELDS` contract, so adding a field cannot hide the last setting. The five-adapter run caught and fixed the config-driven model path under `set -e`: a missing CLI model flag now reaches the declared configuration-file fallback instead of stopping Vibe. No user branch or worktree cleanup was performed.

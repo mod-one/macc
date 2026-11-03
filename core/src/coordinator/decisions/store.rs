@@ -129,6 +129,7 @@ impl Store {
         let mut operation_states =
             std::collections::BTreeMap::<(String, String), OperationExecution>::new();
         let mut approvals = std::collections::BTreeMap::<(String, String), usize>::new();
+        let mut prepared = std::collections::BTreeMap::<(String, String, String), Value>::new();
         let mut receipts = std::collections::BTreeMap::<(String, String, String), Value>::new();
         let mut stmt = sql(self
             .db
@@ -181,6 +182,18 @@ impl Store {
                 "approval.recorded" | "approval.legacy_imported" => {
                     *approvals.entry((plan.clone(), digest(&value))).or_default() += 1;
                 }
+                "task.context.prepared" => {
+                    if value.get("context").is_some() {
+                        prepared.insert(
+                            (
+                                plan.clone(),
+                                value["attempt"].as_str().unwrap_or_default().into(),
+                                value["phase"].as_str().unwrap_or_default().into(),
+                            ),
+                            value["context"].clone(),
+                        );
+                    }
+                }
                 "task.context.received" => {
                     receipts.insert(
                         (
@@ -191,7 +204,7 @@ impl Store {
                         value["receipt"].clone(),
                     );
                 }
-                "decision.revoked" | "decision.superseded" => {
+                "decision.revoked" | "decision.superseded" | "decision.lifecycle" => {
                     let d: Decision = serde_json::from_value(value["decision"].clone())
                         .map_err(|e| error(e.to_string()))?;
                     decisions.insert(d.id.clone(), d);
@@ -255,6 +268,28 @@ impl Store {
         }
         if approvals.values().any(|count| *count != 0) {
             return Err(error("Approval projection is incomplete"));
+        }
+        {
+            let mut statement = sql(self
+                .db
+                .prepare("SELECT plan_id,attempt_id,phase,payload FROM contexts"))?;
+            for row in sql(statement.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            }))? {
+                let (plan, attempt, phase, payload) = sql(row)?;
+                if let Some(expected) = prepared.get(&(plan, attempt, phase)) {
+                    if expected != &decode::<Value>(&payload)? {
+                        return Err(error(
+                            "Prepared context or planning baseline disagrees with its journal",
+                        ));
+                    }
+                }
+            }
         }
         let mut statement = sql(self.db.prepare(
             "SELECT plan_id,attempt_id,phase,receipt FROM contexts WHERE receipt IS NOT NULL",

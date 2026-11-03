@@ -9,6 +9,9 @@ mod performer_lifecycle;
 #[cfg(unix)]
 #[path = "support/usage_identity_runner.rs"]
 mod usage_identity_runner;
+#[cfg(unix)]
+#[path = "support/decision_adapter_matrix.rs"]
+mod decision_adapter_matrix;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
