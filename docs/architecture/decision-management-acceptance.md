@@ -22,7 +22,12 @@ Updated 2026-11-03, extended implementation. This tracks the [baseline](../prd/M
 | G14 | Actual process death, committed WAL/outbox and ambiguous external effects | `process_crash_replays_committed_wal_outbox_and_clear_retains_decisions_and_source`, `actual_owner_death_after_external_effect_is_unknown_and_never_reexecutes` |
 | G15 | Every shipped runner/provider contract | `all_five_shipped_adapters_deliver_exact_decisions_on_initial_and_reused_invocations`: actual Claude/Codex/Gemini/AGY/Vibe shell wrappers and ToolSpecs, two calls per adapter, controlled provider processes, native receipts/ACKs, passive and structured capture where declared. Live provider behavior is not inferred. |
 
-Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [new lifecycle/fault/approval scenarios](../../core/src/coordinator/decisions/tests_workflows.rs), [isolated verification tests](../../core/src/coordinator/decisions/secure.rs), [runner integration](../../cli/tests/support/performer_lifecycle.rs), [five-adapter matrix](../../cli/tests/support/decision_adapter_matrix.rs), [Web](../../web/src/components/DecisionCenter.test.tsx), [TUI](../../tui/src/decision_center.rs), [browser qualification harness](../../automat/tests/decision_browser.py).
+
+| G16 | Essential manual interventions and exact user results | `performer_can_request_essential_physical_action_and_receives_exact_human_result`, `intervention_missing_external_facts_still_routes_to_the_person_not_an_ai_retry_loop`, `never_ask_does_not_fabricate_a_physical_action_and_can_return_to_consultation`, `human_rejection_of_unavailable_intervention_never_becomes_a_result`; real shell/CLI `real_performer_can_request_user_hardware_intervention_without_losing_work`; Web manual-result and TUI intervention tests. No physical hardware or paid AI is invoked. |
+| G17 | Conditional authority, complementary investigation, explicit evidence disclosure | `conditional_answer_blocks_until_checked_evidence_and_changed_evidence_fences_again`, `conditional_gate_never_counts_as_a_vote_until_a_real_verification_task_is_delivered`, `conditional_gate_enters_quorum_only_after_current_verified_delivery`, `investigation_is_read_only_bounded_and_returns_report_without_inferred_consent`, `evidence_is_exact_retained_and_never_disclosed_without_explicit_operator_consent`, `forged_or_foreign_evidence_and_oversized_files_are_rejected`, `revoked_evidence_disclosure_cannot_be_rolled_back_to_an_earlier_valid_permission`; Web conditional gate, explicit evidence-sharing and investigation regressions. |
+| G18 | Bounded optional local semantics, governance and fresh scoped reuse | `local_semantic_suggestions_have_explicit_compute_budgets_and_zero_remote_calls`; `DecisionGovernance.test.tsx` tests preserved stale drafts and fresh scoped adoption without copying authority. Native policy remains the validation authority. |
+
+Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [new lifecycle/fault/approval scenarios](../../core/src/coordinator/decisions/tests_workflows.rs), [manual interventions, conditions and evidence](../../core/src/coordinator/decisions/tests_interaction.rs), [isolated verification tests](../../core/src/coordinator/decisions/secure.rs), [runner integration](../../cli/tests/support/performer_lifecycle.rs), [five-adapter matrix](../../cli/tests/support/decision_adapter_matrix.rs), [Web](../../web/src/components/DecisionCenter.test.tsx), [TUI](../../tui/src/decision_center.rs), [browser qualification harness](../../automat/tests/decision_browser.py).
 
 | Acceptance ID | Baseline scenario | Evidence / qualification |
 |---|---|---|
@@ -47,7 +52,7 @@ Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [
 | AT19 | PRD manually edited while coordinator runs | G4 — component/integration coverage. |
 | AT20 | `audit-prd` suggests changing an approved ADR | G2 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
 | AT21 | Restart with missing/corrupt graph event segment | G6 — component/integration coverage. |
-| AT22 | 20 parallel workers and a decision affects only one feature subtree | G10 — 20 simultaneous native context workers exercised; production coordinator scheduling/throughput still needs load qualification. |
+| AT22 | 20 parallel workers and a decision affects only one feature subtree | G10/G16 — `twenty_real_processes_use_native_scheduler_while_only_hardware_subtree_is_blocked` uses the native selector/runtime sync, twenty actual controlled child processes and native contexts/receipts/ACKs while a hardware subtree is blocked. Production provider scheduling/throughput still needs load qualification. |
 | AT23 | Approval quorum contains multiple required roles | G1 — component/integration coverage; isolated deployment and human authentication require external qualification. |
 | AT24 | Web server exposed beyond localhost attempts anonymous mutation | G8 — component/integration coverage. |
 | AT25 | User selects B and adds a negative constraint while performer expected A | G3/G11/G12 — exact native and client workflow coverage; independent deployment remains separately qualified. |
@@ -67,7 +72,7 @@ Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [
 | AT39 | An unrelated graph branch or advisory note changes while another task runs | G5 — component/integration coverage. |
 | AT40 | Context is regenerated twice with unchanged pinned content but different issuance timestamps/rendering | G5 — component/integration coverage. |
 | AT41 | A runner echoes the right digest but never receives a mandatory constraint in its effective prompt | G5 — component/integration coverage. |
-| AT42 | Migration or clear races an active SQLite writer, including uncheckpointed WAL data | G6/G14 — consistent backup, uncheckpointed committed WAL and post-clear projection recovery exercised. The complete live clear/migration race remains release qualification; these are distinct scenarios. |
+| AT42 | Migration or clear races an active SQLite writer, including uncheckpointed WAL data | G6/G14/G17 — `actual_clear_and_consistent_backup_survive_a_concurrent_process_wal_writer` runs real clear and consistent backup against a separate active SQLite WAL writer, checks retained dirty source and native recovery. Migration/restore on every production platform remains separate qualification. |
 | AT43 | Crash occurs after reserving a one-shot authorization but before observing the external operation result | G7/G14 — actual execution owner is killed after a controlled external effect; recovery records unknown and refuses a second execution. Trusted service-specific outcome/idempotency still requires deployment evidence. |
 | AT44 | An already approved human gate is the last remaining PRD entry | G4 — component/integration coverage. |
 | AT45 | A performer encounters routine naming/local implementation choices, even with threshold `low` | G3 — component/integration coverage; G15 verifies native transport for all five declared adapters; real planner/provider behavior still needs qualification. |
@@ -95,22 +100,34 @@ Sources: [core decision tests](../../core/src/coordinator/decisions/tests.rs), [
 | AT67 | An autonomous choice cannot be durably recorded or required context projection is unavailable | G5 — component/integration coverage. |
 | AT68 | User or another authorized agent inspects an autonomous decision from a different task/client | G5 — component/integration coverage. |
 
+
+The following additional scenarios specialize the baseline's question/response contract:
+
+| Extension ID | Scenario | Evidence |
+|---|---|---|
+| UI69 | Performer needs a person to connect inaccessible hardware and return actual output | G16; native service, shell/CLI, Web and TUI tests; no fabricated result or implementation commit. |
+| UI70 | Full autonomy encounters an indispensable manual action | G16; scoped `blocked_external`, no popup/inferred success, can return to consultation. |
+| UI71 | Approval is conditional on independent verification | G17; no execution/quorum before checks, current evidence rechecked, invalid source/subject rejected. |
+| UI72 | User requests more investigation before answering | G17; native bounded read-only attempt, report preserves original request, human answer required anew. |
+| UI73 | User attaches result containing information unsuitable for external AI | G17; retained hash/bytes, default-private refs, separate explicit operator consent bound to configuration; no implicit sharing. |
+| UI74 | User adopts prior PRD direction for a new task | G18; exact prior text/source/version plus fresh applicability justification, no imported vote/operation authority. |
+
 Reproduction commands:
 
 ```sh
 cargo test -p macc-core --lib
 cargo test -p macc-cli -p macc-tui decision
 cargo test -p macc-cli --test session_store_runner
-npm --prefix web test -- src/components/DecisionCenter.test.tsx src/components/ApprovalDialog.test.tsx
+npm --prefix web test -- src/components/DecisionCenter.test.tsx src/components/ApprovalDialog.test.tsx src/components/DecisionGovernance.test.tsx
 npm --prefix web run build
 ```
 
 Validation results are recorded only for the executed checkout below. A passing component or harness is not blanket certification of all 68 production acceptance scenarios.
 
-The complete core run passed **1,228 tests**, with **2 intentionally opt-in external-installation cases ignored**. The focused decision suite passed **63**, the full runner integration suite passed **23**, and the Web decision/approval suites passed **23**. The Web production build and browser-fixture TypeScript check passed. The full TUI suite passed **146** tests and `cargo check --workspace` passed. The shared-runner Bash syntax and browser-harness Python syntax checks also passed. No live provider call, deployed independent human-authentication service, Git network publication or screen-reader certification is inferred.
+For this extension the final complete core run passed **1,243 tests**, with **2 opt-in external-installation tests ignored**; the focused native decision suite passed **78 tests**, the full TUI suite passed **150**, runner integration passed **24** and the Web decision/approval/governance suites passed **30**. `cargo check --workspace`, the Web production build, shared-runner Bash syntax, browser-harness Python syntax and `git diff --check` passed. Native authority tests include actual process concurrency/WAL recovery and rejection of rolled-back evidence disclosure permissions. No paid model call, physical device action, independently deployed human authentication, Git network publication or screen-reader certification is inferred.
 
 The real Chromium harness was invoked in this environment and returned `not_run` (exit 77): no compatible browser executable is installed. Its fixture and report mechanism are present; a visual pass is **not** claimed. Existing JSDOM/axe and native terminal-buffer tests remain separate evidence.
 
-Optional work package E is tracked explicitly: stopped signed-history reconciliation, observed analytics, bounded advisory lexical/domain hints and the generic isolated connector are implemented. Advanced semantic/paid AI triage, richer inter-PRD governance-delegation UX and vendor-specific enterprise connectors remain optional extensions rather than completed first-release acceptance claims.
+Optional work package E now includes stopped signed-history reconciliation, observed analytics, bounded local lexical/TF-IDF/LSA hints, explicit Web governance editing, Web/TUI fresh scoped inter-PRD guidance and the generic isolated connector. Triage diagnostics expose actual configured rounds/context limits and zero extra paid sidecar calls. Paid generative triage, vendor-specific enterprise identity adapters and their deployment certification remain optional extensions, not first-release acceptance claims.
 
 The full TUI pass also caught and fixed an existing settings-list drift: Supervisor navigation now derives all field indices from the shared `settings::FIELDS` contract, so adding a field cannot hide the last setting. The five-adapter run caught and fixed the config-driven model path under `set -e`: a missing CLI model flag now reaches the declared configuration-file fallback instead of stopping Vibe. No user branch or worktree cleanup was performed.

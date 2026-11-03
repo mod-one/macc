@@ -12,6 +12,10 @@ struct ActionDraft {
     expires: String,
     proof: String,
     key: String,
+    condition_description: String,
+    condition_task: String,
+    condition_path: String,
+    condition_digest: String,
 }
 #[derive(Default)]
 pub(super) struct Panel {
@@ -24,6 +28,7 @@ pub(super) struct Panel {
     operation: Option<Value>,
     gate: Option<Value>,
     outcome: usize,
+    evidence_confirmation: Option<String>,
 }
 const MODES: &[(&str, &str)] = &[
     ("revise", "Revise / propose replacement"),
@@ -36,10 +41,14 @@ const MODES: &[(&str, &str)] = &[
     ("analytics", "Decision diagnostics and related requests"),
     ("no_graph", "Answer: current task plan remains valid"),
     ("replan", "Answer: prepare a new task plan"),
+    ("evidence", "Attach retained evidence"),
+    ("upload", "Register an evidence file"),
+    ("reuse", "Use a prior direction as fresh scoped guidance"),
 ];
 impl Panel {
     pub fn show(&mut self) {
         self.open = true;
+        self.evidence_confirmation = None;
         self.mode = "menu".into();
         self.index = 0;
         self.field = 0;
@@ -107,7 +116,11 @@ impl Panel {
         });
     }
     fn field_count(&self, manual_proof: bool) -> usize {
-        let n = if self.mode == "revise" || self.mode == "gates" {
+        let n = if self.mode == "gates" {
+            8
+        } else if self.mode == "upload" || self.mode == "reuse" {
+            3
+        } else if self.mode == "revise" {
             4
         } else {
             1
@@ -119,6 +132,16 @@ impl Panel {
             return &mut draft.proof;
         }
         match (self.mode.as_str(), self.field) {
+            ("reuse", 0) => &mut draft.text,
+            ("reuse", 1) => &mut draft.context,
+            ("reuse", 2) => &mut draft.recommendation,
+            ("upload", 0) => &mut draft.text,
+            ("upload", 1) => &mut draft.context,
+            ("upload", 2) => &mut draft.recommendation,
+            ("gates", 4) => &mut draft.condition_description,
+            ("gates", 5) => &mut draft.condition_task,
+            ("gates", 6) => &mut draft.condition_path,
+            ("gates", 7) => &mut draft.condition_digest,
             ("gates", 0) => &mut draft.actor,
             ("gates", 1) => &mut draft.role,
             ("gates", 2) => &mut draft.text,
@@ -144,6 +167,24 @@ impl Panel {
                     .map_err(|e| format!("Invalid approver attestation: {e}"))?,
             )
         };
+        if self.mode == "reuse" {
+            let source = snapshot["reference_directions"]
+                .as_array()
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|r| r["id"].as_str() == Some(draft.text.trim()))
+                })
+                .ok_or("Select an available source direction ID")?;
+            if draft.context.trim().is_empty() || draft.recommendation.trim().is_empty() {
+                return Err("Supply the target task and why this direction applies".into());
+            }
+            return Ok((dm::OperatorIntent::Feedback {
+                plan_id:snapshot["plan"]["id"].as_str().ok_or("Missing plan")?.into(),
+                task:draft.context.trim().into(),
+                text:format!("Explicit new scoped direction from {} v{} ({}).\nApplicability justification: {}\nExact prior direction:\n{}",source["id"].as_str().unwrap_or_default(),source["version"],source["source"].as_str().unwrap_or_default(),draft.recommendation,source["text"].as_str().unwrap_or_default()),
+                advisory:source["advisory"].as_bool().unwrap_or(false),
+            },proof));
+        }
         if self.mode == "gates" {
             let g = self.gate.as_ref().ok_or("No gate selected")?;
             let record = macc_core::coordinator::model::ApprovalRecord {
@@ -159,6 +200,28 @@ impl Panel {
                 reason: (!draft.context.trim().is_empty()).then_some(draft.context),
                 recorded_at: draft.created,
             };
+            if !draft.condition_description.trim().is_empty() {
+                let optional = |v: String| (!v.trim().is_empty()).then_some(v);
+                let condition = dm::ApprovalCondition {
+                    id: "gate-condition".into(),
+                    description: draft.condition_description,
+                    task_id: optional(draft.condition_task),
+                    source_path: optional(draft.condition_path),
+                    source_digest: optional(draft.condition_digest),
+                };
+                return Ok((
+                    dm::OperatorIntent::ConditionalGateVote {
+                        plan_id: snapshot["plan"]["id"]
+                            .as_str()
+                            .ok_or("Missing plan")?
+                            .into(),
+                        task: g["task_id"].as_str().ok_or("Missing gate")?.into(),
+                        record,
+                        conditions: vec![condition],
+                    },
+                    proof,
+                ));
+            }
             return Ok((
                 dm::OperatorIntent::GateVote {
                     plan_id: snapshot["plan"]["id"]
@@ -302,6 +365,7 @@ impl Panel {
         snapshot: &Value,
     ) -> Option<Action> {
         if key == KeyCode::Esc {
+            self.evidence_confirmation = None;
             if self.mode == "menu" {
                 self.open = false;
             } else {
@@ -367,6 +431,71 @@ impl Panel {
                 self.outcome = (self.outcome + 1) % 3;
                 return None;
             }
+        }
+        if self.mode == "evidence" {
+            let rows = snapshot["artifacts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                self.notice = "No evidence yet. Home > Register an evidence file first.".into();
+                return None;
+            }
+            self.index %= rows.len();
+            if key == KeyCode::F(6) {
+                let a = &rows[self.index];
+                let id = a["id"].as_str().unwrap_or_default().to_owned();
+                if self.evidence_confirmation.as_ref() == Some(&id) {
+                    self.evidence_confirmation = None;
+                    return Some(Action::Operator {
+                        intent: dm::OperatorIntent::EvidencePermission {
+                            id,
+                            plan_id: snapshot["plan"]["id"].as_str().unwrap_or_default().into(),
+                            version: a["permission_version"].as_u64().unwrap_or(0),
+                            share: a["share_content"] != true,
+                        },
+                        proof: None,
+                        challenge: false,
+                    });
+                }
+                self.evidence_confirmation = Some(id);
+                self.notice="Explicit disclosure: contents may be sent to configured external AI providers for this plan. F6 again confirms sharing/revocation; Esc cancels. Do not disclose credentials.".into();
+                return None;
+            }
+            self.evidence_confirmation = None;
+            match key {
+                KeyCode::Up => self.index = (self.index + rows.len() - 1) % rows.len(),
+                KeyCode::Down => self.index = (self.index + 1) % rows.len(),
+                KeyCode::F(5) => {
+                    let a = &rows[self.index];
+                    return Some(Action::SetArtifact(dm::ArtifactRef {
+                        id: a["id"].as_str().unwrap_or_default().into(),
+                        digest: a["digest"].as_str().unwrap_or_default().into(),
+                    }));
+                }
+                _ => {}
+            }
+            return None;
+        }
+        if self.mode == "upload" && key == KeyCode::F(5) {
+            let draft = self.drafts.get(&self.key(d)).cloned().unwrap_or_default();
+            let path = PathBuf::from(draft.text.trim());
+            let label = if draft.context.trim().is_empty() {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else {
+                draft.context
+            };
+            return Some(Action::ArtifactAdd {
+                path,
+                label,
+                media_type: if draft.recommendation.trim().is_empty() {
+                    "application/octet-stream".into()
+                } else {
+                    draft.recommendation
+                },
+            });
         }
         if self.mode == "analytics" {
             return None;
@@ -502,6 +631,25 @@ impl Panel {
             }
             return (text, self.notice.clone());
         }
+        if self.mode == "evidence" {
+            let rows = snapshot["artifacts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let mut text =
+                "Retained evidence — ↑/↓ selects, F5 attaches reference, F6 reviews AI content disclosure, Esc cancels\n"
+                    .to_string();
+            for (i, a) in rows.iter().enumerate() {
+                text.push_str(&format!(
+                    "{} {} ({} bytes)\n{}\n",
+                    if i == self.index { ">" } else { " " },
+                    a["label"],
+                    a["size"],
+                    a["digest"]
+                ));
+            }
+            return (text, self.notice.clone());
+        }
         if self.mode == "analytics" {
             return (format!("Decision diagnostics (measured observations only)\n{}\nRelated requests are advisory, never automatic consent.\n{}",serde_json::to_string_pretty(&snapshot["analytics"]).unwrap_or_default(),serde_json::to_string_pretty(&snapshot["similar_requests"]).unwrap_or_default()),"Esc returns to actions".into());
         }
@@ -514,6 +662,16 @@ impl Panel {
             "External approver attestation (advanced fallback)"
         } else {
             match (self.mode.as_str(), self.field) {
+                ("reuse", 0) => "Prior direction ID (listed above)",
+                ("reuse", 1) => "Target task in current plan",
+                ("reuse", 2) => "Why this direction applies",
+                ("upload", 0) => "Evidence file path",
+                ("upload", 1) => "Readable evidence label",
+                ("upload", 2) => "Media type (default application/octet-stream)",
+                ("gates", 4) => "Condition description",
+                ("gates", 5) => "Verification task ID",
+                ("gates", 6) => "Condition evidence path",
+                ("gates", 7) => "Expected SHA-256",
                 ("gates", 0) => "Independent approver identity",
                 ("gates", 1) => "Approval role",
                 ("gates", 2) => "Evidence",
@@ -533,6 +691,17 @@ impl Panel {
             .map(|(_, title)| *title)
             .unwrap_or("Action");
         let mut text=format!("{title}\nF9 changes input field; F5 submits explicitly; F12 prepares a challenge.\n{}\n",self.notice);
+        if self.mode == "reuse" {
+            text.push_str("Creates new human guidance, without copying votes, conditional approvals, operation permissions or private attachments. Later revocation of the old record does not revoke this independently authored direction.\n");
+            if let Some(rows) = snapshot["reference_directions"].as_array() {
+                for row in rows {
+                    text.push_str(&format!(
+                        "{} v{} · {} · {}\n{}\n",
+                        row["id"], row["version"], row["source"], row["question"], row["text"]
+                    ));
+                }
+            }
+        }
         if let Some(d) = d {
             text.push_str(&format!(
                 "Request {} v{}: {}\nExisting answer: {}\n",
@@ -567,4 +736,77 @@ fn uuid_key() -> String {
             .unwrap_or_default()
             .as_nanos()
     )
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    #[test]
+    fn evidence_sharing_requires_fresh_explicit_confirmation_after_escape() {
+        let snapshot = json!({"plan":{"id":"p"},"artifacts":[{"id":"file","digest":"sha256:123","share_content":false,"permission_version":0}]});
+        let mut panel = Panel {
+            open: true,
+            mode: "evidence".into(),
+            ..Default::default()
+        };
+        assert!(panel.key_event(KeyCode::F(6), None, &snapshot).is_none());
+        assert!(panel
+            .view(None, &snapshot)
+            .1
+            .contains("external AI providers"));
+        assert!(panel.key_event(KeyCode::Esc, None, &snapshot).is_none());
+        panel.mode = "evidence".into();
+        assert!(panel.key_event(KeyCode::F(6), None, &snapshot).is_none());
+        let Some(Action::Operator {
+            intent:
+                dm::OperatorIntent::EvidencePermission {
+                    id,
+                    plan_id,
+                    share,
+                    version,
+                },
+            ..
+        }) = panel.key_event(KeyCode::F(6), None, &snapshot)
+        else {
+            panic!("Expected explicit evidence consent")
+        };
+        assert_eq!(id, "file");
+        assert_eq!(plan_id, "p");
+        assert!(share);
+        assert_eq!(version, 0);
+    }
+    #[test]
+    fn prior_direction_creates_fresh_task_guidance_with_exact_source_and_justification() {
+        let snapshot = json!({"plan":{"id":"new-plan"},"reference_directions":[{"id":"old","version":3,"source":"old.prd.json","text":"Preserve SQLite.\nDo not discard user work.","advisory":false}]});
+        let mut panel = Panel {
+            open: true,
+            mode: "reuse".into(),
+            ..Default::default()
+        };
+        panel.init(None);
+        let key = panel.key(None);
+        let draft = panel.drafts.get_mut(&key).unwrap();
+        draft.text = "old".into();
+        draft.context = "NEW-A".into();
+        assert!(panel.intent(None, &snapshot).is_err());
+        panel.drafts.get_mut(&key).unwrap().recommendation = "Same storage contract".into();
+        let (
+            dm::OperatorIntent::Feedback {
+                plan_id,
+                task,
+                text,
+                advisory,
+            },
+            _,
+        ) = panel.intent(None, &snapshot).unwrap()
+        else {
+            panic!("Expected new scoped feedback")
+        };
+        assert_eq!(plan_id, "new-plan");
+        assert_eq!(task, "NEW-A");
+        assert!(!advisory);
+        assert!(text.contains("old v3"));
+        assert!(text.contains("Same storage contract"));
+        assert!(text.contains("Preserve SQLite.\nDo not discard user work."));
+    }
 }

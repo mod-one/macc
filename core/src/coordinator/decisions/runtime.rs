@@ -51,6 +51,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
     store.import_legacy(root, &plan)?;
     store.import_planner_requests(&plan, &p)?;
     store.reconcile_waiting_decisions(&plan, &p)?;
+    store.refresh_conditions(&plan, &p)?;
     store.expire_requests(&plan)?;
     store.reevaluate_pending(&plan, &p)?;
     plan = store.plan(&plan.id)?;
@@ -90,12 +91,17 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                     | "investigating"
                     | "expired"
                     | "awaiting_effects"
+                    | "conditional"
+                    | "investigating_requested"
+                    | "blocked_external"
                     | "waiting_dependency"
             ) && store.decision_applies(&plan, d, &task.id).unwrap_or(false)
         });
         if let Some(decision) = pending.filter(|d| {
-            d.status == "awaiting_effects"
-                && d.request.task_id == task.id
+            matches!(
+                d.status.as_str(),
+                "awaiting_effects" | "investigating_requested"
+            ) && d.request.task_id == task.id
                 && !task.is_human_approval_gate()
         }) {
             let allowed =
@@ -213,7 +219,8 @@ pub fn prepare_context(
         context.bindings,
         context.policy,
         context.plan_context,
-        context.dependency_contracts
+        context.dependency_contracts,
+        context.artifacts
     ]));
     let mut registry = registry(root)?;
     if registry
@@ -347,6 +354,9 @@ impl Store {
         use super::store::*;
         use rusqlite::TransactionBehavior;
         let pending = self.decision(id)?;
+        if pending.request.kind == "intervention" {
+            return Err(error("An inaccessible external action cannot be delegated or fabricated; record a scoped capability diagnostic"));
+        }
         if pending.requires_human_renewal {
             return Err(error("An earlier human rejection requires a new explicit human response; delegation cannot fabricate it"));
         }
@@ -409,9 +419,12 @@ impl Store {
         }
         d.version += 1;
         d.request = request;
-        d.status = if reuse
-            .is_some_and(|d| matches!(d.status.as_str(), "awaiting_effects" | "waiting_dependency"))
-        {
+        d.status = if reuse.is_some_and(|d| {
+            matches!(
+                d.status.as_str(),
+                "awaiting_effects" | "waiting_dependency" | "conditional"
+            )
+        }) {
             "waiting_dependency"
         } else if proposed_graph.is_none()
             && reuse.is_none()
@@ -435,6 +448,8 @@ impl Store {
         });
         d.investigation = Some(triage.report);
         d.resolution = Some(Resolution {
+            conditions: Vec::new(),
+            artifacts: Vec::new(),
             answered_version: None,
             applied_patch: None,
             effects: String::new(),

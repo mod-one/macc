@@ -48,6 +48,9 @@ impl Store {
                 | "expired"
                 | "resolved"
                 | "awaiting_effects"
+                | "conditional"
+                | "investigating_requested"
+                | "blocked_external"
         ) {
             return Err(error("This request has already been withdrawn or replaced"));
         }
@@ -123,7 +126,14 @@ impl Store {
         if d.version != version
             || !matches!(
                 d.status.as_str(),
-                "pending_human" | "investigating" | "rejected" | "expired" | "awaiting_effects"
+                "pending_human"
+                    | "investigating"
+                    | "rejected"
+                    | "expired"
+                    | "awaiting_effects"
+                    | "conditional"
+                    | "investigating_requested"
+                    | "blocked_external"
             )
         {
             return Err(error("Only the current unresolved request may be withdrawn; revoke a resolved binding explicitly"));
@@ -277,7 +287,7 @@ impl Store {
                 let parent = self.decision(&reference.id)?;
                 if matches!(
                     parent.status.as_str(),
-                    "awaiting_effects" | "waiting_dependency"
+                    "awaiting_effects" | "waiting_dependency" | "conditional"
                 ) {
                     continue;
                 }

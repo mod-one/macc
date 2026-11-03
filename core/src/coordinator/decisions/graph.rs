@@ -736,7 +736,7 @@ pub(super) fn commit_graph(
 }
 
 impl Store {
-    fn scoped_registry(&self, plan: &Plan, registry: &TaskRegistry) -> TaskRegistry {
+    pub(super) fn scoped_registry(&self, plan: &Plan, registry: &TaskRegistry) -> TaskRegistry {
         let mut scoped = registry.clone();
         if registry
             .extra

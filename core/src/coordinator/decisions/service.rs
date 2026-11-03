@@ -159,7 +159,7 @@ pub fn snapshot(root: &Path) -> Result<Value> {
     let (store, plan) = inspect_plan(root)?;
     let projection_error = active_plan(root).err().map(|e| e.to_string());
     Ok(
-        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?,"operations":store.operations(&plan.id)?,"delivery":store.delivery_status(&plan,&p)?,"approval_broker_available":super::secure::broker_available(&p),"approval_tickets":store.approval_tickets()?.into_iter().filter(|t|store.operator_in_scope(&plan,&t.intent).is_ok()).collect::<Vec<_>>(),"pending_approvals":crate::coordinator::approval::current_pending_approvals(root,&registry(root)?),"operator_identity":crate::service::coordinator_workflow::operator_identity(root),"analytics":store.decision_analytics(&plan)?,"similar_requests":store.similar_requests(&plan,&p)?}),
+        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?,"operations":store.operations(&plan.id)?,"delivery":store.delivery_status(&plan,&p)?,"approval_broker_available":super::secure::broker_available(&p),"approval_tickets":store.approval_tickets()?.into_iter().filter(|t|store.operator_in_scope(&plan,&t.intent).is_ok()).collect::<Vec<_>>(),"pending_approvals":crate::coordinator::approval::current_pending_approvals(root,&registry(root)?),"operator_identity":crate::service::coordinator_workflow::operator_identity(root),"reference_directions":store.reference_directions(&plan)?,"artifacts":store.artifacts(&plan.id)?,"analytics":store.decision_analytics(&plan)?,"similar_requests":store.similar_requests(&plan,&p)?}),
     )
 }
 
@@ -217,6 +217,8 @@ impl Store {
             &decision.id,
             decision.version,
             &AnswerInput {
+                conditions: Vec::new(),
+                artifacts: Vec::new(),
                 text: text.into(),
                 advisory,
                 attestation: proof.cloned(),
@@ -296,12 +298,30 @@ impl Store {
         }
         if !matches!(
             request.kind.as_str(),
-            "decision" | "clarification" | "approval" | "authorization" | "feedback"
+            "decision"
+                | "clarification"
+                | "approval"
+                | "authorization"
+                | "feedback"
+                | "intervention"
         ) || !matches!(
             request.scope.as_str(),
             "task" | "project" | "paths" | "requirements"
         ) {
             return Err(error("Unknown request kind/scope"));
+        }
+        self.verify_artifacts(&plan.id, &request.artifacts)?;
+        if request.kind == "intervention" {
+            let action=request.intervention.as_ref().ok_or_else(||error("An intervention must explain the unavailable capability, exact action and expected result"))?;
+            if action.action.trim().is_empty()
+                || action.inaccessible_reason.trim().is_empty()
+                || action.expected_result.trim().is_empty()
+                || request.has_effects()
+            {
+                return Err(error("Interventions require explicit instructions/results and cannot implicitly alter the task plan"));
+            }
+        } else if request.intervention.is_some() {
+            return Err(error("Intervention details require kind intervention"));
         }
         if request.kind == "authorization"
             && request
@@ -489,8 +509,12 @@ impl Store {
             .patch_for(request.recommended_option_id.as_deref())
             .map(|patch| self.preview_patch(plan, patch, &registry(&self.root)?))
             .transpose()?;
-        let requires_human_renewal =
-            previous.is_some_and(|d| d.status == "rejected" || d.requires_human_renewal);
+        let requires_human_renewal = previous.is_some_and(|d| {
+            matches!(
+                d.status.as_str(),
+                "rejected" | "conditional" | "investigating_requested"
+            ) || d.requires_human_renewal
+        });
         let expired = if let Some(at) = &request.expires_at {
             chrono::DateTime::parse_from_rfc3339(at)
                 .map_err(|_| error("Request expiry must be RFC3339"))?
@@ -501,7 +525,8 @@ impl Store {
         };
         let unresolved =
             !triage.report.missing_sources.is_empty() || !request.missing_facts.is_empty();
-        let automatic = !unresolved
+        let automatic = request.kind != "intervention"
+            && !unresolved
             && !requires_human_renewal
             && !expired
             && (policy.human_question_min_risk == Consultation::NeverAsk
@@ -526,6 +551,8 @@ impl Store {
             && (triage.standing.is_none()
                 || selected.is_some() && selected == request.recommended_option_id);
         let resolution = automatic.then(|| Resolution {
+            conditions: Vec::new(),
+            artifacts: Vec::new(),
             answered_version: None,
             applied_patch: None,
             effects: String::new(),
@@ -564,7 +591,19 @@ impl Store {
             id: uuid::Uuid::new_v4().to_string(),
             plan_id: plan.id.clone(),
             version: 1,
-            status: if automatic && reuse.is_some_and(|d| d.status == "awaiting_effects") {
+            status: if expired {
+                "expired"
+            } else if request.kind == "intervention" {
+                if policy.human_question_min_risk == Consultation::NeverAsk {
+                    "blocked_external"
+                } else {
+                    "pending_human"
+                }
+            } else if automatic
+                && reuse.is_some_and(|d| {
+                    matches!(d.status.as_str(), "awaiting_effects" | "conditional")
+                })
+            {
                 "waiting_dependency"
             } else if automatic
                 && request
@@ -575,8 +614,6 @@ impl Store {
                 && proposed_graph.is_none()
             {
                 "awaiting_effects"
-            } else if expired {
-                "expired"
             } else if requires_human_renewal
                 && policy.human_question_min_risk == Consultation::NeverAsk
             {
@@ -699,6 +736,8 @@ impl Store {
             id,
             version,
             &AnswerInput {
+                conditions: Vec::new(),
+                artifacts: Vec::new(),
                 text: text.into(),
                 option,
                 advisory,
@@ -729,7 +768,11 @@ impl Store {
         let pending = self.decision(id)?;
         if matches!(
             pending.status.as_str(),
-            "resolved" | "rejected" | "awaiting_effects"
+            "resolved"
+                | "rejected"
+                | "awaiting_effects"
+                | "conditional"
+                | "investigating_requested"
         ) {
             if pending.version == version + 1
                 && pending.resolution.as_ref().is_some_and(|r| {
@@ -744,6 +787,8 @@ impl Store {
                         && r.selected_option_id == option
                         && r.advisory == advisory
                         && r.fields == input.fields
+                        && r.conditions == input.conditions
+                        && r.artifacts == input.artifacts
                         && (if r.outcome.is_empty() {
                             "answer"
                         } else {
@@ -815,7 +860,8 @@ impl Store {
         let mut current_request = pending.request.clone();
         self.triage(&self.plan(&pending.plan_id)?, &mut current_request, policy)?;
         for field in &current_request.response_fields {
-            if field.required
+            if input.outcome == AnswerOutcome::Answer
+                && field.required
                 && input
                     .fields
                     .get(&field.id)
@@ -843,8 +889,33 @@ impl Store {
                 "An approval/authorization answer requires explicit evidence",
             ));
         }
-        if encode(&input.fields)?.len() + text.len() > policy.max_request_bytes {
-            return Err(error("Response fields exceed the decision budget"));
+        if encode(&input.fields)?.len()
+            + text.len()
+            + encode(&input.conditions)?.len()
+            + encode(&input.artifacts)?.len()
+            > policy.max_request_bytes
+        {
+            return Err(error(
+                "Response fields, conditions and evidence references exceed the decision budget",
+            ));
+        }
+        self.verify_artifacts(&pending.plan_id, &input.artifacts)?;
+        self.validate_conditions(&pending, &input.conditions)?;
+        if !input.conditions.is_empty()
+            && (input.outcome != AnswerOutcome::Answer || advisory || input.apply_patch)
+        {
+            return Err(error("Conditional approval requires a binding answer; apply its graph effects only after checked conditions pass"));
+        }
+        if pending.request.kind == "intervention" && input.outcome == AnswerOutcome::Answer {
+            if advisory
+                || input.fields.get("performed").map(String::as_str) != Some("yes")
+                || input
+                    .fields
+                    .get("result")
+                    .is_none_or(|v| v.trim().is_empty())
+            {
+                return Err(error("Explicit confirmation performed=yes and the actual observed result are required; no physical action is inferred"));
+            }
         }
         let selected_patch = input
             .patch
@@ -858,7 +929,10 @@ impl Store {
                 for existing in self.applicable_decisions(&self.plan(&pending.plan_id)?)? {
                     if existing.id != pending.id
                         && existing.domain.as_ref() == Some(domain)
-                        && existing.status == "resolved"
+                        && matches!(
+                            existing.status.as_str(),
+                            "resolved" | "conditional" | "awaiting_effects"
+                        )
                         && !existing.resolution.as_ref().is_some_and(|r| r.advisory)
                         && !pending
                             .request
@@ -934,7 +1008,11 @@ impl Store {
             ));
         }
         decision.version += 1;
-        decision.status = if awaiting {
+        decision.status = if input.outcome == AnswerOutcome::Investigate {
+            "investigating_requested"
+        } else if !input.conditions.is_empty() {
+            "conditional"
+        } else if awaiting {
             "awaiting_effects"
         } else if input.outcome == AnswerOutcome::Answer {
             "resolved"
@@ -943,6 +1021,8 @@ impl Store {
         }
         .into();
         decision.resolution = Some(Resolution {
+            conditions: input.conditions.clone(),
+            artifacts: input.artifacts.clone(),
             answered_version: Some(version),
             applied_patch: input.patch.clone(),
             effects: input.effects.as_str().into(),

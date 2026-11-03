@@ -73,12 +73,14 @@ impl Store {
                 risk = risk.max(Risk::High);
             }
         }
-        let mut mandatory = matches!(request.kind.as_str(), "approval" | "authorization")
-            || (request.impact.production
-                && policy
-                    .mandatory_human_triggers
-                    .iter()
-                    .any(|s| s == "production"))
+        let mut mandatory = matches!(
+            request.kind.as_str(),
+            "approval" | "authorization" | "intervention"
+        ) || (request.impact.production
+            && policy
+                .mandatory_human_triggers
+                .iter()
+                .any(|s| s == "production"))
             || (request.impact.irreversible
                 && policy
                     .mandatory_human_triggers
@@ -241,17 +243,25 @@ impl Store {
                 break;
             }
         }
-        let reuse = if let Some(domain) = domain
-            .as_ref()
-            .filter(|_| !matches!(request.kind.as_str(), "approval" | "authorization"))
-        {
+        let reuse = if let Some(domain) = domain.as_ref().filter(|_| {
+            !matches!(
+                request.kind.as_str(),
+                "approval" | "authorization" | "intervention"
+            )
+        }) {
             candidates
                 .into_iter()
                 .filter(|d| {
                     d.domain.as_ref() == Some(domain)
-                        && matches!(d.status.as_str(), "resolved" | "awaiting_effects")
+                        && matches!(
+                            d.status.as_str(),
+                            "resolved" | "awaiting_effects" | "conditional"
+                        )
                         && !superseded.contains(&d.id)
-                        && !matches!(d.request.kind.as_str(), "approval" | "authorization")
+                        && !matches!(
+                            d.request.kind.as_str(),
+                            "approval" | "authorization" | "intervention"
+                        )
                         && !d.resolution.as_ref().is_some_and(|r| r.advisory)
                 })
                 .min_by_key(|d| {
@@ -292,13 +302,23 @@ impl Store {
     /// Re-evaluate unanswered requests at a safe scheduler boundary. Never
     /// reinterpret an existing human rejection as delegated consent.
     pub fn reevaluate_pending(&mut self, plan: &Plan, policy: &Policy) -> crate::Result<()> {
-        let _fence=self.mutation_lock()?;self.reevaluate_pending_locked(plan,policy)
+        let _fence = self.mutation_lock()?;
+        self.reevaluate_pending_locked(plan, policy)
     }
-    pub(super) fn reevaluate_pending_locked(&mut self, plan: &Plan, policy: &Policy) -> crate::Result<()> {
+    pub(super) fn reevaluate_pending_locked(
+        &mut self,
+        plan: &Plan,
+        policy: &Policy,
+    ) -> crate::Result<()> {
         let ids = self
             .applicable_decisions(plan)?
             .into_iter()
-            .filter(|d| matches!(d.status.as_str(), "pending_human" | "investigating"))
+            .filter(|d| {
+                matches!(
+                    d.status.as_str(),
+                    "pending_human" | "investigating" | "blocked_external"
+                )
+            })
             .map(|d| d.id)
             .collect::<Vec<_>>();
         for id in ids {
@@ -319,7 +339,8 @@ impl Store {
             let result = self.triage(&owner, &mut request, policy)?;
             let unresolved =
                 !result.report.missing_sources.is_empty() || !request.missing_facts.is_empty();
-            let automatic = !d.requires_human_renewal
+            let automatic = d.request.kind != "intervention"
+                && !d.requires_human_renewal
                 && !unresolved
                 && (policy.human_question_min_risk == Consultation::NeverAsk
                     || result.reuse.is_some()
@@ -331,7 +352,10 @@ impl Store {
             }
             let mut latest = self.decision(&id)?;
             if latest.version != d.version
-                || !matches!(latest.status.as_str(), "pending_human" | "investigating")
+                || !matches!(
+                    latest.status.as_str(),
+                    "pending_human" | "investigating" | "blocked_external"
+                )
             {
                 continue;
             }
@@ -340,7 +364,13 @@ impl Store {
             // Scheduler freshness checks must not consume the performer's
             // complementary investigation budget before it can supply evidence.
             report.rounds = rounds.max(1);
-            let status = if (d.requires_human_renewal
+            let status = if d.request.kind == "intervention" {
+                if policy.human_question_min_risk == Consultation::NeverAsk {
+                    "blocked_external"
+                } else {
+                    "pending_human"
+                }
+            } else if (d.requires_human_renewal
                 && policy.human_question_min_risk == Consultation::NeverAsk)
                 || unresolved
                     && (policy.human_question_min_risk == Consultation::NeverAsk

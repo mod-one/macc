@@ -96,7 +96,27 @@ impl Store {
         record: &ApprovalRecord,
         proof: Option<&Attestation>,
     ) -> crate::Result<()> {
+        self.record_gate_conditions_attested(root, plan, task, record, &[], proof)
+    }
+    pub fn record_gate_conditions_attested(
+        &mut self,
+        root: &Path,
+        plan: &Plan,
+        task: &str,
+        record: &ApprovalRecord,
+        conditions: &[ApprovalCondition],
+        proof: Option<&Attestation>,
+    ) -> crate::Result<()> {
         let _lock = self.mutation_lock()?;
+        if !conditions.is_empty() {
+            if record.decision != crate::coordinator::model::ApprovalDecision::Approved {
+                return Err(error(
+                    "Only a positive gate response may carry approval conditions",
+                ));
+            }
+            let subject = Self::gate_condition_subject(plan, task, record, conditions)?;
+            self.validate_conditions(&subject, conditions)?;
+        }
         if chrono::DateTime::parse_from_rfc3339(&record.recorded_at).is_err() {
             return Err(error("Invalid approval timestamp"));
         }
@@ -108,7 +128,9 @@ impl Store {
                 &p,
                 proof,
                 "gate.vote",
-                &digest(&approval_challenge(plan, task, record, &p)?),
+                &digest(&approval_conditions_challenge(
+                    plan, task, record, conditions, &p,
+                )?),
                 chrono::Utc::now().timestamp(),
             )?;
             if record.actor != actor || record.role != proof.body.role {
@@ -139,7 +161,10 @@ impl Store {
         }
         // A broker can require minutes of independent human review. The exact
         // signed request timestamp can predate issuance; it must never extend TTL.
-        let payload = json!({"task_id":task,"decision":record.decision,"role":record.role,"actor":record.actor,"revision":revision,"evidence":record.evidence,"reason":record.reason,"recorded_at":record.recorded_at,"trust":p.trust_mode,"attestation":proof,"binding_verified":true,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(&p),"manifest":approval_manifest(root,plan,task,Some(&revision)).ok(),"execution_id":registry(root)?.extra.get("decision_execution_id")});
+        let mut payload = json!({"task_id":task,"decision":record.decision,"role":record.role,"actor":record.actor,"revision":revision,"evidence":record.evidence,"reason":record.reason,"recorded_at":record.recorded_at,"trust":p.trust_mode,"attestation":proof,"binding_verified":true,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(&p),"manifest":approval_manifest(root,plan,task,Some(&revision)).ok(),"execution_id":registry(root)?.extra.get("decision_execution_id")});
+        if !conditions.is_empty() {
+            payload["conditions"] = json!(conditions);
+        }
         let tx = sql(self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate))?;
@@ -173,6 +198,16 @@ impl Store {
             let Some(task) = value["task_id"].as_str() else {
                 continue;
             };
+            if let Some(conditions) = value.get("conditions") {
+                let conditions: Vec<ApprovalCondition> =
+                    serde_json::from_value(conditions.clone()).map_err(|e| error(e.to_string()))?;
+                let record: ApprovalRecord =
+                    serde_json::from_value(value.clone()).map_err(|e| error(e.to_string()))?;
+                let subject = Self::gate_condition_subject(plan, task, &record, &conditions)?;
+                if self.check_conditions(&subject, &p).is_err() {
+                    continue;
+                }
+            }
             let node = super::graph::task(&plan.graph, task)?;
             if value["gate_digest"] != digest(&super::graph::contract(node))
                 || value["policy_digest"] != digest(&p)
@@ -245,8 +280,18 @@ impl Store {
                         &p,
                         &proof,
                         "gate.vote",
-                        &digest(&approval_challenge(plan, task, &record, &p)?),
-                        at,
+                        &digest(&approval_conditions_challenge(
+                            plan,
+                            task,
+                            &record,
+                            &serde_json::from_value::<Vec<ApprovalCondition>>(
+                                value.get("conditions").cloned().unwrap_or(json!([])),
+                            )
+                            .map_err(|e| error(e.to_string()))?,
+                            &p,
+                        )?),
+                        at.max(proof.body.issued_at)
+                            .min(chrono::Utc::now().timestamp()),
                     )
                     .is_err()
                 {
@@ -335,9 +380,20 @@ pub fn approval_challenge(
     record: &ApprovalRecord,
     p: &Policy,
 ) -> crate::Result<Value> {
-    Ok(
-        json!({"action":"gate.vote","plan_id":plan.id,"task":task,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(p),"record":record}),
-    )
+    approval_conditions_challenge(plan, task, record, &[], p)
+}
+pub fn approval_conditions_challenge(
+    plan: &Plan,
+    task: &str,
+    record: &ApprovalRecord,
+    conditions: &[ApprovalCondition],
+    p: &Policy,
+) -> crate::Result<Value> {
+    let mut value = json!({"action":"gate.vote","plan_id":plan.id,"task":task,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(p),"record":record});
+    if !conditions.is_empty() {
+        value["conditions"] = json!(conditions);
+    }
+    Ok(value)
 }
 
 impl Store {
@@ -362,5 +418,16 @@ impl Store {
             .map(Path::new)
             .unwrap_or(&self.root);
         crate::git::head_commit(root)
+    }
+}
+
+impl Store {
+    fn gate_condition_subject(
+        plan: &Plan,
+        task: &str,
+        record: &ApprovalRecord,
+        conditions: &[ApprovalCondition],
+    ) -> crate::Result<Decision> {
+        serde_json::from_value(json!({"id":format!("gate:{task}"),"plan_id":plan.id,"version":1,"status":"conditional","effective_risk":"high","subject_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"created_at":record.recorded_at,"request":{"idempotency_key":format!("gate:{task}"),"task_id":task,"affected_tasks":[task],"kind":"approval","question":"Conditional gate approval","subject_revision":record.revision},"resolution":{"text":record.reason.clone().unwrap_or_default(),"selected_option_id":null,"actor":record.actor,"origin":"human_local_trust","policy_digest":"","recorded_at":record.recorded_at,"conditions":conditions}})).map_err(|e|error(e.to_string()))
     }
 }

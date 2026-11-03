@@ -7,6 +7,8 @@ mod context;
 mod effects;
 mod graph;
 mod investigation;
+mod interaction;
+pub use interaction::EvidencePermission;
 mod lifecycle;
 mod model;
 pub use effects::effects_challenge;

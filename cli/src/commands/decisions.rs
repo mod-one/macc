@@ -10,6 +10,17 @@ pub enum Action {
     List,
     Analytics,
     Related,
+    Artifacts {
+        #[command(subcommand)]
+        action: ArtifactAction,
+    },
+    InvestigationReport {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        file: PathBuf,
+    },
     Show {
         id: String,
     },
@@ -46,6 +57,10 @@ pub enum Action {
         apply_patch: bool,
         #[arg(long)]
         fields_file: Option<PathBuf>,
+        #[arg(long)]
+        conditions_file: Option<PathBuf>,
+        #[arg(long)]
+        artifacts_file: Option<PathBuf>,
         #[arg(long)]
         attestation_file: Option<PathBuf>,
         #[arg(long)]
@@ -174,6 +189,21 @@ pub enum Action {
         #[arg(long)]
         file: PathBuf,
     },
+}
+#[derive(Subcommand)]
+pub enum ArtifactAction {
+    Add {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        label: String,
+        #[arg(long, default_value = "application/octet-stream")]
+        media_type: String,
+    },
+    Show {
+        id: String,
+    },
+    List,
 }
 #[derive(Subcommand)]
 pub enum EffectsAction {
@@ -424,6 +454,8 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             | Action::Verify
             | Action::Recover
             | Action::Export { .. }
+            | Action::Artifacts { .. }
+            | Action::InvestigationReport { .. }
             | Action::Graph { .. }
             | Action::Transport { .. }
             | Action::Operator { .. }
@@ -578,6 +610,75 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             ApprovalAction::Apply { id } => Ok(json!(store.apply_approval(id, &actor)?)),
             ApprovalAction::List => Ok(json!(store.approval_tickets()?)),
         };
+    }
+    if let Action::Artifacts { action } = action {
+        return match action {
+            ArtifactAction::List => Ok(json!(store.artifacts(&plan.id)?)),
+            ArtifactAction::Show { id } => {
+                let a = store.artifact(id)?;
+                if std::env::var_os("MACC_DECISION_ATTEMPT").is_some()&&!store.can_deliver_evidence(id)?{return Err(dm::error("Artifact content is private until the operator explicitly releases it to the configured AI tools"));}
+                if a.plan_id != plan.id {
+                    return Err(dm::error("Evidence is outside this plan"));
+                }
+                Ok(json!(a))
+            }
+            ArtifactAction::Add {
+                file,
+                label,
+                media_type,
+            } => {
+                let actor = if std::env::var_os("MACC_DECISION_ATTEMPT").is_some() {
+                    let c = store.read_context(
+                        &env("MACC_DECISION_PLAN")?,
+                        &env("MACC_DECISION_ATTEMPT")?,
+                        &env("MACC_DECISION_PHASE")?,
+                    )?;
+                    if c.plan_id != plan.id
+                        || !file
+                            .canonicalize()
+                            .map_err(|e| dm::error(e.to_string()))?
+                            .starts_with(root.canonicalize().map_err(|e| dm::error(e.to_string()))?)
+                    {
+                        return Err(dm::error(
+                            "Performer evidence must be inside the pinned project",
+                        ));
+                    }
+                    format!("agent:{}", c.task_id)
+                } else {
+                    operator(root)?
+                };
+                if std::fs::metadata(file)
+                    .map_err(|e| dm::error(e.to_string()))?
+                    .len()
+                    > p.max_request_bytes as u64
+                {
+                    return Err(dm::error("Evidence exceeds configured byte budget"));
+                }
+                let bytes = std::fs::read(file).map_err(|e| dm::error(e.to_string()))?;
+                let data = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                Ok(json!(store.add_artifact(
+                    &plan.id, label, media_type, &data, &actor
+                )?))
+            }
+        };
+    }
+    if let Action::InvestigationReport { id, version, file } = action {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Report {
+            summary: String,
+            #[serde(default)]
+            artifacts: Vec<dm::ArtifactRef>,
+        }
+        let report: Report = read(file, p.max_request_bytes)?;
+        return Ok(json!(store.complete_investigation(
+            id,
+            *version,
+            &report.summary,
+            &report.artifacts,
+            &env("MACC_DECISION_ATTEMPT")?,
+            &env("MACC_DECISION_PHASE")?
+        )?));
     }
     match action {
         Action::Authorize { id, operation } => {
@@ -830,6 +931,8 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             advisory,
             apply_patch,
             fields_file,
+            conditions_file,
+            artifacts_file,
             effects,
             patch_file,
             attestation_file,
@@ -842,8 +945,9 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             } else {
                 Default::default()
             };
-            let outcome = serde_json::from_value(json!(outcome))
-                .map_err(|_| dm::error("Outcome must be answer, reject or request_changes"))?;
+            let outcome = serde_json::from_value(json!(outcome)).map_err(|_| {
+                dm::error("Outcome must be answer, reject, request_changes or investigate")
+            })?;
             let attestation = attestation_file
                 .as_ref()
                 .map(|path| read(path, p.max_request_bytes))
@@ -855,6 +959,16 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                 .map(|file| read(file, 262144))
                 .transpose()?;
             let input = dm::AnswerInput {
+                conditions: conditions_file
+                    .as_ref()
+                    .map(|f| read(f, p.max_request_bytes))
+                    .transpose()?
+                    .unwrap_or_default(),
+                artifacts: artifacts_file
+                    .as_ref()
+                    .map(|f| read(f, p.max_request_bytes))
+                    .transpose()?
+                    .unwrap_or_default(),
                 effects,
                 patch,
                 attestation,
@@ -1034,7 +1148,9 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             .map_err(|e| dm::error(e.to_string()))?;
             Ok(json!({"exported":file,"digest":dm::digest(&bundle)}))
         }
-        Action::Config { .. }
+        Action::Artifacts { .. }
+        | Action::InvestigationReport { .. }
+        | Action::Config { .. }
         | Action::List
         | Action::Analytics
         | Action::Related

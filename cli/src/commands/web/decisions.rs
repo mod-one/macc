@@ -7,6 +7,14 @@ use serde_json::{json, Value};
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Mutation {
+    ArtifactAdd {
+        label: String,
+        media_type: String,
+        data_hex: String,
+    },
+    ArtifactGet {
+        id: String,
+    },
     Configure {
         #[serde(default)]
         attestation: Option<dm::Attestation>,
@@ -25,6 +33,10 @@ pub(super) enum Mutation {
         apply_patch: bool,
         #[serde(default)]
         fields: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        conditions: Vec<dm::ApprovalCondition>,
+        #[serde(default)]
+        artifacts: Vec<dm::ArtifactRef>,
         #[serde(default)]
         outcome: dm::AnswerOutcome,
         #[serde(default)]
@@ -136,7 +148,9 @@ pub(super) async fn mutate(
         let p = dm::policy(root)?;
         let (mut store, plan) = if matches!(
             action,
-            Mutation::PatchPreview { .. }
+            Mutation::ArtifactAdd { .. }
+                | Mutation::ArtifactGet { .. }
+                | Mutation::PatchPreview { .. }
                 | Mutation::PatchApply { .. }
                 | Mutation::PatchReconcile { .. }
                 | Mutation::Recover
@@ -153,6 +167,20 @@ pub(super) async fn mutate(
             store.decision_in_scope(&plan, id)?;
         }
         let value = match action {
+            Mutation::ArtifactAdd {
+                label,
+                media_type,
+                data_hex,
+            } => json!(store.add_artifact(&plan.id, &label, &media_type, &data_hex, &actor)?),
+            Mutation::ArtifactGet { id } => {
+                let a = store.artifact(&id)?;
+                if a.plan_id != plan.id {
+                    return Err(ApiError::validation(
+                        "Evidence is outside this selected plan",
+                    ));
+                }
+                json!(a)
+            }
             Mutation::Operator {
                 intent,
                 attestation,
@@ -185,6 +213,8 @@ pub(super) async fn mutate(
                 advisory,
                 apply_patch,
                 fields,
+                conditions,
+                artifacts,
                 outcome,
                 effects,
                 patch,
@@ -192,6 +222,8 @@ pub(super) async fn mutate(
                 challenge,
             } => {
                 let input = dm::AnswerInput {
+                    conditions,
+                    artifacts,
                     effects,
                     patch,
                     attestation,

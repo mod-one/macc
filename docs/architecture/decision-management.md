@@ -204,7 +204,7 @@ Example external registry (public keys, no private keys):
     "gate.vote": ["OWNER"],
     "graph.mutate": ["OWNER"],
     "policy.configure": ["OWNER"],
-    "transport.import": ["OWNER"]
+    "transport.import": ["OWNER"], "evidence.share": ["OWNER"]
   }
 }
 ```
@@ -284,7 +284,7 @@ The protected registry may configure an external command connector:
     "decision.revoke": ["OWNER"], "decision.effects.apply": ["OWNER"],
     "operation.reconcile": ["OWNER"], "gate.vote": ["OWNER"],
     "graph.mutate": ["OWNER"], "policy.configure": ["OWNER"],
-    "transport.import": ["OWNER"]
+    "transport.import": ["OWNER"], "evidence.share": ["OWNER"]
   },
   "broker": {"command": ["/opt/macc-approver/bin/connector"], "timeout_seconds": 30}
 }
@@ -335,7 +335,7 @@ macc decisions transport reconcile-apply --file incoming.json --allowed-signers 
 
 Every conflicting field needs an explicit local/remote choice. The apply command requires stopped execution, the reviewed local event head, ordinary graph invariants and isolated graph approval when configured (`--challenge` / `--attestation-file`). It records the signed incoming evidence and graph mutation in the same transaction. Incoming votes, decisions, contexts, reservations and process ownership do **not** become local authority. Directions in the incoming evidence can be adopted through the normal local revision/answer workflow. Delivered/archived history cannot be overwritten. No branch or worktree deletion is added. This supports reviewed stopped-history reconciliation, not distributed simultaneous coordinator ownership.
 
-`macc decisions analytics` reports observed state/risk/provenance counts, response latency, reused answers, planning attempts and operation outcomes. Web/TUI expose the same diagnostics. Optional `similarity_hints: true`, `similarity_max_candidates: 128` (maximum 512) and `similarity_min_percent: 75` enable bounded lexical/domain suggestions. They consume the configured source-byte budget, return at most 32 pairs and never merge consent. No additional model call or speculative token/cost saving is inferred. Advanced semantic models, paid AI triage and vendor-specific enterprise connectors remain the explicitly optional post-release work package E; the generic isolated connector is available now.
+`macc decisions analytics` reports observed state/risk/provenance counts, response latency, reused answers, planning attempts and operation outcomes. Web/TUI expose the same diagnostics. Optional `similarity_hints: true`, `similarity_max_candidates: 128` (maximum 512) and `similarity_min_percent: 75` enable bounded lexical/domain suggestions; `similarity_backend: local_lsa` additionally enables local classical TF-IDF/LSA with the budgets described below. They consume the configured source-byte budget, return at most 32 pairs and never merge consent. No additional model call or speculative token/cost saving is inferred. Paid generative triage and vendor-specific enterprise identity integrations remain optional deployment extensions; the generic isolated connector is available now.
 
 ## Reproducing qualification
 
@@ -351,3 +351,66 @@ python3 automat/tests/decision_browser.py --browser /path/to/chromium --report /
 ```
 
 The browser harness serves a local component fixture with mocked API responses, checks actual 320/768/1440-pixel viewport layout and deferred drafts, and downloads nothing. Missing Chromium produces `not_run` and exit 77. It does not certify screen-reader behavior or native backend deployment. Existing `automat/tests/o2_real_tools.py` remains an explicitly opt-in, budgeted real-provider transport qualification tool; its default validates the plan without model calls. Deployed independent identity/authentication, screen readers, live providers and non-Unix operation capture still require their actual environment.
+
+## Essential questions and manual interventions
+
+Each issued performer/reviewer context teaches the native request protocol. The model does not need to discover a private UI API or keep its provider session waiting for interactive input. It investigates first, records a scoped request, preserves its working files, then returns `precondition_unmet`. MACC holds the affected task and its consumers while independent work continues. Ordinary implementation choices remain autonomous.
+
+Use an ordinary `decision` or `clarification` request for an important unresolved choice. For an indispensable action beyond the worker's actual capabilities, use `kind: intervention`:
+
+```json
+{
+  "idempotency_key": "connect-test-device-v1",
+  "task_id": "DEVICE-TEST",
+  "kind": "intervention",
+  "question": "Connect the test phone and return its actual status",
+  "recommendation": "Connect and unlock the test phone",
+  "investigated": ["The worker cannot physically connect USB hardware"],
+  "impact": {"evidence": ["Device access is indispensable to the acceptance check"]},
+  "intervention": {
+    "action": "Connect the phone to this computer by USB and unlock it",
+    "inaccessible_reason": "The worker has no physical access to the phone",
+    "expected_result": "Return the observed device identifier or exact error",
+    "verification": "Run the local device-listing command; omit credentials"
+  }
+}
+```
+
+```sh
+macc decisions request --file intervention.json
+```
+
+An essential intervention is presented in consultation modes even below the discretionary question threshold. It never acquires an invented result from a standing answer or an autonomous recommendation. In `never_ask`, it remains `blocked_external`, without a popup; inspect it and restore consultation when human assistance is appropriate. This preserves the explicit no-question mode without pretending unavailable hardware or credentials exist.
+
+Web presents the exact requested action, unavailable capability, expected output, an **I performed the requested action** checkbox and an actual-result input. TUI provides the same `performed` and `result` fields through `F9`; `Tab` changes the yes/no field, `Enter` inserts a newline and `F5` submits explicitly. For CLI, supply `--fields-file` with `{"performed":"yes","result":"exact observed output"}`. A positive response requires both confirmation and a nonempty result. A user who cannot help can reject or request changes. An observed error is valid evidence, not proof that the task succeeded. The result is retained verbatim and delivered in fresh scoped contexts with the normal receipts, ACK and compliance checks. It does not authorize unrelated operations.
+
+## Conditions, further investigation and evidence
+
+A conditional response contains up to 16 typed `conditions`. Each has an `id`, human-readable `description`, and either an independently deliverable `task_id` or `source_path` plus exact `source_digest` (`sha256:...`). A verification task cannot belong to the blocked subtree. Conditions are checked by native code, not by treating prose or a model's assertion as approval. A conditional decision stays `conditional` until current checks pass; source drift fences execution again. For native human gates, conditional votes do not enter quorum before verification, and source artifacts are read from the exact reviewed Git commit. Existing role, subject, expiry and secure-signature checks still apply.
+
+Web provides **Add approval condition**; TUI uses `F9` condition fields, and gate actions expose their condition fields too. CLI uses `answer --conditions-file conditions.json`, or the typed `conditional_gate_vote` operator action for a native approval gate. A positive conditional answer cannot implicitly apply a proposed graph patch.
+
+The **Further investigation** outcome (`F11` in TUI; `answer --outcome investigate` in CLI) stores the exact human request and enters `investigating_requested`. The coordinator issues a bounded, native **read-only investigation** attempt. It cannot count as implementation, apply graph effects or alter retained source/Git state. The performer reports through:
+
+```sh
+macc decisions investigation-report REQUEST_ID --version VERSION --file report.json
+# report.json: {"summary":"Observed facts and remaining uncertainty","artifacts":[]}
+```
+
+The original question returns to the user with a labelled, unverified performer report; the request to investigate never becomes consent. Native attempt limits and byte budgets apply.
+
+Evidence is content-addressed and retained with exact bytes/hash, actor, time and plan. Registration is bounded by `max_request_bytes` and a 256 KiB hard cap; references are limited to 16 per request/answer. Built-in secret detection rejects recognized credentials but is not a guarantee that every sensitive value is detected. Supply a redacted result.
+
+```sh
+macc decisions artifacts add --file device-output.txt --label 'Observed USB status' --media-type text/plain
+macc decisions artifacts list
+macc decisions artifacts show ARTIFACT_ID
+```
+
+Attach `{id,digest}` references using request `artifacts` or CLI `answer --artifacts-file`. Uploading/attaching does not submit an answer or share bytes with an AI provider. Evidence is **private by default**. Web offers an explicit review and confirmation per file; TUI's evidence action uses `F6` to review and a second `F6` to confirm, with `Esc` cancelling. Generic CLI operator input is `{"action":"evidence_permission","id":"ARTIFACT_ID","plan_id":"PLAN_ID","version":0,"share":true}`. The native service binds release to exact contents, plan, permission version and current configured AI tools; changed AI configuration invalidates release. Secure mode requires independently signed action `evidence.share`. Workers cannot grant permission to themselves or read private bytes through the artifact CLI. Only explicitly released bytes enter AI context, within its byte budget; unreleased references remain visibly unread metadata.
+
+## Governance, reuse and analysis budgets
+
+Web provides a governance rule editor with explicit preview, stale-policy detection, minimum risk, human requirements, scoped domains/paths and standing delegated directions. The same native policy is available through CLI configuration. Web and TUI let an operator select a resolved ordinary direction from the same project/reference branch and author fresh guidance for a task in the current PRD, with the exact source ID/version and an applicability justification. This deliberately does not copy conditional approvals, operation authorizations, private artifacts or gate votes. Later revocation of the old direction does not revoke the independently authored new guidance.
+
+Advisory similarity supports `similarity_backend: lexical` (default) or `local_lsa`. The latter uses local classical TF-IDF/LSA, with lexical fallback, bounded source bytes/candidates, a 100 ms fit budget, 200 ms overall comparison budget, at most 8,192 comparisons and 32 suggestions. These are local compute limits, not hard real-time deadlines. It makes no extra paid provider calls and cannot merge authority or create consent. Diagnostics expose actual states, response latency, attempts, operation outcomes and triage limits. Existing investigation round/prompt limits bound AI planning. MACC does not invent provider prices or monetary savings. Vendor-specific identity connectors and production deployment certification remain environment-specific qualification, not implicit properties of the generic isolated connector.

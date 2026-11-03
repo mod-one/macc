@@ -22,6 +22,7 @@ use std::{
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Draft {
+    artifacts: Vec<dm::ArtifactRef>,
     effects: dm::AnswerEffects,
     fields: BTreeMap<String, String>,
     active_field: usize,
@@ -51,6 +52,12 @@ pub struct Center {
     submitting: bool,
 }
 pub enum Action {
+    SetArtifact(dm::ArtifactRef),
+    ArtifactAdd {
+        path: PathBuf,
+        label: String,
+        media_type: String,
+    },
     Operator {
         intent: dm::OperatorIntent,
         proof: Option<dm::Attestation>,
@@ -66,6 +73,7 @@ pub enum Action {
     },
     SetEffects(dm::AnswerEffects),
     Answer {
+        artifacts: Vec<dm::ArtifactRef>,
         id: String,
         version: u64,
         text: String,
@@ -255,6 +263,17 @@ impl Center {
             let result = self
                 .actions
                 .key_event(key, self.current.as_ref(), &snapshot);
+            if let Some(Action::SetArtifact(reference)) = &result {
+                if let Some(d) = &self.current {
+                    let draft = self.drafts.entry(Self::key(d)).or_default();
+                    if !draft.artifacts.contains(reference) {
+                        draft.artifacts.push(reference.clone());
+                    }
+                }
+                self.actions.open = false;
+                self.save_drafts();
+                return None;
+            }
             if let Some(Action::SetEffects(effects)) = result {
                 if let Some(d) = &self.current {
                     let draft = self.drafts.entry(Self::key(d)).or_default();
@@ -365,6 +384,7 @@ impl Center {
             return None;
         }
         let mut fields = current.request.response_fields.clone();
+        fields.extend(interaction_fields(&current.request.kind));
         if matches!(current.request.kind.as_str(), "approval" | "authorization")
             && !fields.iter().any(|f| f.id == "evidence")
         {
@@ -388,13 +408,26 @@ impl Center {
         if key == KeyCode::F(12) {
             let mut fields = draft.fields.clone();
             fields.remove("__attestation");
+            let conditions = match condition_fields(&fields) {
+                Ok(v) => v,
+                Err(error) => {
+                    self.message = error;
+                    return None;
+                }
+            };
+            fields.retain(|key, _| !key.starts_with("__condition_"));
             return Some(Action::Challenge {
                 id: current.id.clone(),
                 version: current.version,
                 input: dm::AnswerInput {
+                    conditions,
+                    artifacts: draft.artifacts.clone(),
                     effects: draft.effects,
                     patch: None,
-                    text: if draft.text.trim().is_empty() {
+                    text: if draft.text.trim().is_empty() && current.request.kind == "intervention"
+                    {
+                        draft.fields.get("result").cloned().unwrap_or_default()
+                    } else if draft.text.trim().is_empty() {
                         current
                             .request
                             .options
@@ -437,7 +470,8 @@ impl Center {
             draft.outcome = match draft.outcome {
                 dm::AnswerOutcome::Answer => dm::AnswerOutcome::Reject,
                 dm::AnswerOutcome::Reject => dm::AnswerOutcome::RequestChanges,
-                dm::AnswerOutcome::RequestChanges => dm::AnswerOutcome::Answer,
+                dm::AnswerOutcome::RequestChanges => dm::AnswerOutcome::Investigate,
+                dm::AnswerOutcome::Investigate => dm::AnswerOutcome::Answer,
             };
             draft.apply_patch = false;
             return None;
@@ -489,7 +523,11 @@ impl Center {
                     .checked_sub(1)
                     .and_then(|i| current.request.options.get(i));
                 let text = if draft.text.trim().is_empty() {
-                    option.map(|o| o.label.clone()).unwrap_or_default()
+                    if current.request.kind == "intervention" {
+                        draft.fields.get("result").cloned().unwrap_or_default()
+                    } else {
+                        option.map(|o| o.label.clone()).unwrap_or_default()
+                    }
                 } else {
                     draft.text.clone()
                 };
@@ -498,6 +536,7 @@ impl Center {
                     return None;
                 }
                 return Some(Action::Answer {
+                    artifacts: draft.artifacts.clone(),
                     id: current.id.clone(),
                     version: current.version,
                     text,
@@ -560,7 +599,28 @@ impl Center {
                 let p = dm::policy(&root)?;
                 let (mut store, plan) = dm::inspect_plan(&root)?;
                 match action {
+                    Action::SetArtifact(_) => unreachable!(),
+                    Action::ArtifactAdd {
+                        path,
+                        label,
+                        media_type,
+                    } => {
+                        if std::fs::metadata(&path)
+                            .map_err(|e| dm::error(e.to_string()))?
+                            .len()
+                            > p.max_request_bytes as u64
+                        {
+                            return Err(dm::error("Evidence exceeds configured byte budget"));
+                        }
+                        let bytes = std::fs::read(&path).map_err(|e| dm::error(e.to_string()))?;
+                        let data = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                        let a = store.add_artifact(&plan.id, &label, &media_type, &data, &actor)?;
+                        let mut snapshot = dm::snapshot(&root)?;
+                        snapshot["operator_notice"]=json!(format!("Evidence {} retained as {}. Home > Attach retained evidence adds it to the unsent response.",a.label,a.digest));
+                        return Ok(snapshot);
+                    }
                     Action::Answer {
+                        artifacts,
                         id,
                         version,
                         text,
@@ -571,6 +631,8 @@ impl Center {
                         outcome,
                         effects,
                     } => {
+                        let conditions = condition_fields(&fields).map_err(dm::error)?;
+                        fields.retain(|key, _| !key.starts_with("__condition_"));
                         let attestation = fields
                             .remove("__attestation")
                             .filter(|s| !s.trim().is_empty())
@@ -582,6 +644,8 @@ impl Center {
                                 id,
                                 version,
                                 input: dm::AnswerInput {
+                                    conditions,
+                                    artifacts,
                                     effects,
                                     patch: None,
                                     attestation: attestation.clone(),
@@ -751,10 +815,13 @@ impl Center {
         let p = self.policy();
         let mut text=format!("Durable decisions: {} | mode: {:?} | pending: {}\nHigher risk threshold grants more autonomy. NeverAsk records agent choices without questions.\n{}\n\n",p.enabled,p.human_question_min_risk,self.pending(),self.message);
         if self.show_help {
-            text.push_str("KEYS: Home opens lifecycle/approval/operation actions; F2 next request/history; Tab option or field choice; F3 advisory; F4 delivery/ACK/compliance; F5 explicit submit; F6 autonomy; F7 enable; F8 new guidance; F9 edit next response field; F10 explicitly accept displayed patch; F11 answer/reject/request changes; F12 write isolated approver challenge; Enter newline; PgUp/PgDn scroll evidence; Esc defer without submitting.\n\n");
+            text.push_str("KEYS: Home opens lifecycle/approval/operation actions; F2 next request/history; Tab option or field choice; F3 advisory; F4 delivery/ACK/compliance; F5 explicit submit; F6 autonomy; F7 enable; F8 new guidance; F9 edit next response field; F10 explicitly accept displayed patch; F11 answer/reject/request changes/investigate; F12 write isolated approver challenge; Enter newline; PgUp/PgDn scroll evidence; Esc defer without submitting.\n\n");
         }
         if let Some(d) = &self.current {
             text.push_str(&format!("{}\nTask: {} | kind: {} | risk: {:?} | status: {} | version {}\n\n{}\n\nRecommendation: {}\n",d.request.question,d.request.task_id,d.request.kind,d.effective_risk,d.status,d.version,d.request.context,d.request.recommendation));
+            if let Some(action) = &d.request.intervention {
+                text.push_str(&format!("\nUSER ACTION NEEDED\n{}\nUnavailable capability: {}\nExpected result: {}\nVerification: {}\nF9 edits performed (Tab selects yes/no) and actual observed result. No passwords/tokens.\n",action.action,action.inaccessible_reason,action.expected_result,action.verification));
+            }
             for (i, o) in d.request.options.iter().enumerate() {
                 text.push_str(&format!(
                     "{}. {} — {}\n",
@@ -784,6 +851,17 @@ impl Center {
                     "\nRecorded outcome [{} by {}]:\n{}\n",
                     r.origin, r.actor, r.text
                 ));
+                for c in &r.conditions {
+                    text.push_str(&format!(
+                        "Required condition: {} — task {:?}, evidence {:?} {:?}\n",
+                        c.description, c.task_id, c.source_path, c.source_digest
+                    ));
+                }
+                if let Some(result) = r.fields.get("result") {
+                    text.push_str(&format!(
+                        "Actual user-reported result (not machine attestation):\n{result}\n"
+                    ));
+                }
             }
         } else {
             text.push_str(
@@ -820,6 +898,7 @@ impl Center {
                 .is_none_or(|s| s["approval_broker_available"] != true);
         if let Some(d) = &self.current {
             let mut fields = d.request.response_fields.clone();
+            fields.extend(interaction_fields(&d.request.kind));
             if matches!(d.request.kind.as_str(), "approval" | "authorization")
                 && !fields.iter().any(|f| f.id == "evidence")
             {
@@ -852,8 +931,12 @@ impl Center {
             }
         }
         answer = format!(
-            "Outcome: {:?}; effects: {:?}; explicit patch acceptance: {}\n{}",
-            draft.outcome, draft.effects, draft.apply_patch, answer
+            "Outcome: {:?}; effects: {:?}; explicit patch acceptance: {}; evidence: {}\n{}",
+            draft.outcome,
+            draft.effects,
+            draft.apply_patch,
+            draft.artifacts.len(),
+            answer
         );
         if self.actions.open {
             let (snapshot_text, editor) = self.actions.view(
@@ -932,6 +1015,51 @@ mod tests {
         assert!(!c.open);
         assert!(c.deferred.contains("q@1"));
         assert_eq!(c.drafts["q@1"].text, "x");
+    }
+    #[test]
+    fn physical_intervention_preserves_actual_result_and_offers_investigation() {
+        let mut c = center("high");
+        c.current.as_mut().unwrap().request.kind = "intervention".into();
+        c.current.as_mut().unwrap().request.options.clear();
+        let draft = c.drafts.entry("q@1".into()).or_default();
+        draft.fields.insert("performed".into(), "yes".into());
+        draft
+            .fields
+            .insert("result".into(), "Device USB-42\nready".into());
+        match c.key_event(KeyCode::F(5)).unwrap() {
+            Action::Answer { text, fields, .. } => {
+                assert_eq!(text, "Device USB-42\nready");
+                assert_eq!(fields["performed"], "yes");
+                assert_eq!(fields["result"], text);
+            }
+            _ => panic!("Expected explicit manual result"),
+        }
+        for _ in 0..3 {
+            c.key_event(KeyCode::F(11));
+        }
+        match c.key_event(KeyCode::F(5)).unwrap() {
+            Action::Answer {
+                outcome,
+                apply_patch,
+                ..
+            } => {
+                assert_eq!(outcome, dm::AnswerOutcome::Investigate);
+                assert!(!apply_patch);
+            }
+            _ => panic!("Expected explicit further investigation"),
+        }
+    }
+    #[test]
+    fn conditions_require_independently_checkable_evidence() {
+        let mut fields = BTreeMap::from([(
+            "__condition_description".into(),
+            "Deliver verification".into(),
+        )]);
+        assert!(condition_fields(&fields).is_err());
+        fields.insert("__condition_task".into(), "VERIFY-42".into());
+        let conditions = condition_fields(&fields).unwrap();
+        assert_eq!(conditions[0].task_id.as_deref(), Some("VERIFY-42"));
+        assert_eq!(conditions[0].description, "Deliver verification");
     }
     #[test]
     fn full_autonomy_history_never_accepts_an_answer() {
@@ -1123,4 +1251,67 @@ mod lifecycle_tests {
         assert_eq!(option.as_deref(), Some("b"));
         assert!(apply_patch);
     }
+}
+
+fn interaction_fields(kind: &str) -> Vec<dm::ResponseField> {
+    let mut fields = Vec::new();
+    if kind == "intervention" {
+        fields.push(dm::ResponseField {
+            id: "performed".into(),
+            label: "I performed the requested action (Tab yes/no)".into(),
+            required: true,
+            multiline: false,
+            choices: vec!["no".into(), "yes".into()],
+        });
+        fields.push(dm::ResponseField {
+            id: "result".into(),
+            label: "Actual observed result / output".into(),
+            required: true,
+            multiline: true,
+            choices: vec![],
+        });
+    }
+    for (id, label) in [
+        ("description", "Approval condition (optional)"),
+        ("task", "Condition verification task ID"),
+        ("path", "Condition evidence path"),
+        ("digest", "Expected evidence SHA-256"),
+    ] {
+        fields.push(dm::ResponseField {
+            id: format!("__condition_{id}"),
+            label: label.into(),
+            required: false,
+            multiline: true,
+            choices: vec![],
+        });
+    }
+    fields
+}
+fn condition_fields(
+    fields: &BTreeMap<String, String>,
+) -> Result<Vec<dm::ApprovalCondition>, String> {
+    let get = |key: &str| {
+        fields
+            .get(&format!("__condition_{key}"))
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+    };
+    let Some(description) = get("description") else {
+        return Ok(Vec::new());
+    };
+    let task_id = get("task");
+    let source_path = get("path");
+    let source_digest = get("digest");
+    if task_id.is_none() && source_path.is_none() {
+        return Err(
+            "An approval condition needs a verification task or exact evidence path/hash".into(),
+        );
+    }
+    Ok(vec![dm::ApprovalCondition {
+        id: "operator-condition".into(),
+        description,
+        task_id,
+        source_path,
+        source_digest,
+    }])
 }

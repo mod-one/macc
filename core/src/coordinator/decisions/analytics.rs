@@ -59,7 +59,7 @@ impl Store {
                 .or_default() += 1;
         }
         Ok(
-            json!({"scope":"applicable decisions in the selected plan/reference branch","decisions":decisions.len(),"by_status":states,"by_risk":risks,"by_origin":origins,"reused_answers":reused,"planning_attempts":attempts,"awaiting_plan_effects":effects_waiting,"median_human_response_seconds":median(&human_latency),"median_delegated_resolution_seconds":median(&delegated_latency),"operation_outcomes":op_states,"provider_cost":"not inferred; actual usage receipts remain the authority"}),
+            json!({"scope":"applicable decisions in the selected plan/reference branch","decisions":decisions.len(),"by_status":states,"by_risk":risks,"by_origin":origins,"reused_answers":reused,"planning_attempts":attempts,"awaiting_plan_effects":effects_waiting,"median_human_response_seconds":median(&human_latency),"median_delegated_resolution_seconds":median(&delegated_latency),"operation_outcomes":op_states,"triage_budget":{"extra_paid_sidecar_calls":0,"max_ai_planning_rounds_per_request":policy(&self.root)?.investigation.max_rounds,"prompt_byte_limit":policy(&self.root)?.max_context_bytes,"semantic_compute_ms":200},"provider_cost":"not inferred; actual usage receipts remain the authority"}),
         )
     }
     pub fn similar_requests(&self, plan: &Plan, p: &Policy) -> crate::Result<Value> {
@@ -69,6 +69,7 @@ impl Store {
         let mut bytes = 0;
         let mut limited = false;
         let mut rows = Vec::new();
+        let mut documents = Vec::new();
         for d in self
             .applicable_decisions(plan)?
             .into_iter()
@@ -91,30 +92,104 @@ impl Store {
             }
             bytes += text.len();
             rows.push((d, tokens(&text)));
+            documents.push(text);
         }
+        let started = std::time::Instant::now();
+        let mut diagnostic = String::new();
+        let semantic = if p.similarity_backend == "local_lsa" && documents.len() >= 3 {
+            let limits = crate::o2::semantic::EmbeddingLimits {
+                dimensions: 8,
+                vocabulary: 256,
+                max_ms: 100,
+                max_bytes: (p
+                    .investigation
+                    .max_source_bytes
+                    .saturating_mul(16)
+                    .min(4 * 1024 * 1024)) as u64,
+            };
+            match crate::o2::semantic::decision_hint_space(&documents, &limits) {
+                Ok(space) => Some(space),
+                Err(e) => {
+                    diagnostic =
+                        format!("Local LSA unavailable/budget exhausted; lexical fallback: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut suggestions = Vec::new();
-        for i in 0..rows.len() {
+        let mut comparisons = 0usize;
+        'pairs: for i in 0..rows.len() {
+            let semantic_scores = semantic
+                .as_ref()
+                .and_then(|space| space.similarities(&documents[i]).ok());
             for j in i + 1..rows.len() {
+                if comparisons >= 8192 || started.elapsed().as_millis() > 200 {
+                    limited = true;
+                    break 'pairs;
+                }
+                comparisons += 1;
                 let (a, ta) = &rows[i];
                 let (b, tb) = &rows[j];
                 let union = ta.union(tb).count();
                 if union == 0 {
                     continue;
                 }
-                let score = ta.intersection(tb).count() * 100 / union;
+                let lexical_score = ta.intersection(tb).count() * 100 / union;
+                let semantic_score = semantic_scores
+                    .as_ref()
+                    .and_then(|scores| scores.get(j))
+                    .filter(|s| s.is_finite())
+                    .map(|s| (s.clamp(0.0, 1.0) * 100.0).round() as usize);
+                let score = semantic_score.unwrap_or(lexical_score);
                 let same_domain = a.domain.is_some() && a.domain == b.domain;
                 let same_scope = a.plan_id == b.plan_id
                     && a.request.task_id == b.request.task_id
                     && a.subject_digest == b.subject_digest;
                 if same_domain || score >= p.similarity_min_percent as usize {
-                    suggestions.push(json!({"left":a.id,"right":b.id,"score_percent":score,"same_verified_domain":same_domain,"same_task_contract":same_scope,"action":"inspect and explicitly revise/supersede if appropriate; never inferred consent"}));
+                    suggestions.push(json!({"left":a.id,"right":b.id,"score_percent":score,"lexical_score_percent":lexical_score,"local_semantic_score_percent":semantic_score,"same_verified_domain":same_domain,"same_task_contract":same_scope,"action":"inspect and explicitly revise/supersede if appropriate; never inferred consent"}));
+                    suggestions.sort_by_key(|v| {
+                        std::cmp::Reverse(v["score_percent"].as_u64().unwrap_or(0))
+                    });
+                    suggestions.truncate(32);
                 }
             }
         }
         suggestions.sort_by_key(|v| std::cmp::Reverse(v["score_percent"].as_u64().unwrap_or(0)));
         suggestions.truncate(32);
         Ok(
-            json!({"enabled":true,"authority":false,"method":"bounded lexical/declared-domain candidate retrieval; no automatic semantic authority","candidate_count":rows.len(),"input_bytes":bytes,"budget_limited":limited,"suggestions":suggestions}),
+            json!({"enabled":true,"authority":false,"method":if semantic.is_some(){"bounded local TF-IDF/LSA semantic suggestions; no automatic authority"}else{"bounded lexical/declared-domain candidate retrieval; no automatic semantic authority"},"diagnostic":diagnostic,"comparisons":comparisons,"paid_model_calls":0,"max_compute_ms":200,"candidate_count":rows.len(),"input_bytes":bytes,"budget_limited":limited,"suggestions":suggestions}),
         )
+    }
+}
+
+impl Store {
+    pub fn reference_directions(&self, plan: &Plan) -> crate::Result<Vec<Value>> {
+        let mut out = Vec::new();
+        for source in self
+            .plans()?
+            .into_iter()
+            .filter(|p| p.reference_branch == plan.reference_branch)
+        {
+            for d in self.decisions(&source.id)?.into_iter().filter(|d| {
+                d.status == "resolved"
+                    && matches!(
+                        d.request.kind.as_str(),
+                        "decision" | "clarification" | "feedback"
+                    )
+            }) {
+                if let Some(r) = &d.resolution {
+                    if !r.conditions.is_empty() {
+                        continue;
+                    }
+                    out.push(json!({"id":d.id,"version":d.version,"plan_id":source.id,"source":source.source,"task":d.request.task_id,"question":d.request.question,"text":r.text,"advisory":r.advisory,"actor":r.actor,"origin":r.origin}));
+                }
+                if out.len() >= 256 {
+                    return Ok(out);
+                }
+            }
+        }
+        Ok(out)
     }
 }

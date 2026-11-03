@@ -1,4 +1,6 @@
 import React from 'react';
+import {ApprovalConditions,validApprovalConditions} from './DecisionEvidence';
+import type {ApprovalCondition} from '../api/decisions';
 import {ApprovalTicketDetails} from './ApprovalTicketDetails';
 import * as Dialog from '@radix-ui/react-dialog';
 import { getApprovals, postGateDecision } from '../api/client';
@@ -189,13 +191,14 @@ interface DecisionFormProps {
   onRecorded: (message: string) => void;
 }
 
-interface GateDraft {decision:ApiApprovalDecision;role:string;evidence:string;reason:string;actor:string}
+interface GateDraft {conditions?:ApprovalCondition[];decision:ApiApprovalDecision;role:string;evidence:string;reason:string;actor:string}
 function savedGateDraft(gate:ApiPendingApproval):GateDraft {
  const initial:GateDraft={decision:'approved',role:orderedRoles(gate)[0]??'',evidence:'',reason:'',actor:''};
- try{const value=JSON.parse(sessionStorage.getItem(`macc.approvalDraft.${gateKey(gate)}`)??'null');if(value&&['approved','rejected','changes_requested'].includes(value.decision)&&['role','evidence','reason','actor'].every(k=>typeof value[k]==='string'))return value;}catch{/* Preserve the in-memory form if storage is unavailable. */}return initial;
+ try{const value=JSON.parse(sessionStorage.getItem(`macc.approvalDraft.${gateKey(gate)}`)??'null');if(value&&['approved','rejected','changes_requested'].includes(value.decision)&&['role','evidence','reason','actor'].every(k=>typeof value[k]==='string')&&validApprovalConditions(value.conditions??[]))return value;}catch{/* Preserve the in-memory form if storage is unavailable. */}return initial;
 }
 function DecisionForm({ gate, defaultActor, trustMode, onRecorded }: DecisionFormProps) {
   const initial=savedGateDraft(gate);
+  const [conditions,setConditions]=React.useState<ApprovalCondition[]>(initial.conditions??[]);
   const roles = orderedRoles(gate);
   const [decision, setDecision] = React.useState<ApiApprovalDecision>(initial.decision);
   const [role, setRole] = React.useState(initial.role);
@@ -208,7 +211,7 @@ function DecisionForm({ gate, defaultActor, trustMode, onRecorded }: DecisionFor
 
   const [ticket,setTicket]=React.useState<ApprovalTicket|null>(null);
   const pollOrApply=async(apply:boolean)=>{if(!ticket)return;setSubmitting(true);setError(null);try{const result=await mutateDecisions({action:apply?'approval_apply':'approval_poll',id:ticket.id}) as ApprovalTicket;setTicket(result);if(result.status==='applied')onRecorded('Independently approved gate response durably recorded.');}catch(e){setError(String(e));}finally{setSubmitting(false);}};
-  React.useEffect(()=>{try{sessionStorage.setItem(`macc.approvalDraft.${gateKey(gate)}`,JSON.stringify({decision,role,evidence,reason,actor}));}catch{/* Keep in memory. */}},[gate.task_id,gate.subject_revision,decision,role,evidence,reason,actor]);
+  React.useEffect(()=>{try{sessionStorage.setItem(`macc.approvalDraft.${gateKey(gate)}`,JSON.stringify({decision,role,evidence,reason,actor,conditions}));}catch{/* Keep in memory. */}},[gate.task_id,gate.subject_revision,decision,role,evidence,reason,actor,conditions]);
 
   const isApproval = decision === 'approved';
   const missing: string[] = [];
@@ -221,10 +224,11 @@ function DecisionForm({ gate, defaultActor, trustMode, onRecorded }: DecisionFor
     setSubmitting(true);
     setError(null);
     try {
-      if(trustMode==='secure_approval') {
+      if(trustMode==='secure_approval'||isApproval&&conditions.length>0) {
         const snapshot=await getDecisions();
-        if(!snapshot.approval_broker_available)throw new Error('Configure an independent approval broker, or open Decisions > Approval gates for the advanced signed-attestation workflow. Your draft is preserved.');
-        const intent={action:'gate_vote',plan_id:snapshot.plan?.id,task:gate.task_id,record:{decision,role,actor:actor.trim()||defaultActor,revision:gate.subject_revision,evidence:isApproval&&evidence.trim()?evidence.trim():null,reason:!isApproval?reason.trim():null,recorded_at:new Date().toISOString()}};
+        if(trustMode==='secure_approval'&&!snapshot.approval_broker_available)throw new Error('Configure an independent approval broker, or open Decisions > Approval gates for the advanced signed-attestation workflow. Your draft is preserved.');
+        const intent={action:isApproval&&conditions.length?'conditional_gate_vote':'gate_vote',...(isApproval&&conditions.length?{conditions}:{}),plan_id:snapshot.plan?.id,task:gate.task_id,record:{decision,role,actor:actor.trim()||defaultActor,revision:gate.subject_revision,evidence:isApproval&&evidence.trim()?evidence.trim():null,reason:!isApproval?reason.trim():null,recorded_at:new Date().toISOString()}};
+        if(trustMode!=='secure_approval'){await mutateDecisions({action:'operator',intent});setConfirming(false);onRecorded('Conditional gate response saved; no approval until its explicit conditions pass.');return;}
         const prepared=await mutateDecisions({action:'approval_begin',intent}) as ApprovalTicket;setTicket(prepared);setConfirming(false);return;
       }
       const result = await postGateDecision(gate.task_id, {
@@ -316,6 +320,7 @@ function DecisionForm({ gate, defaultActor, trustMode, onRecorded }: DecisionFor
           <textarea className={cn(fieldClass, 'min-h-20')} value={reason} onChange={(e) => setReason(e.target.value)} />
         </label>
       )}
+      {isApproval&&<ApprovalConditions value={conditions} onChange={setConditions}/>}
       {error && (
         <p role="alert" className="text-sm text-[var(--error)]">
           Not recorded: {error}

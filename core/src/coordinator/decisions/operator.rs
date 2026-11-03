@@ -5,6 +5,12 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperatorIntent {
+    EvidencePermission {
+        id: String,
+        plan_id: String,
+        version: u64,
+        share: bool,
+    },
     Feedback {
         plan_id: String,
         task: String,
@@ -51,6 +57,12 @@ pub enum OperatorIntent {
     Configure {
         policy: Policy,
     },
+    ConditionalGateVote {
+        plan_id: String,
+        task: String,
+        record: crate::coordinator::model::ApprovalRecord,
+        conditions: Vec<ApprovalCondition>,
+    },
     GateVote {
         plan_id: String,
         task: String,
@@ -77,8 +89,10 @@ impl Store {
             self.decision_in_scope(plan, id)?;
         }
         let requested = match intent {
-            OperatorIntent::Feedback { plan_id, .. }
+            OperatorIntent::EvidencePermission { plan_id, .. }
+            | OperatorIntent::Feedback { plan_id, .. }
             | OperatorIntent::Reconcile { plan_id, .. }
+            | OperatorIntent::ConditionalGateVote { plan_id, .. }
             | OperatorIntent::GateVote { plan_id, .. } => Some(plan_id.as_str()),
             OperatorIntent::Graph { patch, .. } => Some(patch.plan_id.as_str()),
             _ => None,
@@ -98,6 +112,17 @@ impl Store {
             Ok(d)
         };
         match intent {
+            OperatorIntent::EvidencePermission {
+                id,
+                plan_id,
+                version,
+                share,
+            } => {
+                if self.artifact(id)?.plan_id != *plan_id {
+                    return Err(error("Evidence consent belongs to another plan"));
+                }
+                self.evidence_permission_challenge(id, *version, *share)
+            }
             OperatorIntent::Feedback {
                 plan_id,
                 task,
@@ -153,6 +178,21 @@ impl Store {
                 Ok(operation_challenge(&op, *state, evidence, &p))
             }
             OperatorIntent::Configure { policy: updated } => Ok(policy_challenge(&p, updated)),
+            OperatorIntent::ConditionalGateVote {
+                plan_id,
+                task,
+                record,
+                conditions,
+            } => {
+                self.validate_operator_vote(plan_id, task, record)?;
+                super::approvals::approval_conditions_challenge(
+                    &self.plan(plan_id)?,
+                    task,
+                    record,
+                    conditions,
+                    &p,
+                )
+            }
             OperatorIntent::GateVote {
                 plan_id,
                 task,
@@ -171,6 +211,19 @@ impl Store {
     ) -> crate::Result<Value> {
         let p = policy(&self.root)?;
         match intent {
+            OperatorIntent::EvidencePermission {
+                id,
+                plan_id,
+                version,
+                share,
+            } => {
+                if self.artifact(id)?.plan_id != *plan_id {
+                    return Err(error("Evidence consent belongs to another plan"));
+                }
+                Ok(json!(
+                    self.share_evidence(id, *version, *share, actor, proof)?
+                ))
+            }
             OperatorIntent::Feedback {
                 plan_id,
                 task,
@@ -262,6 +315,23 @@ impl Store {
                 updated.clone(),
                 proof
             )?)),
+            OperatorIntent::ConditionalGateVote {
+                plan_id,
+                task,
+                record,
+                conditions,
+            } => {
+                self.validate_operator_vote(plan_id, task, record)?;
+                self.record_gate_conditions_attested(
+                    &self.root.clone(),
+                    &self.plan(plan_id)?,
+                    task,
+                    record,
+                    conditions,
+                    proof,
+                )?;
+                Ok(json!({"recorded":true,"task":task,"conditional":true}))
+            }
             OperatorIntent::GateVote {
                 plan_id,
                 task,
@@ -331,6 +401,18 @@ impl Store {
         proof: &Attestation,
     ) -> crate::Result<Option<Value>> {
         match intent {
+            OperatorIntent::EvidencePermission {
+                id, version, share, ..
+            } => {
+                if let Some(p) = self.evidence_permission(id)? {
+                    if p.version == version + 1
+                        && p.share == *share
+                        && p.attestation.as_ref() == Some(proof)
+                    {
+                        return Ok(Some(json!(p)));
+                    }
+                }
+            }
             OperatorIntent::Feedback {
                 plan_id,
                 task,
@@ -447,6 +529,25 @@ impl Store {
                                 return Ok(Some(json!(op)));
                             }
                         }
+                    }
+                }
+            }
+            OperatorIntent::ConditionalGateVote {
+                plan_id,
+                task,
+                record,
+                ..
+            } => {
+                for event in self.events(plan_id)? {
+                    let v = &event["payload"];
+                    if v["task_id"] == *task
+                        && v["attestation"] == json!(proof)
+                        && v["actor"] == record.actor
+                        && v["recorded_at"] == record.recorded_at
+                    {
+                        return Ok(Some(
+                            json!({"recorded":true,"task":task,"conditional":true}),
+                        ));
                     }
                 }
             }

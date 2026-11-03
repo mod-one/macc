@@ -424,7 +424,7 @@ fn human_can_apply_recommended_graph_proposal_explicitly() {
         .answer_details(
             &d.id,
             d.version,
-            &AnswerInput {
+            &AnswerInput { conditions:Vec::new(), artifacts:Vec::new(),
                 text: "Oui, conserver le contrat".into(),
                 option: Some("apply".into()),
                 apply_patch: true,
@@ -963,7 +963,7 @@ fn governance_rules_raise_risk_enforce_fields_and_recheck_pending() {
     assert!(s
         .answer(&d.id, d.version, "yes", None, "Owner", false, &p)
         .is_err());
-    let input = AnswerInput {
+    let input = AnswerInput { conditions:Vec::new(), artifacts:Vec::new(),
         text: "Reviewed".into(),
         fields: std::collections::BTreeMap::from([(
             "reason".into(),
@@ -1610,3 +1610,6 @@ fn wildcard_governance_cannot_be_bypassed_by_low_reported_risk() {
 
 #[path = "tests_workflows.rs"]
 mod workflows;
+
+#[path = "tests_interaction.rs"]
+mod interaction_tests;

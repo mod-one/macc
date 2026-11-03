@@ -54,3 +54,12 @@ fn corpus(records: &[Memory], access: &Access) -> Result<String> {
         &serde_json::to_vec(&values).map_err(|e| error(e.to_string()))?,
     ))
 }
+
+/// Bounded local numerical primitive for advisory decision suggestions only.
+/// This does not bypass the memory retrieval benchmark/authority gate.
+pub(crate) fn decision_hint_space(
+    documents: &[String],
+    limits: &EmbeddingLimits,
+) -> Result<Box<dyn EmbeddingSpace>> {
+    lsa::Lsa.fit(documents, limits)
+}

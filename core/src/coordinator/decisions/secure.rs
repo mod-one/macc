@@ -278,6 +278,8 @@ impl Store {
             .answered_version
             .unwrap_or(previous.version.saturating_sub(1));
         let input = AnswerInput {
+            conditions: r.conditions.clone(),
+            artifacts: r.artifacts.clone(),
             effects: serde_json::from_value(serde_json::json!(if r.effects.is_empty() {
                 "auto"
             } else {

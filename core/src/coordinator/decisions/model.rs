@@ -40,6 +40,12 @@ pub struct Policy {
     #[serde(default, skip_serializing_if = "is_false")]
     pub similarity_hints: bool,
     #[serde(
+        default = "default_similarity_backend",
+        skip_serializing_if = "is_lexical"
+    )]
+    pub similarity_backend: String,
+
+    #[serde(
         default = "default_candidates",
         skip_serializing_if = "candidates_default"
     )]
@@ -73,6 +79,7 @@ impl Default for Policy {
         Self {
             enabled: false,
             similarity_hints: false,
+            similarity_backend: "lexical".into(),
             similarity_max_candidates: 128,
             similarity_min_percent: 75,
             human_question_min_risk: Consultation::High,
@@ -104,6 +111,9 @@ impl Policy {
             return Err(super::error(
                 "Investigation budget must be 1..10 rounds and 1024..262144 source bytes",
             ));
+        }
+        if !matches!(self.similarity_backend.as_str(), "lexical" | "local_lsa") {
+            return Err(super::error("Decision similarity backend must be lexical or local_lsa; no remote embedding calls are made"));
         }
         if !(1..=512).contains(&self.similarity_max_candidates)
             || !(1..=100).contains(&self.similarity_min_percent)
@@ -203,6 +213,10 @@ pub struct OptionChoice {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention: Option<UserIntervention>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_of: Option<DecisionRef>,
@@ -262,6 +276,10 @@ fn default_scope() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resolution {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ApprovalCondition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_version: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -365,6 +383,9 @@ pub struct Patch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextPackage {
+    /// Contains bytes only for artifacts explicitly released by an operator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<EvidenceArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -428,6 +449,10 @@ pub struct ResponseField {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AnswerInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ApprovalCondition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<super::secure::Attestation>,
     pub text: String,
@@ -448,6 +473,7 @@ pub enum AnswerOutcome {
     Answer,
     Reject,
     RequestChanges,
+    Investigate,
 }
 impl AnswerOutcome {
     pub fn as_str(self) -> &'static str {
@@ -455,6 +481,7 @@ impl AnswerOutcome {
             Self::Answer => "answer",
             Self::Reject => "reject",
             Self::RequestChanges => "request_changes",
+            Self::Investigate => "investigate",
         }
     }
 }
@@ -621,6 +648,8 @@ pub struct EffectCommit {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct PlanningContext {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub purpose: String,
     pub requests: Vec<DecisionRef>,
     pub worktree: String,
     pub artifact_digest: Option<String>,
@@ -637,4 +666,54 @@ fn default_similarity() -> u8 {
 }
 fn similarity_default(n: &u8) -> bool {
     *n == 75
+}
+
+/// An indispensable action outside the worker's available capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserIntervention {
+    pub action: String,
+    pub inaccessible_reason: String,
+    pub expected_result: String,
+    #[serde(default)]
+    pub verification: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactRef {
+    pub id: String,
+    pub digest: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceArtifact {
+    pub id: String,
+    pub plan_id: String,
+    pub label: String,
+    pub media_type: String,
+    pub digest: String,
+    pub size: usize,
+    pub data_hex: String,
+    pub actor: String,
+    pub recorded_at: String,
+}
+/// Conditions are explicit checked criteria, never inferred from approval wording.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalCondition {
+    pub id: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
+}
+
+fn default_similarity_backend() -> String {
+    "lexical".into()
+}
+fn is_lexical(s: &String) -> bool {
+    s == "lexical"
 }

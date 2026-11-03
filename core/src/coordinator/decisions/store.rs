@@ -124,6 +124,7 @@ impl Store {
             return Err(error(format!("Control integrity failed: {check}")));
         }
         let mut last = String::new();
+        let mut evidence = std::collections::BTreeMap::<String, Value>::new();
         let mut graphs = std::collections::BTreeMap::<String, (u64, Value)>::new();
         let mut decisions = std::collections::BTreeMap::<String, Decision>::new();
         let mut operation_states =
@@ -152,6 +153,20 @@ impl Store {
             }
             let value: Value = decode(&payload)?;
             match kind.as_str() {
+                "evidence.artifact" | "evidence.permission" => {
+                    let id = value["id"]
+                        .as_str()
+                        .ok_or_else(|| error("Evidence event lacks an identity"))?;
+                    if value["plan_id"].as_str() != Some(plan.as_str()) {
+                        return Err(error("Evidence event belongs to another plan"));
+                    }
+                    let prefix = if kind == "evidence.artifact" {
+                        "evidence"
+                    } else {
+                        "evidence-permission"
+                    };
+                    evidence.insert(format!("{prefix}:{id}"), value);
+                }
                 "operation.transition" => {
                     let op: OperationExecution = serde_json::from_value(value["operation"].clone())
                         .map_err(|e| error(e.to_string()))?;
@@ -212,6 +227,23 @@ impl Store {
                 _ => {}
             }
             last = hash;
+        }
+        {
+            let mut statement=sql(self.db.prepare("SELECT key,value FROM metadata WHERE key LIKE 'evidence:%' OR key LIKE 'evidence-permission:%'"))?;
+            for row in
+                sql(statement
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?
+            {
+                let (key, raw) = sql(row)?;
+                if evidence.remove(&key) != Some(decode::<Value>(&raw)?) {
+                    return Err(error(
+                        "Evidence or disclosure projection disagrees with its latest journal event",
+                    ));
+                }
+            }
+            if !evidence.is_empty() {
+                return Err(error("Evidence or disclosure projection is incomplete"));
+            }
         }
         let plans = self.plans()?;
         if plans.len() != graphs.len() {

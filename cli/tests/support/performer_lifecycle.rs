@@ -97,6 +97,14 @@ jq -nc --arg sid "$2" '{type:"result",session_id:$sid,result:"MACC_TASK_RESULT: 
         let mut script = std::fs::read_to_string(&path).unwrap();
         script=script.replace("printf 'retained work", "[[ \"${@: -1}\" == *'This exact wording must reach the provider.'* ]] || exit 43\nprintf 'retained work");
         script=script.replace("jq -nc --arg sid", "if [[ \"$FAIL_MODE\" != decisions_missing_ack ]]; then\n  decision_ack=\"$(printf '%s\\n' \"${@: -1}\" | sed -n '/^MACC_DECISION_ACK: /p')\"\n  jq -nc --arg ack \"$decision_ack\" '{type:\"assistant\",message:{content:[{type:\"text\",text:$ack}]}}'\nfi\njq -nc --arg sid");
+        if fail_mode == "decisions_intervention" {
+            script = script.replace("jq -nc --arg sid", r#"cat > .macc/manual-request.json <<'JSON'
+{"idempotency_key":"usb-device","task_id":"A","kind":"intervention","question":"Connect the USB device and return its status","recommendation":"Wait for the observed result","investigated":["Worker has no physical access"],"impact":{"evidence":["USB hardware unavailable to worker"]},"intervention":{"action":"Connect and unlock the device","inaccessible_reason":"No physical access from this worker","expected_result":"Paste the actual device status","verification":"Run the local device listing"}}
+JSON
+"$MACC_DECISION_CLI" decisions request --file .macc/manual-request.json > .macc/manual-request-result.json
+jq -nc --arg sid"#);
+            script = script.replace("MACC_TASK_RESULT: success_with_changes", "MACC_TASK_RESULT: precondition_unmet\\nMACC_TASK_RESULT_EXP: Awaiting actual USB connection and user result");
+        }
         std::fs::write(path, script).unwrap();
     }
     let mut performer = Command::new("bash");
@@ -272,4 +280,54 @@ fn missing_decision_ack_preserves_performer_work_and_prevents_commit() {
             .count(),
         1
     );
+}
+
+#[test]
+fn real_performer_can_request_user_hardware_intervention_without_losing_work() {
+    use macc_core::coordinator::decisions as dm;
+    let (temp, _out, events) = run_case("decisions_intervention");
+    assert!(temp.path().join("implementation.txt").exists());
+    let mut store = dm::Store::open(temp.path()).unwrap();
+    let plan = store.plans().unwrap().pop().unwrap();
+    let d = store
+        .decisions(&plan.id)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.request.kind == "intervention")
+        .expect("Actual performer CLI must record its intervention");
+    assert_eq!(d.status, "pending_human");
+    assert!(d.resolution.is_none());
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "phase_result"
+                && e["payload"]["result_kind"] == "precondition_unmet"),
+        "{events:?}"
+    );
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(temp.path())
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "initial");
+    let p = dm::policy(temp.path()).unwrap();
+    let answer = dm::AnswerInput {
+        text: "Actual hardware observation".into(),
+        fields: std::collections::BTreeMap::from([
+            ("performed".into(), "yes".into()),
+            ("result".into(), "Device USB-42 ready".into()),
+        ]),
+        ..Default::default()
+    };
+    store
+        .answer_details(&d.id, d.version, &answer, "Operator", &p)
+        .unwrap();
+    let current = store.plan(&plan.id).unwrap();
+    assert!(store
+        .context(&current, "A", "after-hardware", "dev", &p)
+        .unwrap()
+        .render()
+        .contains("Device USB-42 ready"));
+    store.verify().unwrap();
 }

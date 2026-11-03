@@ -48,6 +48,9 @@ impl Store {
             .planning
             .as_ref()
             .ok_or_else(|| error("This invocation is not authorized for decision planning"))?;
+        if planning.purpose == "investigation" {
+            return Err(error("Investigation does not authorize graph effects"));
+        }
         if c.task_id != d.request.task_id
             || !planning
                 .requests
