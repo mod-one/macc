@@ -113,6 +113,7 @@ function statusColor(state: string): string {
 const PrdPage: React.FC = () => {
   // PRD data
   const [tasks, setTasks] = useState<ApiPrdTask[]>([]);
+  const [graphVersion,setGraphVersion]=useState<number|undefined>();
   const [metadata, setMetadata] = useState<Record<string, JsonValue>>({});
   const [prdFilePath, setPrdFilePath] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -144,6 +145,7 @@ const PrdPage: React.FC = () => {
     try {
       const data = await getPrd(path ? { path } : {});
       setTasks(data.tasks ?? []);
+      setGraphVersion(data.graphVersion);
       setMetadata(data.metadata ?? {});
       setUnsavedChanges(false);
       setValidationErrors([]);
@@ -276,7 +278,8 @@ const PrdPage: React.FC = () => {
     if (!validatePrd()) return;
     setIsSaving(true);
     try {
-      await updatePrd({ tasks, metadata }, prdFilePath ? { path: prdFilePath } : {});
+      const saved=await updatePrd({ tasks, metadata,graphVersion }, prdFilePath ? { path: prdFilePath } : {});
+      setTasks(saved.tasks??[]);setMetadata(saved.metadata??{});setGraphVersion(saved.graphVersion);
       setUnsavedChanges(false);
       setValidationErrors([]);
     } catch (err) {

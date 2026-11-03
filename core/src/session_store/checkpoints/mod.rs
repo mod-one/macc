@@ -73,6 +73,7 @@ pub(super) fn make(
         })
         .unwrap_or_default();
     let mut c = Checkpoint {
+        decision_context: crate::coordinator::decisions::checkpoint_binding(root, task_id)?,
         schema_version: 1,
         id: uuid::Uuid::new_v4().to_string(),
         project_id: a.project_id.clone(),
@@ -235,13 +236,24 @@ pub(super) fn fingerprint(c: &Checkpoint) -> String {
             c.branch,
             c.source_revision,
             c.worktree_dirty_digest,
-            c.source_hashes
+            c.source_hashes,
+            c.decision_context.as_ref().map(|v| json!([
+                v["plan_id"],
+                v["contract_digest"],
+                v["context_digest"]
+            ]))
         ])
         .to_string()
         .as_bytes(),
     )
 }
 pub(super) fn same_source(a: &Checkpoint, b: &Checkpoint) -> bool {
+    if !crate::coordinator::decisions::compatible_checkpoint_binding(
+        &a.decision_context,
+        &b.decision_context,
+    ) {
+        return false;
+    }
     same_task_sources(a, b) && a.branch == b.branch
 }
 pub(super) fn same_task_sources(a: &Checkpoint, b: &Checkpoint) -> bool {

@@ -445,6 +445,8 @@ pub(crate) struct ApiStandardsPreviewCard {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiPrdResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_version: Option<u64>,
     /// PRD tasks in display order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<ApiPrdTask>,
@@ -497,6 +499,8 @@ pub(crate) struct ApiPrdTask {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiPrdUpdateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_version: Option<u64>,
     /// Replacement task list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<ApiPrdTask>,

@@ -1,14 +1,14 @@
 # MACC — Decision Management & Durable Approval Persistence
 
 **Architecture Decision Baseline, Verified Implementation, and Recommendation Review — Revision 1.4**<br>
-**Status:** Reviewed target architecture; opt-in local implementation added; full release qualification remains pending<br>
+**Status:** Opt-in implementation extended; local validation recorded separately from deployment qualification<br>
 **Date:** 2026-10-29  
 **Revision:** 1.4 — responsive Web/TUI decision interfaces, explicit never-ask autonomy and universal decision traceability; source baseline remains `13ca933`<br>
 **Scope:** MACC native Rust coordinator, PRD planner, performers, reviewers, worktrees, CLI/TUI, local web client, and durable control-plane state.
 
-> **Document status:** The six choices in Section 1 remain the project-owner architectural requirements. Section 2 records the implementation inspected on 2026-10-29 at commit `13ca933`; Sections 3–16 describe the **target extension**, except where an existing behavior is explicitly identified. Section 12.6 validates or qualifies all 43 recommendations technically; this review neither invents project governance nor certifies unimplemented capabilities. The filename is retained for existing references. This revision changes documentation only; no runtime feature or new acceptance test was implemented or executed for this review.
+> **Document status:** The six choices in Section 1 remain the project-owner architectural requirements. Section 2 records the implementation inspected on 2026-10-29 at commit `13ca933`; Sections 3–16 describe the **target extension**, except where an existing behavior is explicitly identified. Section 12.6 validates or qualifies all 43 recommendations technically; this review neither invents project governance nor certifies unimplemented capabilities. The filename is retained for existing references. That historical review changed documentation only; the subsequent implementation and executed checks are recorded in the linked implementation guide and validation matrix.
 
-> **Implementation update (2026-10-29):** The local implementation, activation, commands, migration/trust boundaries and validation scope are documented in [Decision management: local implementation](../architecture/decision-management.md). Section 2 remains the historical inspection at `13ca933`; its statements of absence describe that snapshot. The opt-in implementation does not claim secure approver isolation, signed Git transport or certification of the complete AT01–AT68 matrix.
+> **Implementation update (2026-11-03):** The implemented contracts, configuration and trust boundaries are described in [Decision management](../architecture/decision-management.md), with an explicit [AT01–AT68 validation matrix](../architecture/decision-management-acceptance.md). The extension includes governed intake and investigation, typed subject arbitration/supersession, versioned PRD editing, semantic context/checkpoint/lease pins, structured responses, external-operation reconciliation, isolated signature verification and signed Git Notes transport. Section 2 remains the historical inspection at `13ca933`. Local component/integration tests do not certify live AI providers, an organization's approver service, every operating system or every production-scale acceptance scenario.
 
 **Owner clarification incorporated in revision 1.3:** performers must be free to raise important unresolved decisions without making questions systematic. The coordinator filters requests and remains as autonomous as possible. The user controls the minimum risk level for discretionary human questions, thereby granting more or less decision latitude within existing authority. Section 7.3 specifies this mechanism; the opt-in local setting is documented in the implementation guide.
 
@@ -1022,7 +1022,7 @@ It must also implement `never_ask` with typed delegated resolutions, the same du
 
 ## 14. Release-1 acceptance scenarios
 
-**Baseline column:** `NEW` means the complete scenario requires the new decision/graph/context extension; `PARTIAL` means existing primitives or tests cover only part of it. Neither denotes a passing release-1 acceptance test. Existing unit tests were inspected as source; no execution of this target acceptance suite is claimed. Full-DAG release acceptance remains mandatory even if implementation proceeds through internal milestones.
+**Historical baseline column (`13ca933`):** `NEW` means the complete scenario requires the new decision/graph/context extension; `PARTIAL` means existing primitives or tests cover only part of it. Neither denotes a passing release-1 acceptance test. Existing unit tests were inspected as source; no execution of this target acceptance suite is claimed. Full-DAG release acceptance remains mandatory even if implementation proceeds through internal milestones.
 
 | ID | Test scenario | Expected result | Current baseline |
 |---|---|---|---|
@@ -1081,7 +1081,7 @@ Additional requirements: unit property tests for acyclicity and stable identity;
 
 ### 14.2 Performer questions and configurable autonomy acceptance cases
 
-These are target acceptance cases for Section 7.3, not implemented tests.
+These are scenario-level acceptance requirements for Section 7.3. Current implementation and automated coverage are recorded in the [validation matrix](../architecture/decision-management-acceptance.md); the historical table does not claim execution of every full scenario.
 
 | ID | Test scenario | Expected result |
 |---|---|---|
@@ -1099,7 +1099,7 @@ These are target acceptance cases for Section 7.3, not implemented tests.
 
 ### 14.3 Responsive interfaces and fully autonomous decisions
 
-These target cases extend Sections 7.3.5–7.3.6 and 11.4; they do not claim current implementation.
+These target cases extend Sections 7.3.5–7.3.6 and 11.4. Current component and integration evidence is linked in the [validation matrix](../architecture/decision-management-acceptance.md).
 
 | ID | Test scenario | Expected result |
 |---|---|---|
@@ -1156,6 +1156,8 @@ These target cases extend Sections 7.3.5–7.3.6 and 11.4; they do not claim cur
 10. **Preserve current working safeguards.** Extend the approval evaluator, shared CLI/TUI/web service, queue delivery checks, checkpoint recovery and ownership gates; do not bypass them with a second decision-control path.
 11. **Define the atomic boundary precisely.** Control-DB authority is transactional; registry/files/Git/runner delivery are replayable fenced projections, not an implicit distributed transaction.
 
-### Recommended next engineering artifact
+### Implementation follow-through and release qualification
 
-Transform this source-aligned baseline into an **implementation PRD organized by work packages A–D**, with schema/migration and coordinator state-machine contracts as blocking prerequisites. Use the verdicts in Section 12.6: implement validated mechanisms, include refinements as acceptance criteria, and leave project-specific governance explicit rather than inventing approvals. Every PRD task should cite its ADR, recommendation ID, existing extension point, migration impact and acceptance cases (AT01–AT68), including Section 7.3's thresholds/full autonomy and Section 11.4's responsive Web/TUI interaction. Internal milestones may be tested behind a feature gate; the first completed release must demonstrate **dynamic DAG mutation, durable recovery, AND end-to-end propagation of human and autonomous decisions to performers and reviewers together**.
+The [implementation guide](../architecture/decision-management.md) and [AT01–AT68 matrix](../architecture/decision-management-acceptance.md) now map work packages A–D to the native code and local evidence. Preserve the accepted ADRs and recommendation refinements when maintaining this implementation. Project-specific governance, approver roles and trusted operation adapters still require explicit project configuration; they cannot be invented from model confidence.
+
+Before declaring the first generally available release, complete the matrix's deployment qualification: actual provider prompt/resume behavior, an independently authenticated external approver, production-scale crash/concurrency exercises, and real browser/terminal/cross-platform checks. The release criterion remains **dynamic DAG mutation, durable recovery, and end-to-end propagation and enforcement of human and autonomous decisions together**, rather than approval persistence alone.

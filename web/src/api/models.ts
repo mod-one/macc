@@ -545,11 +545,13 @@ export interface ApiPrdTask {
 }
 
 export interface ApiPrdResponse {
+  graphVersion?: number;
   tasks: ApiPrdTask[];
   metadata: Record<string, JsonValue>;
 }
 
 export interface ApiPrdUpdateRequest {
+  graphVersion?: number;
   tasks: ApiPrdTask[];
   metadata: Record<string, JsonValue>;
 }

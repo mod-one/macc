@@ -17,6 +17,12 @@ pub enum Action {
         enabled: Option<bool>,
         #[arg(long)]
         mode: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
     },
     /// Submit an investigated question/recommendation from the current task
     Request {
@@ -34,6 +40,35 @@ pub enum Action {
         option: Option<String>,
         #[arg(long)]
         advisory: bool,
+        #[arg(long)]
+        apply_patch: bool,
+        #[arg(long)]
+        fields_file: Option<PathBuf>,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
+        #[arg(long)]
+        challenge: bool,
+        #[arg(long, default_value = "answer")]
+        outcome: String,
+    },
+    Transport {
+        #[command(subcommand)]
+        action: TransportAction,
+    },
+    Investigate {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        facts_file: PathBuf,
+    },
+    GateAttestation {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        record_file: PathBuf,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
     },
     /// Record new scoped human direction without a pending gate
     Feedback {
@@ -58,6 +93,10 @@ pub enum Action {
         operation: String,
     },
     /// Inspect exact contexts issued to a task, independently of model acknowledgement
+    Operations {
+        #[command(subcommand)]
+        action: OperationAction,
+    },
     TaskContext {
         task: String,
     },
@@ -89,6 +128,50 @@ pub enum Action {
     },
 }
 #[derive(Subcommand)]
+pub enum TransportAction {
+    Sign {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        principal: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        git_note: bool,
+    },
+    Import {
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        git_note: Option<String>,
+        #[arg(long)]
+        allowed_signers: PathBuf,
+        #[arg(long)]
+        enroll_project: bool,
+    },
+}
+#[derive(Subcommand)]
+pub enum OperationAction {
+    List,
+    Execute {
+        id: String,
+    },
+    Probe {
+        operation: String,
+        #[arg(long)]
+        version: u64,
+    },
+    Reconcile {
+        operation: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        state: String,
+        #[arg(long)]
+        evidence: String,
+    },
+}
+#[derive(Subcommand)]
 pub enum GraphAction {
     Show,
     Preview {
@@ -96,11 +179,15 @@ pub enum GraphAction {
     },
     Apply {
         file: PathBuf,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
     },
     Reconcile {
         file: PathBuf,
         #[arg(long)]
         source_digest: String,
+        #[arg(long)]
+        attestation_file: Option<PathBuf>,
     },
 }
 
@@ -146,10 +233,21 @@ pub fn run(app: &AppContext, action: &Action) -> Result<()> {
     Ok(())
 }
 fn execute(root: &Path, action: &Action) -> Result<Value> {
-    if let Action::Config { enabled, mode } = action {
+    if let Action::Config {
+        enabled,
+        mode,
+        file,
+        attestation_file,
+        challenge,
+    } = action
+    {
         let mut policy = dm::policy(root)?;
-        if enabled.is_some() || mode.is_some() {
+        if enabled.is_some() || mode.is_some() || file.is_some() {
             operator(root)?;
+            let current = policy.clone();
+            if let Some(file) = file {
+                policy = read(file, 262144)?;
+            }
             if let Some(enabled) = enabled {
                 policy.enabled = *enabled;
             }
@@ -159,7 +257,14 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                         dm::error("Mode must be low, medium, high, critical or never_ask")
                     })?;
             }
-            policy = dm::configure(root, policy)?;
+            if *challenge {
+                return Ok(dm::policy_challenge(&current, &policy));
+            }
+            let proof = attestation_file
+                .as_ref()
+                .map(|file| read(file, 65536))
+                .transpose()?;
+            policy = dm::configure_attested(root, policy, proof.as_ref())?;
         }
         return Ok(json!(policy));
     }
@@ -167,6 +272,30 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
         return dm::snapshot(root);
     }
     let p = dm::policy(root)?;
+    if let Action::Transport {
+        action:
+            TransportAction::Import {
+                file,
+                git_note,
+                allowed_signers,
+                enroll_project,
+            },
+    } = action
+    {
+        operator(root)?;
+        let mut store = dm::Store::open(root)?;
+        let bundle = match (file, git_note) {
+            (Some(file), None) => read(file, 4 * 1024 * 1024)?,
+            (None, Some(object)) => store.read_note(object)?,
+            _ => {
+                return Err(dm::error(
+                    "Select exactly one signed file or Git note object",
+                ))
+            }
+        };
+        store.import_archive(&bundle, allowed_signers, *enroll_project)?;
+        return Ok(json!({"imported":true,"project_id":store.project_id}));
+    }
     let (mut store, plan) = if matches!(
         action,
         Action::Show { .. }
@@ -224,6 +353,95 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                 json!({"reserved":true,"decision_id":id,"operation_id":operation,"retry_requires_verified_idempotency":true}),
             )
         }
+        Action::Transport { action } => {
+            operator(root)?;
+            match action {
+                TransportAction::Sign {
+                    key,
+                    principal,
+                    file,
+                    git_note,
+                } => {
+                    let bundle = store.sign_archive(key, principal)?;
+                    std::fs::write(
+                        file,
+                        serde_json::to_vec_pretty(&bundle).map_err(|e| dm::error(e.to_string()))?,
+                    )
+                    .map_err(|e| dm::error(e.to_string()))?;
+                    let object = if *git_note {
+                        Some(store.publish_note(&bundle)?)
+                    } else {
+                        None
+                    };
+                    Ok(
+                        json!({"exported":file,"git_note_object":object,"notes_ref":"refs/notes/macc-decisions","network_sync":"explicit Git fetch/push required"}),
+                    )
+                }
+                TransportAction::Import {
+                    file,
+                    git_note,
+                    allowed_signers,
+                    enroll_project,
+                } => {
+                    let bundle = match (file, git_note) {
+                        (Some(file), None) => read(file, 4 * 1024 * 1024)?,
+                        (None, Some(object)) => store.read_note(object)?,
+                        _ => {
+                            return Err(dm::error(
+                                "Select exactly one signed file or Git note object",
+                            ))
+                        }
+                    };
+                    store.import_archive(&bundle, allowed_signers, *enroll_project)?;
+                    Ok(json!({"imported":true,"project_id":store.project_id}))
+                }
+            }
+        }
+        Action::Operations { action } => match action {
+            OperationAction::List => Ok(json!(store.operations(&plan.id)?)),
+            OperationAction::Execute { id } => {
+                store.decision_in_scope(&plan, id)?;
+                if std::env::var_os("MACC_DECISION_ATTEMPT").is_some() {
+                    let c = store.read_context(
+                        &env("MACC_DECISION_PLAN")?,
+                        &env("MACC_DECISION_ATTEMPT")?,
+                        &env("MACC_DECISION_PHASE")?,
+                    )?;
+                    let d = store.decision(id)?;
+                    if c.plan_id != d.plan_id
+                        || c.task_id != d.request.task_id
+                        || store
+                            .context(&plan, &c.task_id, &c.attempt_id, &c.phase, &p)?
+                            .context_digest
+                            != c.context_digest
+                    {
+                        return Err(dm::error(
+                            "Operation is outside the current pinned invocation",
+                        ));
+                    }
+                } else {
+                    operator(root)?;
+                }
+                Ok(json!(store.execute_operation(id)?))
+            }
+            OperationAction::Probe { operation, version } => {
+                operator(root)?;
+                Ok(json!(store.probe_operation(&plan.id, operation, *version)?))
+            }
+            OperationAction::Reconcile {
+                operation,
+                version,
+                state,
+                evidence,
+            } => {
+                let actor = operator(root)?;
+                let state = serde_json::from_value(json!(state))
+                    .map_err(|_| dm::error("State must be succeeded, failed or reserved"))?;
+                Ok(json!(store.reconcile_operation(
+                    &plan.id, operation, *version, state, evidence, &actor
+                )?))
+            }
+        },
         Action::Show { id } => Ok(json!(store.decision(id)?)),
         Action::TaskContext { task } => Ok(json!(store.context_history(&plan.id, task)?)),
         Action::History => Ok(json!(store.scoped_history(&plan)?)),
@@ -275,17 +493,78 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             text,
             option,
             advisory,
+            apply_patch,
+            fields_file,
+            attestation_file,
+            challenge,
+            outcome,
         } => {
             let actor = operator(root)?;
-            Ok(json!(store.answer(
-                id,
-                *version,
-                text,
-                option.clone(),
-                &actor,
-                *advisory,
-                &p
-            )?))
+            let fields = if let Some(path) = fields_file {
+                read(path, p.max_request_bytes)?
+            } else {
+                Default::default()
+            };
+            let outcome = serde_json::from_value(json!(outcome))
+                .map_err(|_| dm::error("Outcome must be answer, reject or request_changes"))?;
+            let attestation = attestation_file
+                .as_ref()
+                .map(|path| read(path, p.max_request_bytes))
+                .transpose()?;
+            let input = dm::AnswerInput {
+                attestation,
+                text: text.clone(),
+                option: option.clone(),
+                advisory: *advisory,
+                apply_patch: *apply_patch,
+                fields,
+                outcome,
+            };
+            if *challenge {
+                return Ok(dm::answer_challenge(&store.decision(id)?, &input, &p));
+            }
+            return Ok(json!(
+                store.answer_details(id, *version, &input, &actor, &p)?
+            ));
+        }
+        Action::Investigate {
+            id,
+            version,
+            facts_file,
+        } => {
+            let d = store.decision_in_scope(&plan, id)?;
+            let actor = if std::env::var_os("MACC_DECISION_ATTEMPT").is_some() {
+                let c = store.read_context(
+                    &env("MACC_DECISION_PLAN")?,
+                    &env("MACC_DECISION_ATTEMPT")?,
+                    &env("MACC_DECISION_PHASE")?,
+                )?;
+                if c.plan_id != d.plan_id || c.task_id != d.request.task_id {
+                    return Err(dm::error("Investigation is outside the pinned task"));
+                }
+                format!("agent:{}", c.task_id)
+            } else {
+                operator(root)?
+            };
+            let facts = read(facts_file, p.max_request_bytes)?;
+            Ok(json!(store.investigate(id, *version, &facts, &actor, &p)?))
+        }
+        Action::GateAttestation {
+            task,
+            record_file,
+            attestation_file,
+        } => {
+            operator(root)?;
+            let record = read(record_file, p.max_request_bytes)?;
+            let proof = attestation_file
+                .as_ref()
+                .map(|path| read(path, p.max_request_bytes))
+                .transpose()?;
+            if proof.is_none() {
+                return dm::approval_challenge(&plan, task, &record, &p);
+            }
+            store.record_approval_attested(root, &plan, task, &record, proof.as_ref())?;
+            Ok(json!({"recorded":true}))
         }
         Action::Feedback {
             text,
@@ -313,22 +592,44 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             }
             let file = match action {
                 GraphAction::Preview { file }
-                | GraphAction::Apply { file }
+                | GraphAction::Apply { file, .. }
                 | GraphAction::Reconcile { file, .. } => file,
                 _ => unreachable!(),
             };
             let patch: dm::Patch = read(file, 262144)?;
             let registry = dm::registry(root)?;
             if matches!(action, GraphAction::Preview { .. }) {
-                return Ok(
-                    json!({"base":plan.graph_version,"projection":store.projection_diff(root,&plan)?,"proposed":store.preview_patch(&plan,&patch,&registry)?}),
-                );
+                return store.graph_preview(&plan, &patch);
             }
             let actor = operator(root)?;
-            let applied = if let GraphAction::Reconcile { source_digest, .. } = action {
-                store.reconcile_projection(root, &patch, source_digest, &actor)?
+            let applied = if let GraphAction::Reconcile {
+                source_digest,
+                attestation_file,
+                ..
+            } = action
+            {
+                let proof = attestation_file
+                    .as_ref()
+                    .map(|file| read(file, p.max_request_bytes))
+                    .transpose()?;
+                store.reconcile_projection_attested(
+                    root,
+                    &patch,
+                    source_digest,
+                    &actor,
+                    proof.as_ref(),
+                )?
             } else {
-                store.apply_patch(&plan.id, &patch, &registry, &actor)?
+                let proof = if let GraphAction::Apply {
+                    attestation_file: Some(file),
+                    ..
+                } = action
+                {
+                    Some(read(file, p.max_request_bytes)?)
+                } else {
+                    None
+                };
+                store.apply_patch_attested(&plan.id, &patch, &registry, &actor, proof.as_ref())?
             };
             store.project(root)?;
             Ok(json!(applied))

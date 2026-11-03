@@ -136,6 +136,8 @@ pub(super) fn resolve(root: &Path, previous: &Checkpoint) -> Result<Context> {
     current.changed_files = git.changed;
     current.mandatory_task = task;
     current.source_hashes = hashes;
+    current.decision_context =
+        crate::coordinator::decisions::checkpoint_binding(root, &previous.task_id)?;
     Ok(Context {
         current,
         payload,

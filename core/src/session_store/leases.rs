@@ -136,6 +136,10 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
     let process = process_identity(request.owner_pid)
         .ok_or_else(|| error("Owner process cannot be verified"))?;
     let policy = policy::load(root)?;
+    let decision_pin = crate::coordinator::decisions::checkpoint_binding(
+        root,
+        request.identity["task_id"].as_str().unwrap_or_default(),
+    )?;
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     recover_in(&tx)?;
     // Stable request IDs make a lost response retry idempotent, without sharing
@@ -161,6 +165,7 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
                 "Request ID belongs to a different or expired invocation",
             ));
         }
+        verify_decision_pin(root, &tx, &id, generation)?;
         // is_new belongs to this invocation, not the provider's existence now.
         let is_new: bool = sql(tx.query_row(
             "SELECT use_count=1 FROM logical_sessions WHERE id=?1",
@@ -241,6 +246,14 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
         "INSERT INTO session_requests VALUES(?1,?2,?3)",
         params![request.request_id, id, generation],
     ))?;
+    if let Some(pin) = decision_pin {
+        db::event(
+            &tx,
+            &id,
+            "decision_context_pinned",
+            json!({"generation":generation,"binding":pin}),
+        )?;
+    }
     db::event(
         &tx,
         &id,
@@ -340,6 +353,7 @@ fn mutate(
     let (mut db, _) = db::active(root)?;
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     verify(&tx, key)?;
+    verify_decision_pin(root, &tx, &key.session_id, key.generation)?;
     operation(&tx)?;
     sql(tx.commit())?;
     Ok(())
@@ -390,4 +404,29 @@ pub fn read_hint(root: &Path, identity: &Value) -> Result<Option<String>> {
     let p = policy::load(root)?;
     sql(db.query_row("SELECT provider_session_id FROM logical_sessions WHERE project_id=?1 AND identity_json=?2 AND status='available' AND provider_session_id IS NOT NULL AND updated_at>=?3 ORDER BY updated_at DESC,id LIMIT 1",
         params![a.project_id,identity.to_string(),now()-(p.lifecycle.max_idle_hours*3600) as i64],|r|r.get(0)).optional())
+}
+
+fn verify_decision_pin(
+    root: &Path,
+    db: &rusqlite::Connection,
+    id: &str,
+    generation: i64,
+) -> Result<()> {
+    if !crate::coordinator::decisions::policy(root)?.enabled {
+        return Ok(());
+    }
+    let task: String = sql(db.query_row(
+        "SELECT task_id FROM logical_sessions WHERE id=?1",
+        [id],
+        |r| r.get(0),
+    ))?;
+    let stored:Option<String>=sql(db.query_row("SELECT payload_json FROM session_events WHERE logical_session_id=?1 AND event_type='decision_context_pinned' AND json_extract(payload_json,'$.generation')=?2 ORDER BY rowid DESC LIMIT 1",params![id,generation],|r|r.get(0)).optional())?;
+    let old = stored
+        .map(|s| json::<Value>(s.as_bytes()).map(|v| v["binding"].clone()))
+        .transpose()?;
+    let current = crate::coordinator::decisions::checkpoint_binding(root, &task)?;
+    if !crate::coordinator::decisions::compatible_checkpoint_binding(&old, &current) {
+        return Err(error("DM_STALE: provider lease has obsolete binding decisions; preserve work and acquire a fresh invocation"));
+    }
+    Ok(())
 }

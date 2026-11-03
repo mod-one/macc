@@ -8,6 +8,10 @@ use serde_json::{json, Value};
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Mutation {
     Configure {
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
+        #[serde(default)]
+        challenge: bool,
         policy: dm::Policy,
     },
     Answer {
@@ -17,6 +21,16 @@ pub(super) enum Mutation {
         option: Option<String>,
         #[serde(default)]
         advisory: bool,
+        #[serde(default)]
+        apply_patch: bool,
+        #[serde(default)]
+        fields: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        outcome: dm::AnswerOutcome,
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
+        #[serde(default)]
+        challenge: bool,
     },
     Feedback {
         text: String,
@@ -34,11 +48,28 @@ pub(super) enum Mutation {
         patch: dm::Patch,
     },
     PatchApply {
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
         patch: dm::Patch,
     },
     PatchReconcile {
+        #[serde(default)]
+        attestation: Option<dm::Attestation>,
         patch: dm::Patch,
         source_digest: String,
+    },
+    OperationExecute {
+        id: String,
+    },
+    OperationProbe {
+        operation: String,
+        version: u64,
+    },
+    OperationReconcile {
+        operation: String,
+        version: u64,
+        state: dm::OperationState,
+        evidence: String,
     },
     Recover,
 }
@@ -57,28 +88,135 @@ pub(super) async fn mutate(
     Json(action): Json<Mutation>,
 ) -> Result<Json<Value>, ApiError> {
     super::mutation_gate::require_project_owner(&state, &headers)?;
-    tokio::task::spawn_blocking(move||{
-        let root=&state.paths.root;
-        let actor=macc_core::service::coordinator_workflow::operator_identity(root);
-        if actor.is_empty(){return Err(ApiError::validation("Configure a local operator identity before recording decisions"));}
-        if let Mutation::Configure{policy}=action{return dm::configure(root,policy).map(|p|Json(json!(p))).map_err(ApiError::from);}
-        let p=dm::policy(root)?;
-        let(mut store,plan)=if matches!(action,Mutation::PatchPreview{..}|Mutation::PatchApply{..}|Mutation::PatchReconcile{..}|Mutation::Recover){dm::inspect_plan(root)?}else{dm::active_plan(root)?};
-        if let Mutation::Answer{id,..}|Mutation::Revoke{id,..}=&action{store.decision_in_scope(&plan,id)?;}
-        let value=match action {
-            Mutation::Answer{id,version,text,option,advisory}=>json!(store.answer(&id,version,&text,option,&actor,advisory,&p)?),
-            Mutation::Feedback{text,task,advisory}=>{
-                let task=task.unwrap_or_else(||"*".into());
-                json!(store.feedback(&plan,&task,&text,&actor,advisory,&p)?)
+    tokio::task::spawn_blocking(move || {
+        let root = &state.paths.root;
+        let actor = macc_core::service::coordinator_workflow::operator_identity(root);
+        if actor.is_empty() {
+            return Err(ApiError::validation(
+                "Configure a local operator identity before recording decisions",
+            ));
+        }
+        if let Mutation::Configure {
+            policy,
+            attestation,
+            challenge,
+        } = action
+        {
+            if challenge {
+                return Ok(Json(dm::policy_challenge(&dm::policy(root)?, &policy)));
             }
-            Mutation::Revoke{id,version,reason}=>json!(store.revoke(&id,version,&actor,&reason)?),
-            Mutation::PatchPreview{patch}=>json!({"proposed":store.preview_patch(&plan,&patch,&dm::registry(root)?)?,"base":plan.graph_version,"projection":store.projection_diff(root,&plan)?}),
-            Mutation::PatchApply{patch}=>{let applied=store.apply_patch(&plan.id,&patch,&dm::registry(root)?,&actor)?;store.project(root)?;json!(applied)},
-            Mutation::PatchReconcile{patch,source_digest}=>{let applied=store.reconcile_projection(root,&patch,&source_digest,&actor)?;store.project(root)?;json!(applied)},
-            Mutation::Recover=>{store.verify()?;dm::recover(root)?;json!({"recovered":true})},
-            Mutation::Configure{..}=>unreachable!(),
-        };Ok(Json(value))
-    }).await.map_err(|e|ApiError::validation(e.to_string()))?
+            return dm::configure_attested(root, policy, attestation.as_ref())
+                .map(|p| Json(json!(p)))
+                .map_err(ApiError::from);
+        }
+        let p = dm::policy(root)?;
+        let (mut store, plan) = if matches!(
+            action,
+            Mutation::PatchPreview { .. }
+                | Mutation::PatchApply { .. }
+                | Mutation::PatchReconcile { .. }
+                | Mutation::Recover
+        ) {
+            dm::inspect_plan(root)?
+        } else {
+            dm::active_plan(root)?
+        };
+        if let Mutation::Answer { id, .. } | Mutation::Revoke { id, .. } = &action {
+            store.decision_in_scope(&plan, id)?;
+        }
+        let value = match action {
+            Mutation::Answer {
+                id,
+                version,
+                text,
+                option,
+                advisory,
+                apply_patch,
+                fields,
+                outcome,
+                attestation,
+                challenge,
+            } => {
+                let input = dm::AnswerInput {
+                    attestation,
+                    text,
+                    option,
+                    advisory,
+                    apply_patch,
+                    fields,
+                    outcome,
+                };
+                if challenge {
+                    dm::answer_challenge(&store.decision(&id)?, &input, &p)
+                } else {
+                    json!(store.answer_details(&id, version, &input, &actor, &p)?)
+                }
+            }
+            Mutation::Feedback {
+                text,
+                task,
+                advisory,
+            } => {
+                let task = task.unwrap_or_else(|| "*".into());
+                json!(store.feedback(&plan, &task, &text, &actor, advisory, &p)?)
+            }
+            Mutation::Revoke {
+                id,
+                version,
+                reason,
+            } => json!(store.revoke(&id, version, &actor, &reason)?),
+            Mutation::PatchPreview { patch } => store.graph_preview(&plan, &patch)?,
+            Mutation::PatchApply { patch, attestation } => {
+                let applied = store.apply_patch_attested(
+                    &plan.id,
+                    &patch,
+                    &dm::registry(root)?,
+                    &actor,
+                    attestation.as_ref(),
+                )?;
+                store.project(root)?;
+                json!(applied)
+            }
+            Mutation::PatchReconcile {
+                patch,
+                source_digest,
+                attestation,
+            } => {
+                let applied = store.reconcile_projection_attested(
+                    root,
+                    &patch,
+                    &source_digest,
+                    &actor,
+                    attestation.as_ref(),
+                )?;
+                store.project(root)?;
+                json!(applied)
+            }
+            Mutation::OperationExecute { id } => {
+                store.decision_in_scope(&plan, &id)?;
+                json!(store.execute_operation(&id)?)
+            }
+            Mutation::OperationProbe { operation, version } => {
+                json!(store.probe_operation(&plan.id, &operation, version)?)
+            }
+            Mutation::OperationReconcile {
+                operation,
+                version,
+                state,
+                evidence,
+            } => json!(store
+                .reconcile_operation(&plan.id, &operation, version, state, &evidence, &actor)?),
+            Mutation::Recover => {
+                store.verify()?;
+                dm::recover(root)?;
+                json!({"recovered":true})
+            }
+            Mutation::Configure { .. } => unreachable!(),
+        };
+        Ok(Json(value))
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))?
 }
 
 pub(super) async fn contexts(

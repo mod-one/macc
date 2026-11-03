@@ -197,6 +197,8 @@ impl Store {
         patch: &Patch,
         registry: &TaskRegistry,
     ) -> crate::Result<Value> {
+        let scoped = self.scoped_registry(plan, registry);
+        let registry = &scoped;
         if patch.plan_id != plan.id || patch.base_graph_version != plan.graph_version {
             return Err(error(
                 "Stale graph version; rebase and preview the patch again",
@@ -204,7 +206,7 @@ impl Store {
         }
         if patch.idempotency_key.trim().is_empty()
             || patch.reason.trim().is_empty()
-            || patch.operations.is_empty()
+            || (patch.operations.is_empty() && patch.metadata_changes.is_empty())
             || patch.operations.len() > 256
         {
             return Err(error(
@@ -218,6 +220,28 @@ impl Store {
             }
         }
         let mut graph = plan.graph.clone();
+        for (key, value) in &patch.metadata_changes {
+            if matches!(
+                key.as_str(),
+                "tasks" | "tasks_done" | "plan_id" | "graph_version" | "decision_epoch"
+            ) {
+                return Err(error(
+                    "Patch cannot rewrite plan execution/history metadata",
+                ));
+            }
+            if value.is_null() {
+                graph.as_object_mut().unwrap().remove(key);
+            } else {
+                graph
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(key.clone(), value.clone());
+            }
+        }
+        let archived = plan.graph["tasks_done"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let nodes = graph["tasks"]
             .as_array_mut()
             .ok_or_else(|| error("Invalid plan graph"))?;
@@ -232,7 +256,11 @@ impl Store {
                 | Operation::BindDecision { task_id, .. } => task_id,
             };
             if let Operation::AddTask { task } = op {
-                if nodes.iter().any(|t| t["id"].as_str() == Some(id)) {
+                if nodes
+                    .iter()
+                    .chain(archived.iter())
+                    .any(|t| t["id"].as_str() == Some(id))
+                {
                     return Err(error("Task IDs cannot be reused"));
                 }
                 if [
@@ -301,9 +329,13 @@ impl Store {
                         ) {
                             return Err(error("Patch cannot write execution history/authority"));
                         }
-                        node.as_object_mut()
-                            .unwrap()
-                            .insert(key.clone(), value.clone());
+                        if value.is_null() {
+                            node.as_object_mut().unwrap().remove(key);
+                        } else {
+                            node.as_object_mut()
+                                .unwrap()
+                                .insert(key.clone(), value.clone());
+                        }
                     }
                 }
                 Operation::AddDependency { depends_on, .. }
@@ -372,6 +404,118 @@ impl Store {
         validate(&graph, &registry.external_merged_task_ids)?;
         Ok(graph)
     }
+    /// Turn a legacy editor replacement into a CAS-protected graph proposal.
+    /// Removing a task means retirement, never deletion of its historical ID.
+    pub fn edit_patch(
+        &self,
+        plan: &Plan,
+        replacement: &Value,
+        version: u64,
+        actor: &str,
+    ) -> crate::Result<Patch> {
+        if version != plan.graph_version {
+            return Err(error(
+                "The editor is stale; reload the current plan before saving",
+            ));
+        }
+        if replacement.get("tasks_done") != plan.graph.get("tasks_done") {
+            return Err(error(
+                "Archived tasks are immutable; add corrective work instead",
+            ));
+        }
+        let old = tasks(&plan.graph)?;
+        let new = tasks(replacement)?;
+        let mut ops = Vec::new();
+        let mut seen = BTreeSet::new();
+        for node in new {
+            let id = node["id"]
+                .as_str()
+                .ok_or_else(|| error("Task ID required"))?;
+            if !seen.insert(id) {
+                return Err(error("Duplicate editor task ID"));
+            }
+            if let Some(previous) = old.iter().find(|n| n["id"] == id) {
+                let mut changes = BTreeMap::new();
+                let a = contract(previous);
+                let b = contract(node);
+                let keys = a
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .chain(
+                        b.as_object()
+                            .ok_or_else(|| error("Task must be an object"))?
+                            .keys(),
+                    )
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                for key in keys {
+                    if a.get(&key) != b.get(&key) {
+                        let blank = |v: Option<&Value>| {
+                            v.is_none()
+                                || v == Some(&Value::Null)
+                                || v.is_some_and(|v| v.as_array().is_some_and(Vec::is_empty))
+                        };
+                        if !(blank(a.get(&key)) && blank(b.get(&key))) {
+                            changes
+                                .insert(key.clone(), b.get(&key).cloned().unwrap_or(Value::Null));
+                        }
+                    }
+                }
+                if !changes.is_empty() {
+                    ops.push(Operation::UpdateTask {
+                        task_id: id.into(),
+                        changes,
+                    });
+                }
+            } else {
+                ops.push(Operation::AddTask { task: node.clone() });
+            }
+        }
+        for node in old {
+            if !new.iter().any(|n| n["id"] == node["id"])
+                && node.get("decision_disposition").is_none()
+            {
+                ops.push(Operation::DisableTask {
+                    task_id: node["id"].as_str().unwrap().into(),
+                });
+            }
+        }
+        let mut metadata_changes = BTreeMap::new();
+        let keys = plan
+            .graph
+            .as_object()
+            .unwrap()
+            .keys()
+            .chain(
+                replacement
+                    .as_object()
+                    .ok_or_else(|| error("PRD must be an object"))?
+                    .keys(),
+            )
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for key in keys {
+            if key != "tasks"
+                && key != "tasks_done"
+                && plan.graph.get(&key) != replacement.get(&key)
+            {
+                metadata_changes.insert(
+                    key.clone(),
+                    replacement.get(&key).cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        Ok(Patch {
+            plan_id: plan.id.clone(),
+            base_graph_version: version,
+            idempotency_key: format!("editor:{}", digest(&json!([actor, version, replacement]))),
+            reason: "Explicit operator PRD editor update".into(),
+            decision_refs: vec![],
+            operations: ops,
+            metadata_changes,
+        })
+    }
     pub fn projection_diff(&self, root: &Path, plan: &Plan) -> crate::Result<Value> {
         let bytes = std::fs::read(projection_path(root, &plan.source)?)
             .map_err(|e| error(e.to_string()))?;
@@ -389,8 +533,20 @@ impl Store {
         source_digest: &str,
         actor: &str,
     ) -> crate::Result<Plan> {
+        self.reconcile_projection_attested(root, patch, source_digest, actor, None)
+    }
+    pub fn reconcile_projection_attested(
+        &mut self,
+        root: &Path,
+        patch: &Patch,
+        source_digest: &str,
+        actor: &str,
+        proof: Option<&Attestation>,
+    ) -> crate::Result<Plan> {
         let _fence = self.mutation_lock()?;
         let mut plan = self.plan(&patch.plan_id)?;
+        let actor = self.graph_authority(&plan, patch, Some(source_digest), actor, proof)?;
+        let actor = actor.as_str();
         let diff = self.projection_diff(root, &plan)?;
         if diff["source_digest"] != source_digest {
             return Err(error(
@@ -407,6 +563,14 @@ impl Store {
             "graph.source.reconciled",
             &json!({"actor":actor,"source_digest":source_digest,"graph":diff["actual"]}),
         )?;
+        if let Some(proof) = proof {
+            event(
+                &tx,
+                &plan.id,
+                "graph.authorized",
+                &json!({"attestation":proof,"patch_digest":digest(patch)}),
+            )?;
+        }
         commit_graph(&tx, &mut plan, patch, graph, actor)?;
         sql(tx.commit())?;
         Ok(plan)
@@ -418,10 +582,22 @@ impl Store {
         registry: &TaskRegistry,
         actor: &str,
     ) -> crate::Result<Plan> {
+        self.apply_patch_attested(plan_id, patch, registry, actor, None)
+    }
+    pub fn apply_patch_attested(
+        &mut self,
+        plan_id: &str,
+        patch: &Patch,
+        registry: &TaskRegistry,
+        actor: &str,
+        proof: Option<&Attestation>,
+    ) -> crate::Result<Plan> {
         let _fence = self.mutation_lock()?;
         let plan = self.plan(plan_id)?;
-        let mut registry = registry.clone();
-        let latest = super::registry(&self.root)?;
+        let actor = self.graph_authority(&plan, patch, None, actor, proof)?;
+        let actor = actor.as_str();
+        let mut registry = self.scoped_registry(&plan, registry);
+        let latest = self.scoped_registry(&plan, &super::registry(&self.root)?);
         for task in latest.tasks {
             if task.is_merged()
                 || task
@@ -463,6 +639,14 @@ impl Store {
         ))?)?;
         if current.graph_version != patch.base_graph_version {
             return Err(error("Concurrent graph patch committed; rebase required"));
+        }
+        if let Some(proof) = proof {
+            event(
+                &tx,
+                &current.id,
+                "graph.authorized",
+                &json!({"attestation":proof,"patch_digest":digest(patch)}),
+            )?;
         }
         commit_graph(&tx, &mut current, patch, graph, actor)?;
         sql(tx.commit())?;
@@ -509,7 +693,7 @@ pub(super) fn commit_graph(
             .collect::<crate::Result<_>>()?
     };
     for mut decision in candidates {
-        if decision.status != "pending_human" {
+        if !matches!(decision.status.as_str(), "pending_human" | "investigating") {
             continue;
         }
         let changed = decision.request.task_id != "*"
@@ -522,7 +706,7 @@ pub(super) fn commit_graph(
             .proposed_patch
             .as_ref()
             .is_some_and(|p| p.base_graph_version != current.graph_version);
-        if changed || stale_patch {
+        if changed || stale_patch || !patch.metadata_changes.is_empty() {
             decision.version += 1;
             decision.status = "superseded".into();
             current.decision_epoch += 1;
@@ -540,4 +724,19 @@ pub(super) fn commit_graph(
     }
     save_plan(tx, current)?;
     Ok(())
+}
+
+impl Store {
+    fn scoped_registry(&self, plan: &Plan, registry: &TaskRegistry) -> TaskRegistry {
+        let mut scoped = registry.clone();
+        if registry
+            .extra
+            .get("decision_plan_id")
+            .and_then(Value::as_str)
+            .is_some_and(|owner| owner != plan.id)
+        {
+            scoped.tasks.clear();
+        }
+        scoped
+    }
 }

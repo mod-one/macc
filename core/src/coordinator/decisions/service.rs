@@ -83,7 +83,23 @@ pub fn inspect_plan(root: &Path) -> Result<(Store, Plan)> {
 }
 
 pub fn configure(root: &Path, updated: Policy) -> Result<Policy> {
+    configure_attested(root, updated, None)
+}
+pub fn policy_challenge(current: &Policy, updated: &Policy) -> Value {
+    json!({"action":"policy.configure","previous_policy_digest":digest(current),"updated_policy":updated})
+}
+pub fn configure_attested(
+    root: &Path,
+    updated: Policy,
+    proof: Option<&Attestation>,
+) -> Result<Policy> {
     updated.validate()?;
+    let current = policy(root)?;
+    let verified_actor = if current.trust_mode == "secure_approval" && updated != current {
+        Some(super::secure::verify_attestation(root,&current,proof.ok_or_else(||error("Changing a secure decision policy requires an isolated attestation; prepare a policy challenge first"))?,"policy.configure",&digest(&policy_challenge(&current,&updated)),chrono::Utc::now().timestamp())?)
+    } else {
+        None
+    };
     let paths = ProjectPaths::from_root(root);
     let mut config = crate::load_canonical_config(&paths.config_path)?;
     let was_enabled = config
@@ -120,7 +136,7 @@ pub fn configure(root: &Path, updated: Policy) -> Result<Policy> {
             &tx,
             "project",
             "decision.policy.changed",
-            &json!({"actor":crate::service::coordinator_workflow::operator_identity(root),"origin":"local_operator_configuration","policy":updated}),
+            &json!({"actor":verified_actor.unwrap_or_else(||crate::service::coordinator_workflow::operator_identity(root)),"attestation":proof,"origin":"operator_configuration","policy":updated}),
         )?;
         sql(tx.commit())?;
     }
@@ -134,7 +150,7 @@ pub fn snapshot(root: &Path) -> Result<Value> {
     let (store, plan) = inspect_plan(root)?;
     let projection_error = active_plan(root).err().map(|e| e.to_string());
     Ok(
-        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?}),
+        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?,"operations":store.operations(&plan.id)?,"delivery":store.delivery_status(&plan,&p)?}),
     )
 }
 
@@ -293,6 +309,26 @@ impl Store {
         {
             return Err(error("Recommended option does not exist"));
         }
+        if request.kind == "approval" {
+            let revision = self.approval_subject_revision(plan, &request)?;
+            if request
+                .subject_revision
+                .as_ref()
+                .is_some_and(|r| r != &revision)
+            {
+                return Err(error(
+                    "Approval proposal names an obsolete subject revision",
+                ));
+            }
+            request.subject_revision = Some(revision);
+        }
+        let semantic = |r: &Request| {
+            let mut r = r.clone();
+            r.idempotency_key.clear();
+            r.attempt_id.clear();
+            digest(&r)
+        };
+        let submission_digest = semantic(&request);
         let old: Option<String> = sql(self
             .db
             .query_row(
@@ -303,11 +339,12 @@ impl Store {
             .optional())?;
         if let Some(old) = old {
             let old: Decision = decode(&old)?;
-            if {
-                let mut prior = old.request.clone();
-                prior.attempt_id = request.attempt_id.clone();
-                prior != request
-            } || old.subject_digest != subject
+            if old
+                .submission_digest
+                .clone()
+                .unwrap_or_else(|| semantic(&old.request))
+                != submission_digest
+                || old.subject_digest != subject
             {
                 return Err(error(
                     "Idempotency key reused for changed question or subject",
@@ -315,22 +352,51 @@ impl Store {
             }
             return Ok(old);
         }
-        // Exact scoped deduplication only: no semantic model may merge consent.
-        let semantic = |r: &Request| {
-            let mut r = r.clone();
-            r.idempotency_key.clear();
-            r.attempt_id.clear();
-            digest(&r)
-        };
+        // Compare the submitted payload, independently of later native reconciliation.
         if let Some(old) = self.decisions(&plan.id)?.into_iter().find(|d| {
-            semantic(&d.request) == semantic(&request)
+            d.submission_digest
+                .clone()
+                .unwrap_or_else(|| semantic(&d.request))
+                == submission_digest
                 && d.subject_digest == subject
                 && !matches!(d.status.as_str(), "revoked" | "superseded")
         }) {
             return Ok(old);
         }
+        let triage = self.triage(plan, &mut request, policy)?;
+        if request.response_fields.len() > 32
+            || request.supersedes.len() > 32
+            || request.topic.as_ref().is_some_and(|t| t.len() > 256)
+        {
+            return Err(error(
+                "Decision fields, topic or supersession list exceeds its structured budget",
+            ));
+        }
+        let mut fields = BTreeSet::new();
+        for field in &request.response_fields {
+            if field.id.is_empty()
+                || field.id.starts_with("__")
+                || !fields.insert(&field.id)
+                || field.label.trim().is_empty()
+            {
+                return Err(error(
+                    "Response fields need unique nonempty IDs and readable labels",
+                ));
+            }
+        }
+        if request.impact.shared_contract
+            && triage.domain.is_none()
+            && policy.human_question_min_risk == Consultation::NeverAsk
+        {
+            return Err(error("Shared-contract choices require a stable topic, requirement reference or affected path for cross-performer arbitration"));
+        }
         let proposed_graph = if let Some(patch) = &request.proposed_patch {
             if origin != "human" {
+                if !patch.metadata_changes.is_empty() {
+                    return Err(error(
+                        "Agent proposals cannot rewrite plan governance metadata",
+                    ));
+                }
                 for op in &patch.operations {
                     match op {
                         Operation::UpdateTask { changes, .. }
@@ -368,56 +434,58 @@ impl Store {
         } else {
             None
         };
-        let mut risk = request.risk;
-        if proposed_graph.is_some() {
-            risk = risk.max(Risk::High);
-        }
-        if request.impact.shared_contract
-            || request.impact.product_scope
-            || request.impact.security_privacy
-            || request.scope == "project"
-            || request.impact.evidence.is_empty()
-        {
-            risk = risk.max(Risk::High);
-        }
-        if request.impact.irreversible || request.impact.production {
-            risk = Risk::Critical;
-        }
-        if let Ok(task) = super::graph::task(&plan.graph, &request.task_id) {
-            if let Some(label) = task
-                .pointer("/routing_hints/risk_level")
-                .and_then(Value::as_str)
-            {
-                if let Ok(declared) = serde_json::from_value::<Risk>(json!(label)) {
-                    risk = risk.max(declared);
-                }
-            }
-            if task.get("gate").is_some() {
-                risk = risk.max(Risk::High);
-            }
-        }
-        let mandatory = (request.kind == "approval" || request.kind == "authorization")
-            || (request.impact.production
-                && policy
-                    .mandatory_human_triggers
-                    .iter()
-                    .any(|t| t == "production"))
-            || (request.impact.irreversible
-                && policy
-                    .mandatory_human_triggers
-                    .iter()
-                    .any(|t| t == "irreversible"));
-        let automatic = policy.human_question_min_risk == Consultation::NeverAsk
-            || (!mandatory && !policy.human_question_min_risk.asks(risk));
+        let unresolved =
+            !triage.report.missing_sources.is_empty() || !request.missing_facts.is_empty();
+        let automatic = !unresolved
+            && (policy.human_question_min_risk == Consultation::NeverAsk
+                || triage.reuse.is_some()
+                || triage.standing.is_some()
+                || (!triage.mandatory && !policy.human_question_min_risk.asks(triage.risk)));
+        let reuse = triage.reuse.as_ref();
+        let selected = if let Some(old) = reuse {
+            old.resolution
+                .as_ref()
+                .and_then(|r| r.selected_option_id.clone())
+                .filter(|id| request.options.iter().any(|o| o.id == *id))
+        } else if let Some((_, choice)) = &triage.standing {
+            choice
+                .clone()
+                .filter(|id| request.options.iter().any(|o| o.id == *id))
+        } else {
+            request.recommended_option_id.clone()
+        };
+        let apply_graph = automatic
+            && reuse.is_none()
+            && (triage.standing.is_none()
+                || selected.is_some() && selected == request.recommended_option_id);
         let resolution = automatic.then(|| Resolution {
-            text: request.recommendation.clone(),
-            selected_option_id: request.recommended_option_id.clone(),
-            actor: actor.into(),
-            origin: "delegated_autonomous".into(),
+            text: reuse
+                .and_then(|d| d.resolution.as_ref())
+                .map(|r| r.text.clone())
+                .or_else(|| triage.standing.as_ref().map(|s| s.0.clone()))
+                .unwrap_or_else(|| request.recommendation.clone()),
+            selected_option_id: selected,
+            actor: if reuse.is_some() || triage.standing.is_some() {
+                "coordinator".into()
+            } else {
+                actor.into()
+            },
+            origin: if reuse.is_some() {
+                "coordinator_reconciliation"
+            } else if triage.standing.is_some() {
+                "verified_existing_policy"
+            } else {
+                "delegated_autonomous"
+            }
+            .into(),
             policy_digest: digest(policy),
             recorded_at: now(),
             advisory: false,
-            source_revision: None,
+            source_revision: request.subject_revision.clone(),
+            attestation: None,
+            fields: Default::default(),
+            outcome: String::new(),
+            patch_applied: apply_graph && request.proposed_patch.is_some(),
         });
         let decision = Decision {
             requester_actor: actor.into(),
@@ -427,15 +495,28 @@ impl Store {
             version: 1,
             status: if automatic {
                 "resolved"
+            } else if unresolved
+                && (policy.human_question_min_risk == Consultation::NeverAsk
+                    || !policy.human_question_min_risk.asks(triage.risk))
+            {
+                "investigating"
             } else {
                 "pending_human"
             }
             .into(),
             request,
-            effective_risk: risk,
+            effective_risk: triage.risk,
             resolution,
             created_at: now(),
             subject_digest: subject,
+            submission_digest: Some(submission_digest),
+            domain: triage.domain,
+            policy_reason: triage.reason,
+            reused_from: reuse.map(|d| DecisionRef {
+                id: d.id.clone(),
+                version: d.version,
+            }),
+            investigation: Some(triage.report),
         };
         let tx = sql(self
             .db
@@ -456,6 +537,9 @@ impl Store {
         ))?)?;
         current.decision_epoch += 1;
         if automatic {
+            Self::supersede_in_transaction(&tx, &decision, &mut current)?;
+        }
+        if apply_graph {
             if let (Some(patch), Some(graph)) = (&decision.request.proposed_patch, proposed_graph) {
                 super::graph::commit_graph(&tx, &mut current, patch, graph, actor)?;
             }
@@ -484,6 +568,30 @@ impl Store {
         advisory: bool,
         policy: &Policy,
     ) -> Result<Decision> {
+        self.answer_details(
+            id,
+            version,
+            &AnswerInput {
+                text: text.into(),
+                option,
+                advisory,
+                ..Default::default()
+            },
+            actor,
+            policy,
+        )
+    }
+    pub fn answer_details(
+        &mut self,
+        id: &str,
+        version: u64,
+        input: &AnswerInput,
+        actor: &str,
+        policy: &Policy,
+    ) -> Result<Decision> {
+        let text = input.text.as_str();
+        let option = input.option.clone();
+        let advisory = input.advisory;
         let _fence = self.mutation_lock()?;
         if actor.trim().is_empty() || text.trim().is_empty() {
             return Err(error("An attributed nonempty answer is required"));
@@ -492,8 +600,118 @@ impl Store {
             return Err(error("Answer exceeds configured decision budget"));
         }
         let pending = self.decision(id)?;
-        let proposed_graph = if option.is_some() && option == pending.request.recommended_option_id
+        if pending.status == "resolved" || pending.status == "rejected" {
+            if pending.version == version + 1
+                && pending.resolution.as_ref().is_some_and(|r| {
+                    r.actor
+                        == input
+                            .attestation
+                            .as_ref()
+                            .map(|a| a.body.principal.as_str())
+                            .unwrap_or(actor)
+                        && r.attestation == input.attestation
+                        && r.text == text
+                        && r.selected_option_id == option
+                        && r.advisory == advisory
+                        && r.fields == input.fields
+                        && (if r.outcome.is_empty() {
+                            "answer"
+                        } else {
+                            r.outcome.as_str()
+                        }) == input.outcome.as_str()
+                        && r.patch_applied == input.apply_patch
+                })
+            {
+                return Ok(pending);
+            }
+        }
+        let secure_actor = if policy.trust_mode == "secure_approval" {
+            Some(super::secure::verify_attestation(&self.root,policy,input.attestation.as_ref().ok_or_else(||error("Secure response requires a signed attestation from an isolated approver; request an answer challenge"))?,"decision.answer",&digest(&super::secure::answer_challenge(&pending,input,policy)),chrono::Utc::now().timestamp())?)
+        } else {
+            None
+        };
+        let actor = secure_actor.as_deref().unwrap_or(actor);
+        if pending.request.kind == "approval"
+            && pending.request.subject_revision.as_ref()
+                != Some(
+                    &self.approval_subject_revision(
+                        &self.plan(&pending.plan_id)?,
+                        &pending.request,
+                    )?,
+                )
         {
+            return Err(error(
+                "Approval artifact changed; obtain a fresh subject-bound request",
+            ));
+        }
+        let mut current_request = pending.request.clone();
+        self.triage(&self.plan(&pending.plan_id)?, &mut current_request, policy)?;
+        for field in &current_request.response_fields {
+            if field.required
+                && input
+                    .fields
+                    .get(&field.id)
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(error(format!("Required response field: {}", field.label)));
+            }
+            if let Some(value) = input.fields.get(&field.id) {
+                if !field.choices.is_empty() && !field.choices.contains(value) {
+                    return Err(error(format!(
+                        "Invalid value for response field {}",
+                        field.label
+                    )));
+                }
+            }
+        }
+        if matches!(pending.request.kind.as_str(), "approval" | "authorization")
+            && input.outcome == AnswerOutcome::Answer
+            && input
+                .fields
+                .get("evidence")
+                .is_none_or(|v| v.trim().is_empty())
+        {
+            return Err(error(
+                "An approval/authorization answer requires explicit evidence",
+            ));
+        }
+        if encode(&input.fields)?.len() + text.len() > policy.max_request_bytes {
+            return Err(error("Response fields exceed the decision budget"));
+        }
+        if input.apply_patch && pending.request.proposed_patch.is_none() {
+            return Err(error("There is no displayed graph patch to accept"));
+        }
+        if input.outcome == AnswerOutcome::Answer && !advisory {
+            if let Some(domain) = &pending.domain {
+                for existing in self.applicable_decisions(&self.plan(&pending.plan_id)?)? {
+                    if existing.id != pending.id
+                        && existing.domain.as_ref() == Some(domain)
+                        && existing.status == "resolved"
+                        && !existing.resolution.as_ref().is_some_and(|r| r.advisory)
+                        && !pending
+                            .request
+                            .supersedes
+                            .iter()
+                            .any(|r| r.id == existing.id && r.version == existing.version)
+                        && existing
+                            .resolution
+                            .as_ref()
+                            .is_some_and(|r| r.text != text || r.selected_option_id != option)
+                    {
+                        return Err(error(format!("Decision {} v{} already governs this topic. Submit a versioned supersession request before replacing its binding",existing.id,existing.version)));
+                    }
+                }
+            }
+        }
+        if input.apply_patch
+            && (advisory
+                || input.outcome != AnswerOutcome::Answer
+                || option.is_none()
+                || option != pending.request.recommended_option_id)
+        {
+            return Err(error("Applying a patch requires an explicit binding acceptance of its displayed recommended option"));
+        }
+        let proposed_graph = if input.apply_patch {
             if let Some(patch) = &pending.request.proposed_patch {
                 Some(self.preview_patch(
                     &self.plan(&pending.plan_id)?,
@@ -541,22 +759,39 @@ impl Store {
             ));
         }
         decision.version += 1;
-        decision.status = "resolved".into();
+        decision.status = if input.outcome == AnswerOutcome::Answer {
+            "resolved"
+        } else {
+            "rejected"
+        }
+        .into();
         decision.resolution = Some(Resolution {
             text: text.into(),
             selected_option_id: option,
             actor: actor.into(),
-            origin: "human_local_trust".into(),
+            origin: if secure_actor.is_some() {
+                "human_secure_approval"
+            } else {
+                "human_local_trust"
+            }
+            .into(),
             policy_digest: digest(policy),
             recorded_at: now(),
             advisory,
-            source_revision: None,
+            source_revision: decision.request.subject_revision.clone(),
+            attestation: input.attestation.clone(),
+            fields: input.fields.clone(),
+            outcome: input.outcome.as_str().into(),
+            patch_applied: input.apply_patch,
         });
         sql(tx.execute(
             "UPDATE requests SET payload=?2 WHERE id=?1",
             rusqlite::params![id, encode(&decision)?],
         ))?;
         plan.decision_epoch += 1;
+        if decision.status == "resolved" {
+            Self::supersede_in_transaction(&tx, &decision, &mut plan)?;
+        }
         if let (Some(patch), Some(graph)) = (&decision.request.proposed_patch, proposed_graph) {
             super::graph::commit_graph(&tx, &mut plan, patch, graph, actor)?;
         }
@@ -606,6 +841,48 @@ impl Store {
             "decision.revoked",
             &json!({"actor":actor,"reason":reason,"decision":decision}),
         )?;
+        let mut descendants = std::collections::BTreeSet::from([decision.id.clone()]);
+        let mut aliases: Vec<Decision> = {
+            let mut statement = sql(tx.prepare("SELECT payload FROM requests"))?;
+            let rows = sql(statement.query_map([], |r| r.get::<_, String>(0)))?;
+            rows.map(|row| decode(&sql(row)?)).collect::<Result<_>>()?
+        };
+        loop {
+            let mut changed = false;
+            for alias in &mut aliases {
+                if alias.status == "resolved"
+                    && alias
+                        .reused_from
+                        .as_ref()
+                        .is_some_and(|r| descendants.contains(&r.id))
+                {
+                    alias.version += 1;
+                    alias.status = "revoked".into();
+                    descendants.insert(alias.id.clone());
+                    changed = true;
+                    sql(tx.execute(
+                        "UPDATE requests SET payload=?2 WHERE id=?1",
+                        rusqlite::params![alias.id, encode(alias)?],
+                    ))?;
+                    let mut owner: Plan = decode(&sql(tx.query_row(
+                        "SELECT payload FROM plans WHERE id=?1",
+                        [&alias.plan_id],
+                        |r| r.get::<_, String>(0),
+                    ))?)?;
+                    owner.decision_epoch += 1;
+                    save_plan(&tx, &owner)?;
+                    event(
+                        &tx,
+                        &alias.plan_id,
+                        "decision.revoked",
+                        &json!({"actor":actor,"reason":"Originating decision revoked","root":decision.id,"decision":alias}),
+                    )?;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         sql(tx.commit())?;
         Ok(decision)
     }

@@ -26,6 +26,7 @@ pub fn recover(root: &Path) -> Result<()> {
         return Ok(());
     }
     let mut store = Store::open(root)?;
+    store.recover_operations()?;
     store.project(root)?;
     Ok(())
 }
@@ -49,15 +50,10 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
     let mut plan = store.ensure_plan(root, prd, &reference, registry)?;
     store.import_legacy(root, &plan)?;
     store.import_planner_requests(&plan, &p)?;
-    let mut decisions = store.applicable_decisions(&plan)?;
-    if p.human_question_min_risk == Consultation::NeverAsk {
-        for decision in decisions.iter().filter(|d| d.status == "pending_human") {
-            store.resolve_delegated(&decision.id, &p)?;
-        }
-        plan = store.plan(&plan.id)?;
-        store.project(root)?;
-        decisions = store.applicable_decisions(&plan)?;
-    }
+    store.reevaluate_pending(&plan, &p)?;
+    plan = store.plan(&plan.id)?;
+    store.project(root)?;
+    let decisions = store.applicable_decisions(&plan)?;
     registry
         .extra
         .entry("decision_execution_id".into())
@@ -84,8 +80,10 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             continue;
         }
         let pending = decisions.iter().find(|d| {
-            d.status == "pending_human"
-                && super::context::applies(&plan, d, &task.id).unwrap_or(false)
+            matches!(
+                d.status.as_str(),
+                "pending_human" | "rejected" | "conflict" | "investigating"
+            ) && store.decision_applies(&plan, d, &task.id).unwrap_or(false)
         });
         if let Some(decision) = pending {
             task.task_runtime
@@ -169,7 +167,9 @@ pub fn prepare_context(
     let semantic_digest = digest(&json!([
         context.contract_digest,
         context.bindings,
-        context.policy
+        context.policy,
+        context.plan_context,
+        context.dependency_contracts
     ]));
     let mut registry = registry(root)?;
     if registry
@@ -194,7 +194,7 @@ pub fn prepare_context(
         task.task_runtime
             .extra
             .insert("decision_bindings_digest".into(), json!(semantic_digest));
-        task.task_runtime.extra.insert("decision_context".into(),json!({"plan_id":plan.id,"attempt_id":attempt,"phase":phase,"digest":issued.0.context_digest}));
+        task.task_runtime.extra.insert("decision_context".into(),json!({"plan_id":plan.id,"attempt_id":attempt,"phase":phase,"digest":issued.0.context_digest,"graph_version":issued.0.graph_version,"decision_epoch":issued.0.decision_epoch,"contract_digest":issued.0.contract_digest}));
         task.task_runtime.extra.insert(
             "decision_has_bindings".into(),
             json!(issued
@@ -286,12 +286,15 @@ pub fn merge_ready(root: &Path, task_id: &str) -> Result<()> {
 
 impl Store {
     pub fn resolve_delegated(&mut self, id: &str, policy: &Policy) -> Result<Decision> {
-        let _fence = self.mutation_lock()?;
-        use super::store::*;
-        use rusqlite::TransactionBehavior;
         if policy.human_question_min_risk != Consultation::NeverAsk {
             return Err(error("Full autonomy delegation is not active"));
         }
+        self.resolve_by_policy(id, policy)
+    }
+    pub fn resolve_by_policy(&mut self, id: &str, policy: &Policy) -> Result<Decision> {
+        let _fence = self.mutation_lock()?;
+        use super::store::*;
+        use rusqlite::TransactionBehavior;
         let pending = self.decision(id)?;
         let latest = self.plan(&pending.plan_id)?;
         if pending.request.task_id != "*"
@@ -301,11 +304,41 @@ impl Store {
             )?)) != pending.subject_digest
         {
             return Err(error(
-                "Pending request has a stale subject; reconcile before autonomous resolution",
+                "Pending request subject changed; reconcile it before resolution",
             ));
         }
-        let proposed_graph = if let Some(patch) = &pending.request.proposed_patch {
-            Some(self.preview_patch(&latest, patch, &registry(&self.root)?)?)
+        let mut request = pending.request.clone();
+        let mut triage = self.triage(&latest, &mut request, policy)?;
+        if let Some(previous) = &pending.investigation {
+            for (path, hash) in &previous.source_digests {
+                triage
+                    .report
+                    .source_digests
+                    .entry(path.clone())
+                    .or_insert(hash.clone());
+            }
+            triage.report.rounds = triage.report.rounds.max(previous.rounds);
+        }
+        if !triage.report.missing_sources.is_empty() || !request.missing_facts.is_empty() {
+            return Err(error(
+                "Essential facts are still missing; bounded investigation cannot fabricate them",
+            ));
+        }
+        if policy.human_question_min_risk != Consultation::NeverAsk
+            && triage.reuse.is_none()
+            && triage.standing.is_none()
+            && (triage.mandatory || policy.human_question_min_risk.asks(triage.risk))
+        {
+            return Err(error("Current policy requires human intervention"));
+        }
+        let reuse = triage.reuse.as_ref();
+        let apply_graph = reuse.is_none() && triage.standing.is_none();
+        let proposed_graph = if apply_graph {
+            if let Some(patch) = &request.proposed_patch {
+                Some(self.preview_patch(&latest, patch, &registry(&self.root)?)?)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -317,20 +350,54 @@ impl Store {
             [id],
             |r| r.get::<_, String>(0),
         ))?)?;
-        if d.status != "pending_human" {
+        if !matches!(d.status.as_str(), "pending_human" | "investigating") {
             return Ok(d);
         }
         d.version += 1;
+        d.request = request;
         d.status = "resolved".into();
+        d.domain = triage.domain;
+        d.policy_reason = triage.reason;
+        d.reused_from = reuse.map(|old| DecisionRef {
+            id: old.id.clone(),
+            version: old.version,
+        });
+        d.investigation = Some(triage.report);
         d.resolution = Some(Resolution {
-            text: d.request.recommendation.clone(),
-            selected_option_id: d.request.recommended_option_id.clone(),
+            text: reuse
+                .and_then(|d| d.resolution.as_ref())
+                .map(|r| r.text.clone())
+                .or_else(|| triage.standing.as_ref().map(|s| s.0.clone()))
+                .unwrap_or_else(|| d.request.recommendation.clone()),
+            selected_option_id: if let Some(old) = reuse {
+                old.resolution
+                    .as_ref()
+                    .and_then(|r| r.selected_option_id.clone())
+                    .filter(|id| d.request.options.iter().any(|o| o.id == *id))
+            } else if let Some((_, choice)) = &triage.standing {
+                choice
+                    .clone()
+                    .filter(|id| d.request.options.iter().any(|o| o.id == *id))
+            } else {
+                d.request.recommended_option_id.clone()
+            },
             actor: "coordinator".into(),
-            origin: "delegated_autonomous".into(),
+            origin: if reuse.is_some() {
+                "coordinator_reconciliation"
+            } else if triage.standing.is_some() {
+                "verified_existing_policy"
+            } else {
+                "delegated_autonomous"
+            }
+            .into(),
             policy_digest: digest(policy),
             recorded_at: now(),
             advisory: false,
-            source_revision: None,
+            source_revision: d.request.subject_revision.clone(),
+            attestation: None,
+            fields: Default::default(),
+            outcome: String::new(),
+            patch_applied: apply_graph && d.request.proposed_patch.is_some(),
         });
         sql(tx.execute(
             "UPDATE requests SET payload=?2 WHERE id=?1",
@@ -342,6 +409,7 @@ impl Store {
             |r| r.get::<_, String>(0),
         ))?)?;
         plan.decision_epoch += 1;
+        Self::supersede_in_transaction(&tx, &d, &mut plan)?;
         if let (Some(patch), Some(graph)) = (&d.request.proposed_patch, proposed_graph) {
             super::graph::commit_graph(
                 &tx,
@@ -355,5 +423,30 @@ impl Store {
         event(&tx, &plan.id, "decision.resolved", &d)?;
         sql(tx.commit())?;
         Ok(d)
+    }
+}
+
+/// Trusted semantic binding; plan-wide watermarks remain diagnostic only.
+pub fn checkpoint_binding(root: &Path, task: &str) -> Result<Option<serde_json::Value>> {
+    let p = policy(root)?;
+    if !p.enabled {
+        return Ok(None);
+    }
+    let (store, plan) = active_plan(root)?;
+    let c = store.context(&plan, task, "checkpoint", "dev", &p)?;
+    Ok(Some(
+        json!({"plan_id":plan.id,"contract_digest":c.contract_digest,"context_digest":c.context_digest,"graph_version":plan.graph_version,"decision_epoch":plan.decision_epoch}),
+    ))
+}
+pub fn compatible_checkpoint_binding(
+    a: &Option<serde_json::Value>,
+    b: &Option<serde_json::Value>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => ["plan_id", "contract_digest", "context_digest"]
+            .iter()
+            .all(|k| a[k] == b[k]),
+        _ => false,
     }
 }

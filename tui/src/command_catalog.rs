@@ -99,12 +99,18 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
     }
     if state.decision_center.open {
         return rows(vec![
+            ("F1", "All decision shortcuts"),
             ("F2", "Next decision / history"),
             ("Tab", "Choose option"),
             ("F5", "Send answer"),
             ("Enter", "Newline"),
             ("F6", "Autonomy"),
             ("F7", "Enable decisions"),
+            ("F8", "New guidance"),
+            ("F9", "Answer field"),
+            ("F10", "Accept displayed patch"),
+            ("F11", "Answer / reject / changes"),
+            ("F12", "Prepare isolated approver challenge"),
             ("Esc", "Later"),
         ]);
     }

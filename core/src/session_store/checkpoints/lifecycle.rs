@@ -54,6 +54,12 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         if previous.worktree != c.worktree {
             idle(&tx, &previous.worktree)?;
         }
+        if !crate::coordinator::decisions::compatible_checkpoint_binding(
+            &previous.decision_context,
+            &c.decision_context,
+        ) {
+            reasons.push("binding decisions or task context changed; reconcile before resuming");
+        }
         if previous.source_hashes != c.source_hashes {
             reasons.push("mandatory PRD or specification sources changed");
         }

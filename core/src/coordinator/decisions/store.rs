@@ -114,6 +114,11 @@ impl Store {
     }
     pub fn verify(&self) -> crate::Result<()> {
         let snapshot = sql(self.db.unchecked_transaction())?;
+        self.verify_projection(&self.project_id)?;
+        sql(snapshot.commit())?;
+        Ok(())
+    }
+    pub(super) fn verify_projection(&self, project_id: &str) -> crate::Result<()> {
         let check: String = sql(self.db.query_row("PRAGMA quick_check", [], |r| r.get(0)))?;
         if check != "ok" {
             return Err(error(format!("Control integrity failed: {check}")));
@@ -121,6 +126,8 @@ impl Store {
         let mut last = String::new();
         let mut graphs = std::collections::BTreeMap::<String, (u64, Value)>::new();
         let mut decisions = std::collections::BTreeMap::<String, Decision>::new();
+        let mut operation_states =
+            std::collections::BTreeMap::<(String, String), OperationExecution>::new();
         let mut approvals = std::collections::BTreeMap::<(String, String), usize>::new();
         let mut receipts = std::collections::BTreeMap::<(String, String, String), Value>::new();
         let mut stmt = sql(self
@@ -144,9 +151,14 @@ impl Store {
             }
             let value: Value = decode(&payload)?;
             match kind.as_str() {
+                "operation.transition" => {
+                    let op: OperationExecution = serde_json::from_value(value["operation"].clone())
+                        .map_err(|e| error(e.to_string()))?;
+                    operation_states.insert((op.plan_id.clone(), op.operation_id.clone()), op);
+                }
                 "plan.imported" => {
                     let p: Plan = decode(&payload)?;
-                    if p.project_id != self.project_id {
+                    if p.project_id != project_id {
                         return Err(error("Plan belongs to a different project"));
                     }
                     graphs.insert(plan.clone(), (p.graph_version, p.graph));
@@ -195,6 +207,14 @@ impl Store {
             ));
         }
         for plan in plans {
+            for op in self.operations(&plan.id)? {
+                if operation_states.remove(&(plan.id.clone(), op.operation_id.clone())) != Some(op)
+                {
+                    return Err(error(
+                        "Operation state disagrees with its durable transition journal",
+                    ));
+                }
+            }
             if graphs.get(&plan.id) != Some(&(plan.graph_version, plan.graph.clone()))
                 || digest(&plan.graph) != plan.source_digest
             {
@@ -209,6 +229,9 @@ impl Store {
                     ));
                 }
             }
+        }
+        if !operation_states.is_empty() {
+            return Err(error("Operation state projection is incomplete"));
         }
         if !decisions.is_empty() {
             return Err(error("Decision projection is incomplete"));
@@ -254,7 +277,6 @@ impl Store {
                 ));
             }
         }
-        sql(snapshot.commit())?;
         Ok(())
     }
     pub fn plans(&self) -> crate::Result<Vec<Plan>> {

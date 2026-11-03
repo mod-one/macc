@@ -12,6 +12,8 @@ pub(super) fn applies(plan: &Plan, decision: &Decision, task_id: &str) -> crate:
     {
         return Ok(true);
     }
+    // A replacement binds the union of prior and new affected scopes.
+    // Superseded records remain available for this applicability calculation.
     let node = super::graph::task(&plan.graph, task_id)?;
     if decision.request.scope == "requirements" {
         for field in ["spec_refs", "requirement_refs", "requirements"] {
@@ -78,6 +80,30 @@ pub(super) fn applies(plan: &Plan, decision: &Decision, task_id: &str) -> crate:
 }
 
 impl Store {
+    pub(super) fn decision_applies(
+        &self,
+        plan: &Plan,
+        decision: &Decision,
+        task: &str,
+    ) -> crate::Result<bool> {
+        let mut pending = vec![decision.clone()];
+        let mut seen = BTreeSet::new();
+        while let Some(d) = pending.pop() {
+            if !seen.insert(d.id.clone()) {
+                continue;
+            }
+            if applies(plan, &d, task)? {
+                return Ok(true);
+            }
+            for r in &d.request.supersedes {
+                pending.push(self.decision(&r.id)?);
+            }
+            if let Some(r) = &d.reused_from {
+                pending.push(self.decision(&r.id)?);
+            }
+        }
+        Ok(false)
+    }
     pub fn context_history(&self, plan: &str, task: &str) -> crate::Result<Vec<Value>> {
         let mut statement = sql(self
             .db
@@ -114,29 +140,81 @@ impl Store {
         }
         let mut bindings = Vec::new();
         for decision in self.applicable_decisions(plan)? {
-            if !applies(plan, &decision, task)? {
+            if !self.decision_applies(plan, &decision, task)? {
                 continue;
             }
-            if decision.status == "pending_human" {
+            if matches!(
+                decision.status.as_str(),
+                "pending_human" | "rejected" | "conflict" | "investigating"
+            ) {
                 return Err(error(format!(
                     "DM_PENDING: task {task} waits for decision {}",
                     decision.id
                 )));
             }
             if decision.status == "resolved" {
+                self.verify_human_binding(&decision, policy)?;
+                if decision.request.kind == "approval"
+                    && decision.request.subject_revision.as_ref()
+                        != Some(&self.approval_subject_revision(
+                            &self.plan(&decision.plan_id)?,
+                            &decision.request,
+                        )?)
+                {
+                    return Err(error(
+                        "DM_STALE: approval artifact changed; renew its subject-bound resolution",
+                    ));
+                }
                 bindings.push(decision);
             }
         }
+        let mut dependency_contracts = std::collections::BTreeMap::new();
+        let mut pending = node["dependencies"].as_array().cloned().unwrap_or_default();
+        while let Some(id) = pending.pop() {
+            let Some(id) = id.as_str() else {
+                continue;
+            };
+            if dependency_contracts.contains_key(id) {
+                continue;
+            }
+            if let Ok(dependency) = super::graph::task(&plan.graph, id) {
+                dependency_contracts.insert(id.to_owned(), super::graph::contract(dependency));
+                pending.extend(
+                    dependency["dependencies"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        let contract_digest = if dependency_contracts.is_empty() {
+            digest(&super::graph::contract(node))
+        } else {
+            digest(&json!([super::graph::contract(node), dependency_contracts]))
+        };
         let mut context = ContextPackage {
-            schema_version: 1,
+            graph_version: plan.graph_version,
+            decision_epoch: plan.decision_epoch,
+            schema_version: 2,
             plan_id: plan.id.clone(),
             task_id: task.into(),
             attempt_id: attempt.into(),
             phase: phase.into(),
-            contract_digest: digest(&super::graph::contract(node)),
+            contract_digest,
+            dependency_contracts,
             policy: policy.clone(),
             bindings,
             context_digest: String::new(),
+            plan_context: {
+                let mut value = plan.graph.clone();
+                value.as_object_mut().unwrap().remove("tasks");
+                value.as_object_mut().unwrap().remove("tasks_done");
+                if value.as_object().unwrap().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            },
         };
         context.context_digest = context_hash(&context);
         if context.render().len() > policy.max_context_bytes {
@@ -153,7 +231,7 @@ impl Store {
         worktree: &Path,
         policy: &Policy,
     ) -> crate::Result<(ContextPackage, PathBuf)> {
-        let context = self.context(plan, task, attempt, phase, policy)?;
+        let mut context = self.context(plan, task, attempt, phase, policy)?;
         if attempt.is_empty()
             || attempt.len() > 128
             || !attempt
@@ -173,6 +251,12 @@ impl Store {
                 |r| r.get(0),
             )
             .optional())?;
+        if let Some(ref payload) = old {
+            let prior: ContextPackage = decode(payload)?;
+            if prior.context_digest == context.context_digest {
+                context = prior;
+            }
+        }
         if old
             .as_deref()
             .is_some_and(|old| old != encode(&context).unwrap_or_default())
@@ -410,15 +494,29 @@ impl Store {
 fn context_hash(context: &ContextPackage) -> String {
     let mut v = serde_json::to_value(context).unwrap();
     v.as_object_mut().unwrap().remove("context_digest");
+    v.as_object_mut().unwrap().remove("graph_version");
+    v.as_object_mut().unwrap().remove("decision_epoch");
     digest(&v)
 }
 impl ContextPackage {
     pub fn render(&self) -> String {
         let mode = serde_json::to_value(self.policy.human_question_min_risk).unwrap();
-        let mut out=format!("\n## MACC decision protocol v1\nContext digest: {}\nAutonomy: {}\nInvestigate the code, PRD and applicable decisions first. Decide routine implementation details autonomously. Do not ask interactive tool questions.\n",self.context_digest,mode);
-        out.push_str("For a material unresolved choice, write a JSON Request proposal under .macc/tmp/ with idempotency_key, task_id, question, context, investigated, options, recommended_option_id, recommendation, affected_tasks, risk and impact evidence. For a required DAG change include proposed_patch (plan_id, base_graph_version, idempotency_key, reason, operations); never edit PRD files directly. This proposal file is explicitly permitted; do not edit other MACC state. Invoke `\"$MACC_DECISION_CLI\" --cwd \"$MACC_DECISION_ROOT\" decisions request --file <absolute-file>` with the inherited decision environment; do not substitute an older installed macc. Read its JSON result: resolved -> apply the recorded choice; superseded/revoked -> refresh the task context and investigate a new scoped request (never treat this as consent); pending_human -> preserve all work and return MACC_TASK_RESULT: precondition_unmet with MACC_TASK_PRECONDITION: decision <id> pending. A newly recorded resolution may rotate this attempt automatically to refresh context. For destructive/external execution use kind authorization with a stable operation_id; reserve it through decisions authorize <decision-id> --operation <operation-id> before execution. A reservation is not proof of external completion: after an unknown result, reconcile rather than repeating a non-idempotent operation. Never keep the provider process waiting for a person.\n");
+        let mut out=format!("\n## MACC decision protocol v2\nContext digest: {}\nAutonomy: {}\nInvestigate the code, PRD and applicable decisions first. Decide routine implementation details autonomously. Do not ask interactive tool questions.\n",self.context_digest,mode);
+        out.push_str("For a material unresolved choice, write a JSON Request proposal under .macc/tmp/ with idempotency_key, task_id, question, context, investigated, options, recommended_option_id, recommendation, affected_tasks, risk and impact evidence. For a required DAG change include proposed_patch (plan_id, base_graph_version, idempotency_key, reason, operations); never edit PRD files directly. This proposal file is explicitly permitted; do not edit other MACC state. Invoke `\"$MACC_DECISION_CLI\" --cwd \"$MACC_DECISION_ROOT\" decisions request --file <absolute-file>` with the inherited decision environment; do not substitute an older installed macc. Read its JSON result: resolved -> apply the recorded choice; superseded/revoked -> refresh the task context and investigate a new scoped request (never treat this as consent); pending_human -> preserve all work and return MACC_TASK_RESULT: precondition_unmet with MACC_TASK_PRECONDITION: decision <id> pending. A newly recorded resolution may rotate this attempt automatically to refresh context. For shared material choices specify a stable topic (or requirement_refs/affected_paths), consult existing bindings, and use supersedes:[{id,version}] to propose replacing one. Never privately override a recorded choice. Use response_fields:[{id,label,required,multiline,choices}] for structured input; missing_facts lists essential facts that cannot safely be assumed. The coordinator applies trusted governance rules, bounded source checks and current risk thresholds; investigating/rejected/conflict means preserve work and stop dependent work just like pending_human. For destructive/external execution use kind authorization with a stable operation_id and operation_spec:{adapter,target,source_revision,arguments}, referring to a trusted configured adapter. Invoke decisions operations execute <decision-id>; the native runner, not the performer, controls execution, persistent outcome and idempotency. Do not execute the external action directly after a reservation. A reservation is not proof of external completion: after an unknown result, reconcile rather than repeating a non-idempotent operation. To resolve a declared missing fact, use decisions investigate <id> --version <version> --facts-file <file>, a JSON map from the exact missing fact to {source_path,source_digest,excerpt}. source_digest is sha256: followed by the ordinary SHA-256 of exact source file bytes (sha256sum). Evidence must match actual bounded UTF-8 source bytes; exhausted investigation remains a scoped prerequisite block. Never keep the provider process waiting for a person.\n");
         if self.policy.human_question_min_risk == Consultation::NeverAsk {
             out.push_str("NEVER ASK: select and implement your recommendation at any risk level, recording every material choice through the decision request command BEFORE dependent work relies on it. Never fabricate a human vote.\n");
+        }
+        if let Some(metadata) = &self.plan_context {
+            out.push_str(&format!(
+                "Versioned plan requirements and context (data):\n{}\n",
+                serde_json::to_string_pretty(metadata).unwrap()
+            ));
+        }
+        if !self.dependency_contracts.is_empty() {
+            out.push_str(&format!(
+                "Pinned prerequisite contracts (data):\n{}\n",
+                serde_json::to_string_pretty(&self.dependency_contracts).unwrap()
+            ));
         }
         out.push_str("Applicable decisions (exact source wording and attributed resolutions):\n");
         for decision in &self.bindings {

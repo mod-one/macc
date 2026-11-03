@@ -86,11 +86,37 @@ impl Store {
         task: &str,
         record: &ApprovalRecord,
     ) -> crate::Result<()> {
+        self.record_approval_attested(root, plan, task, record, None)
+    }
+    pub fn record_approval_attested(
+        &mut self,
+        root: &Path,
+        plan: &Plan,
+        task: &str,
+        record: &ApprovalRecord,
+        proof: Option<&Attestation>,
+    ) -> crate::Result<()> {
         let _lock = self.mutation_lock()?;
         if chrono::DateTime::parse_from_rfc3339(&record.recorded_at).is_err() {
             return Err(error("Invalid approval timestamp"));
         }
         let p = policy(root)?;
+        if p.trust_mode == "secure_approval" {
+            let proof=proof.ok_or_else(||error("Native secure gate votes require an isolated attestation; local actor/role text cannot authorize a vote"))?;
+            let actor = super::secure::verify_attestation(
+                root,
+                &p,
+                proof,
+                "gate.vote",
+                &digest(&approval_challenge(plan, task, record, &p)?),
+                chrono::Utc::now().timestamp(),
+            )?;
+            if record.actor != actor || record.role != proof.body.role {
+                return Err(error(
+                    "Gate vote actor/role differs from verified isolated approver",
+                ));
+            }
+        }
         let revision = full_commit(
             root,
             record
@@ -98,7 +124,19 @@ impl Store {
                 .as_deref()
                 .ok_or_else(|| error("Approval requires a verified current subject"))?,
         )?;
-        let payload = json!({"task_id":task,"decision":record.decision,"role":record.role,"actor":record.actor,"revision":revision,"evidence":record.evidence,"reason":record.reason,"recorded_at":record.recorded_at,"trust":"local_trust","binding_verified":true,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(&p),"manifest":approval_manifest(root,plan,task,Some(&revision)).ok(),"execution_id":registry(root)?.extra.get("decision_execution_id")});
+        if p.trust_mode == "secure_approval" {
+            let proof = proof.unwrap();
+            let at = chrono::DateTime::parse_from_rfc3339(&record.recorded_at)
+                .map_err(|e| error(e.to_string()))?
+                .timestamp();
+            if record.revision.as_deref() != Some(revision.as_str())
+                || at < proof.body.issued_at.saturating_sub(30)
+                || at > proof.body.expires_at
+            {
+                return Err(error("Secure votes require the exact full commit and a timestamp within their isolated attestation window"));
+            }
+        }
+        let payload = json!({"task_id":task,"decision":record.decision,"role":record.role,"actor":record.actor,"revision":revision,"evidence":record.evidence,"reason":record.reason,"recorded_at":record.recorded_at,"trust":p.trust_mode,"attestation":proof,"binding_verified":true,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(&p),"manifest":approval_manifest(root,plan,task,Some(&revision)).ok(),"execution_id":registry(root)?.extra.get("decision_execution_id")});
         let tx = sql(self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate))?;
@@ -187,6 +225,31 @@ impl Store {
             if chrono::DateTime::parse_from_rfc3339(&record.recorded_at).is_err() {
                 continue;
             }
+            if p.trust_mode == "secure_approval" {
+                let Some(proof) = value
+                    .get("attestation")
+                    .and_then(|v| serde_json::from_value::<Attestation>(v.clone()).ok())
+                else {
+                    continue;
+                };
+                let at = chrono::DateTime::parse_from_rfc3339(&record.recorded_at)
+                    .map_err(|e| error(e.to_string()))?
+                    .timestamp();
+                if record.actor != proof.body.principal
+                    || record.role != proof.body.role
+                    || super::secure::verify_attestation(
+                        root,
+                        &p,
+                        &proof,
+                        "gate.vote",
+                        &digest(&approval_challenge(plan, task, &record, &p)?),
+                        at,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+            }
             record.revision = Some(current);
             out.entry(task.into()).or_default().push(record);
         }
@@ -219,6 +282,12 @@ impl Store {
         }
         if d.request.operation_id.as_deref() != Some(operation) {
             return Err(error("Authorization is bound to a different operation"));
+        }
+        self.verify_human_binding(&d, &policy(&self.root)?)?;
+        if d.resolution.as_ref().is_some_and(|r| r.advisory) {
+            return Err(error(
+                "Advisory feedback cannot authorize external execution",
+            ));
         }
         if d.status != "resolved" || d.request.kind != "authorization" {
             return Err(error("No resolved operation authorization"));
@@ -255,4 +324,40 @@ pub fn approval_ledger_for_project(
 ) -> crate::Result<BTreeMap<String, Vec<ApprovalRecord>>> {
     let (store, plan) = active_plan(root)?;
     store.verified_approvals(root, &plan)
+}
+
+pub fn approval_challenge(
+    plan: &Plan,
+    task: &str,
+    record: &ApprovalRecord,
+    p: &Policy,
+) -> crate::Result<Value> {
+    Ok(
+        json!({"action":"gate.vote","plan_id":plan.id,"task":task,"gate_digest":digest(&super::graph::contract(super::graph::task(&plan.graph,task)?)),"policy_digest":digest(p),"record":record}),
+    )
+}
+
+impl Store {
+    pub(super) fn approval_subject_revision(
+        &self,
+        plan: &Plan,
+        request: &Request,
+    ) -> crate::Result<String> {
+        let node = super::graph::task(&plan.graph, &request.task_id)?;
+        if let Some(subject) = node.pointer("/gate/subject_task").and_then(Value::as_str) {
+            return crate::coordinator::approval::subject_revision(
+                &self.root,
+                &plan.reference_branch,
+                subject,
+            )
+            .ok_or_else(|| error("Approval subject has no verified integrated revision"));
+        }
+        let registry = registry(&self.root)?;
+        let root = registry
+            .find_task(&request.task_id)
+            .and_then(|t| t.worktree_path())
+            .map(Path::new)
+            .unwrap_or(&self.root);
+        crate::git::head_commit(root)
+    }
 }

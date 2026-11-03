@@ -10,6 +10,8 @@ pub struct ContextRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_context: Option<Value>,
     pub schema_version: u32,
     pub id: String,
     pub project_id: String,
