@@ -315,16 +315,8 @@ impl Store {
         worktree: &Path,
         policy: &Policy,
     ) -> crate::Result<(ContextPackage, PathBuf)> {
+        super::validate_context_identity(task, attempt, phase)?;
         let mut context = self.context(plan, task, attempt, phase, policy)?;
-        if attempt.is_empty()
-            || attempt.len() > 128
-            || !attempt
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-            || !matches!(phase, "dev" | "test" | "review" | "fix" | "merge_fix")
-        {
-            return Err(error("Invalid context attempt/phase"));
-        }
         if let Some(planning) = &mut context.planning {
             planning.worktree = worktree.to_string_lossy().into();
             planning.artifact_digest =

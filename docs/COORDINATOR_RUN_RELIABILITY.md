@@ -19,6 +19,28 @@ live in ToolSpec, with no provider-name dispatch in the collector. The output
 profile change conservatively rotates incompatible native sessions; retained Git
 work stays on the same task branch. See [usage telemetry](USAGE_TELEMETRY.md).
 
+## Decision attempt identifiers and failed launch preparation
+
+Native dispatch generates an opaque `coordinator-<UUID>` claim. The same claim
+is used by the runtime ledger, performer fencing environment and development
+decision context. Task names and timestamps remain separate metadata; their
+characters and length cannot invalidate a decision attempt. Existing persisted
+claims and decision receipts are retained, and require no schema migration.
+
+Decision context issuance validates the attempt identifier and phase before
+context construction or available-session rotation. Attempt identifiers must
+contain 1–128 ASCII letters, digits, hyphens or underscores. Errors distinguish
+an invalid attempt from an unsupported phase and identify the affected task.
+
+If preparation or process creation fails before a performer starts, MACC records
+`E901` with origin `dispatch_preparation` and event
+`dispatch_preparation_failed`. The owned task becomes blocked/failed, releasing
+its resource locks while retaining the branch, staged/unstaged work and native
+provider-session identity. Cleanup checks the claim and refuses to overwrite a
+newer reservation or a task that already has a PID. Errors after a successful
+process spawn are not treated as pre-launch failures. A failed task is not
+reported as a provider success or silently retried with unchanged invalid input.
+
 ## Checkpoint execution-context drift (E903)
 
 `MACC-CHECKPOINT-CONTEXT-DRIFT` identifies a checkpoint that no longer matches

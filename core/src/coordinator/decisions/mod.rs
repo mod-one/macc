@@ -4,6 +4,8 @@ mod approvals;
 mod backup;
 pub use backup::*;
 mod context;
+mod context_identity;
+pub(crate) use context_identity::validate as validate_context_identity;
 mod effects;
 mod graph;
 mod intake;
