@@ -700,6 +700,9 @@ pub(super) async fn run_dispatch_pipeline(
                 }
             }
         }
+        if !super::decision_preflight::ready(repo_root, &mut registry, &candidate.task.id)? {
+            continue;
+        }
         let worktree =
             acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger)
                 .await?;

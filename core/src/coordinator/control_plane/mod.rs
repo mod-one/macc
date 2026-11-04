@@ -1,5 +1,6 @@
 mod base;
 mod checkpoint_preflight;
+mod decision_preflight;
 mod dispatch;
 mod merge_gate;
 mod phase_handoff;

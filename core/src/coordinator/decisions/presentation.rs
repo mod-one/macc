@@ -45,7 +45,7 @@ impl Store {
             let compatible = fresh
                 .as_ref()
                 .is_ok_and(|n| n.context_digest == c.context_digest);
-            result.push(json!({"task":c.task_id,"phase":c.phase,"attempt":c.attempt_id,"graph_version":c.graph_version,"decision_epoch":c.decision_epoch,"context_digest":c.context_digest,"current":compatible,"blocked_reason":fresh.err().map(|e|e.to_string()),"delivered":r.is_some(),"acknowledged":r.as_ref().is_some_and(|r|r.acknowledged),"completion":r.as_ref().map(|r|r.completion_status.clone()),"compliance":r.as_ref().map(|r|r.compliance.clone()),"reviewed_commit":r.as_ref().and_then(|r|r.reviewed_commit.clone()),"decisions":c.bindings.iter().map(|d|json!({"id":d.id,"version":d.version})).collect::<Vec<_>>() }));
+            result.push(json!({"task":c.task_id,"phase":c.phase,"attempt":c.attempt_id,"graph_version":c.graph_version,"decision_epoch":c.decision_epoch,"context_digest":c.context_digest,"budget":c.budget(),"current":compatible,"blocked_reason":fresh.err().map(|e|e.to_string()),"delivered":r.is_some(),"acknowledged":r.as_ref().is_some_and(|r|r.acknowledged),"completion":r.as_ref().map(|r|r.completion_status.clone()),"compliance":r.as_ref().map(|r|r.compliance.clone()),"reviewed_commit":r.as_ref().and_then(|r|r.reviewed_commit.clone()),"decisions":c.bindings.iter().map(|d|json!({"id":d.id,"version":d.version})).collect::<Vec<_>>() }));
         }
         Ok(result)
     }

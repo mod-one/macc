@@ -8,6 +8,15 @@ pub(super) fn record(
     cause: MaccError,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<MaccError> {
+    let budget_failure = cause
+        .to_string()
+        .contains(crate::coordinator::decisions::CONTEXT_BUDGET_CODE);
+    let code = if budget_failure { "E903" } else { "E901" };
+    let origin = if budget_failure {
+        "decision_context_budget"
+    } else {
+        "dispatch_preparation"
+    };
     let detail = format!(
         "task={} phase=dev claim={} worktree={}: {}",
         claim.task_id,
@@ -34,10 +43,17 @@ pub(super) fn record(
     runtime.set_status(RuntimeStatus::Failed);
     runtime.clear_last_error_details();
     runtime.last_error = Some(detail.clone());
-    runtime.set_last_error_details("E901", "dispatch_preparation", detail.clone());
+    runtime.set_last_error_details(code, origin, detail.clone());
     // Retain the branch, full worktree and provider-session identity for recovery.
     runtime.pid = None;
-    runtime.completion_kind = None;
+    runtime.completion_kind = if budget_failure {
+        Some("precondition_unmet".into())
+    } else {
+        None
+    };
+    if budget_failure {
+        runtime.unmet_preconditions = vec![detail.clone()];
+    }
     runtime.extra.insert(
         "dispatch_preparation_failure".into(),
         serde_json::json!({"claim_id":claim.claim_id,"phase":"dev","cause":cause.to_string()}),
@@ -60,12 +76,12 @@ pub(super) fn record(
         &detail,
         "error",
     )?;
-    tracing::error!(task_id=%claim.task_id,claim_id=%claim.claim_id,code="E901",cause=%cause,"Performer launch preparation failed; retained task is blocked");
+    tracing::error!(task_id=%claim.task_id,claim_id=%claim.claim_id,code,cause=%cause,"Performer launch preparation failed; retained task is blocked");
     if let Some(log) = logger {
         log.note(format!("- Dispatch preparation failed: {detail}"))?;
     }
     Ok(MaccError::Coordinator {
-        code: "E901",
+        code,
         message: detail,
     })
 }

@@ -55,6 +55,12 @@ pub(super) async fn intervene(
         );
     }
     if config.repair_enabled && config.auto_restart && restart_allowed {
+        if let Some(ids) = super::decision_budget_recovery::recover(paths, &report.incident, dir)? {
+            report.detail=format!("{}: current prompts fit the configured policy; resuming {} without a source repair or budget override",macc_core::coordinator::decisions::CONTEXT_BUDGET_CODE,ids.join(", "));
+            return restart_only(paths, canonical, report, lock, &progress, &ids).await;
+        }
+    }
+    if config.repair_enabled && config.auto_restart && restart_allowed {
         if let Some(ids) = super::checkpoint_recovery::recover(paths, &report.incident, dir)? {
             report.detail = format!("MACC-CHECKPOINT-CONTEXT-DRIFT: execution context recovered without changing task requirements for {}",ids.join(", "));
             return restart_only(paths, canonical, report, lock, &progress, &ids).await;

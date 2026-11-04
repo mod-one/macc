@@ -28,7 +28,7 @@ automation:
       enabled: true
       human_question_min_risk: high  # low | medium | high | critical | never_ask
       trust_mode: local_trust
-      max_context_bytes: 32768       # includes rendered instructions and all bindings
+      max_context_bytes: 131072       # includes rendered instructions and all bindings
       max_request_bytes: 65536
       mandatory_human_triggers: [production, irreversible]
       approval_reuse: exact_revision # exact_revision | content_equivalent | never
@@ -424,3 +424,66 @@ A valid draft with requests remains valid when decision management is disabled, 
 `macc prd promote`, including automatic promotion after generation and the Web endpoint, refuses to replace a PRD already recorded in the durable ledger (`PRD-GEN-PROMOTE-MANAGED`). `--yes` only confirms ordinary file replacement; it does not bypass native graph history. The guard covers retained plans even when decisions are currently disabled, the exported file is missing, or another linked worktree/reference branch accesses the shared authority. It also refuses symlink destinations and fails closed on an unreadable authority.
 
 For an existing native plan, prepare and inspect `macc decisions graph preview patch.json`, then use its versioned apply/reconciliation workflow. For a missing export, use native recovery rather than copying another plan over it. New, unregistered draft destinations remain promotable with the existing confirmation/backup behavior. Promotion and first plan registration share a mutation fence; registration reads the source only after any in-flight promotion completes. The validated bytes are published with atomic file replacement.
+
+
+## Prompt budgets and pinned prerequisite sources
+
+The default `automation.coordinator.decisions.max_context_bytes` is 131072
+bytes (128 KiB). Explicit project limits, including a previously saved 32768,
+are retained. The existing valid range remains 2048..262144. The limit measures
+rendered decision instructions, not tokens, stored manifest size or the complete
+provider prompt.
+
+New schema-v3 contexts retain complete prerequisite contracts in their immutable
+manifest and full contract digests in freshness/receipt checks. The prompt
+contains compact prerequisite identities, digests, exact acceptance criteria and
+gates; complete descriptions, steps and other fields are available through scoped
+source reads. Plan metadata remains exact and inline using compact JSON, so no
+field is guessed to be historical or non-normative. Applicable decision questions,
+resolutions and explicitly released evidence retain their exact inline contents.
+Nothing silently truncates a binding or changes consent.
+
+Before relying on a prerequisite, read the relevant complete pinned requirements.
+Inside a native task invocation:
+
+```sh
+"$MACC_DECISION_CLI" --cwd "$MACC_DECISION_ROOT" decisions context-source --dependency TASK-ID
+"$MACC_DECISION_CLI" --cwd "$MACC_DECISION_ROOT" decisions context-source --dependency TASK-ID --pointer /acceptance_criteria
+"$MACC_DECISION_CLI" --cwd "$MACC_DECISION_ROOT" decisions context-source --plan --pointer /global_constraints
+```
+
+These commands require the inherited plan/attempt/phase, reject unrelated sources
+and stale contexts, and return exact JSON-source text pages with `next_offset`,
+`total_bytes` and source/selection digests. Repeat with `--offset <next_offset>`
+until the offset is null. Concatenate page `content` fields to recover the
+selected JSON. Source/selection digests use the decision authority’s canonical
+JSON encoding; they are not file-byte hashes for `decisions investigate`.
+The default encoded-output limit is 8192 bytes, adjustable through
+`--limit` within 1024..65536; UTF-8 characters are never split. A reference or a
+partial page is not proof that the whole requirement was read or satisfied.
+
+Operators can preview exact byte use without claiming a worker:
+
+```sh
+macc decisions context-budget --task TASK-ID --phase dev
+```
+
+The report includes required/configured bytes, section sizes and prerequisite/
+binding counts. Native dispatch runs this check before worker acquisition and
+Apply. If the prompt cannot fit, `MACC-DECISION-CONTEXT-BUDGET` records a scoped
+E903 precondition with the numeric evidence in `task_runtime.decision_context_budget`.
+Testing/review/fix paths and the final issuer keep the same guard. The supervisor
+receives the diagnostic and must not repair application source or override the
+configured cap to bypass it. With repair and automatic restart enabled, it can
+resume a native dev preparation blocked solely by this budget when a fresh preview
+now fits. It also recognizes the older E901 budget message. Decision-policy changes
+wake a waiting supervisor; recovery records `decision-context-budgets.json` and
+uses the existing guarded task-requeue/restart operation. Other phases and mixed
+incidents retain their normal diagnostic/recovery path. Review the project limit
+or split the required scope when the context still cannot fit.
+
+Existing schema-v2 contexts keep their original renderer for inspection and audit.
+Fresh v3 contexts have new digests; active attempts issued by an older binary
+must be refreshed, rather than reinterpreting an old receipt. No database schema
+upgrade is required. Exact context history/delivery diagnostics include the byte
+report in CLI, TUI and Web service responses.

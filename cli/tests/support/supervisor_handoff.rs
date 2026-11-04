@@ -178,17 +178,18 @@ fn supervisor_deletes_merged_repair_branches_by_default() {
     let supervisor = start(root);
     let _r = settled(root, "repair_integrated");
     wait_for(|| !root.join(".macc/worktree/supervisor-01").exists());
-    let refs = git_out(
-        root,
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/heads/macc/supervisor/",
-        ],
-    );
-    assert!(
-        refs.trim().is_empty(),
-        "Merged supervisor repair branches should be deleted by default: found {refs}"
-    );
+    // Slot removal precedes branch pruning; wait for the complete cleanup.
+    wait_for(|| {
+        git_out(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/macc/supervisor/",
+            ],
+        )
+        .trim()
+        .is_empty()
+    });
     drop(supervisor);
 }
