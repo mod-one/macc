@@ -150,6 +150,19 @@ impl Store {
         }
         let source = source.to_string_lossy().into_owned();
         let key = digest(&json!([self.project_id, source, reference]));
+        // Only registration needs this fence. Existing-plan checks also run
+        // beneath the publication lock and must not reacquire that same lock.
+        let known: bool = sql(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM plans WHERE scope_key=?1)",
+            [&key],
+            |r| r.get(0),
+        ))?;
+        let _fence = if known {
+            None
+        } else {
+            Some(self.mutation_lock()?)
+        };
+
         let raw =
             std::fs::read(projection_path(root, &source)?).map_err(|e| error(e.to_string()))?;
         let graph: Value = serde_json::from_slice(&raw).map_err(|e| error(e.to_string()))?;

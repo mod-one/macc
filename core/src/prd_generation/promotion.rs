@@ -15,6 +15,8 @@ pub struct PromoteResult {
     pub source: String,
     pub destination: String,
     pub backup_created: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Promote a generated PRD file to its destination.
@@ -29,7 +31,22 @@ pub fn promote_prd(options: &PromoteOptions) -> crate::Result<PromoteResult> {
         )));
     }
 
-    let dest_exists = options.dest_path.exists();
+    // Inspect one source snapshot and publish exactly those validated bytes.
+    let raw = std::fs::read_to_string(&options.source_path).map_err(|e| MaccError::Io {
+        path: options.source_path.to_string_lossy().into(),
+        action: "read promotion source".into(),
+        source: e,
+    })?;
+    let destination = crate::coordinator::decisions::promotion_destination(&options.dest_path)?;
+    let _guard = crate::coordinator::decisions::guard_prd_promotion(&destination)?;
+    let validation = super::validation::validate_prd_content(&raw, &destination);
+    if !validation.ok {
+        return Err(MaccError::Validation(format!(
+            "PRD-GEN-PROMOTE-INVALID: {}",
+            validation.errors.join("; ")
+        )));
+    }
+    let dest_exists = destination.exists();
 
     if dest_exists && !options.yes {
         return Err(MaccError::Validation(format!(
@@ -54,7 +71,7 @@ pub fn promote_prd(options: &PromoteOptions) -> crate::Result<PromoteResult> {
                     source: e,
                 })?;
             }
-            std::fs::copy(&options.dest_path, &backup_path).map_err(|e| MaccError::Io {
+            std::fs::copy(&destination, &backup_path).map_err(|e| MaccError::Io {
                 path: options.dest_path.to_string_lossy().into(),
                 action: "backup existing PRD".into(),
                 source: e,
@@ -67,27 +84,18 @@ pub fn promote_prd(options: &PromoteOptions) -> crate::Result<PromoteResult> {
         None
     };
 
-    if let Some(parent) = options.dest_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| crate::MaccError::Io {
-                path: parent.to_string_lossy().into(),
-                action: "create dest directory".into(),
-                source: e,
-            })?;
-        }
-    }
-
-    std::fs::copy(&options.source_path, &options.dest_path).map_err(|e| crate::MaccError::Io {
-        path: options.source_path.to_string_lossy().into(),
-        action: format!("copy to '{}'", options.dest_path.display()),
-        source: e,
-    })?;
+    crate::atomic_write(
+        &crate::ProjectPaths::from_root(destination.parent().unwrap()),
+        &destination,
+        raw.as_bytes(),
+    )?;
 
     Ok(PromoteResult {
         promoted: true,
         source: options.source_path.to_string_lossy().to_string(),
         destination: options.dest_path.to_string_lossy().to_string(),
         backup_created,
+        warnings: validation.warnings,
     })
 }
 

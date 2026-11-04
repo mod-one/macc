@@ -59,6 +59,7 @@ interface ApiPrdPromoteRequest {
 }
 
 interface ApiPrdPromoteResult {
+  warnings?: string[];
   promoted: boolean;
   sourcePath: string;
   destPath: string;
@@ -923,6 +924,7 @@ const PromotePanel: React.FC<{ onDone: () => void }> = ({ onDone }) => {
           </p>
           <p className="font-mono text-[11px] text-[var(--text-muted)]">{result.sourcePath} → {result.destPath}</p>
           {result.backedUpExisting && <p className="text-xs text-[var(--text-muted)]">Existing PRD backed up.</p>}
+          {result.warnings?.map((warning, i) => <p key={i} role="status" className="text-xs text-[var(--warning)]">{warning}</p>)}
         </div>
       )}
 

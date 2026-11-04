@@ -15,3 +15,8 @@ pub use validation::{validate_prd_file, ValidationResult};
 
 pub const PRD_GENERATION_INTERNAL_ROLE: &str = "prd-planner";
 pub const PRD_GENERATION_INTERNAL_SKILL: &str = "macc-prd-planner";
+
+#[cfg(test)]
+mod tests_intake;
+#[cfg(test)]
+mod tests_promotion;

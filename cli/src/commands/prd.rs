@@ -514,6 +514,10 @@ fn run_promote(
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
     } else {
         println!("Promoted: {} -> {}", result.source, result.destination);
+        for warning in &result.warnings {
+            println!("  WARN: {warning}");
+        }
+
         if let Some(b) = result.backup_created {
             println!("Backup:   {}", b);
         }

@@ -243,9 +243,11 @@ impl Store {
                 {
                     continue;
                 }
-                if request.has_effects() {
-                    return Err(error("Initial planner intake cannot apply runtime patches before its plan identity is issued"));
-                }
+                super::intake::validate_initial_request(
+                    &plan.graph,
+                    &request,
+                    policy.max_request_bytes,
+                )?;
                 self.submit(plan, request, "planner baseline proposal", "agent", policy)?;
             }
         }

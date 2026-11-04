@@ -63,7 +63,12 @@ pub fn validate_prd_file(file_path: &Path, target_dir: Option<&Path>) -> Validat
         }
     };
 
-    let value: Value = match serde_json::from_str(&raw) {
+    validate_prd_content(&raw, file_path)
+}
+
+pub(super) fn validate_prd_content(raw: &str, file_path: &Path) -> ValidationResult {
+    let mut result = ValidationResult::pass();
+    let value: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
             result.add_error(format!(
@@ -124,7 +129,38 @@ pub fn validate_prd_file(file_path: &Path, target_dir: Option<&Path>) -> Validat
         }
     }
 
+    check_decision_requests(&value, file_path, &mut result);
     result
+}
+
+fn check_decision_requests(value: &Value, path: &Path, result: &mut ValidationResult) {
+    if !value
+        .as_object()
+        .is_some_and(|o| o.contains_key("decision_requests"))
+    {
+        return;
+    }
+    let mut budget = 262144;
+    if value["decision_requests"]
+        .as_array()
+        .is_some_and(|r| !r.is_empty())
+    {
+        match crate::find_project_root(path) {
+            Ok(paths) => match crate::coordinator::decisions::policy(&paths.root) {
+                Ok(p) => {
+                    budget = p.max_request_bytes;
+                    if !p.enabled {
+                        result.add_warning("PRD-GEN-DECISIONS-DISABLED: decision_requests are declared but automation.coordinator.decisions.enabled is false; these requests will not be enforced until decision management is enabled");
+                    }
+                }
+                Err(e) => result.add_error(format!("PRD-GEN-DECISION-POLICY: {e}")),
+            },
+            Err(_) => result.add_warning("PRD-GEN-DECISIONS-UNCONFIGURED: cannot check project policy; enable decision management in the destination project before relying on decision_requests"),
+        }
+    }
+    if let Err(e) = crate::coordinator::decisions::validate_initial_requests(value, budget) {
+        result.add_error(format!("PRD-GEN-DECISION-REQUESTS: {e}"));
+    }
 }
 
 fn check_scheduler_contract(task: &Value, result: &mut ValidationResult) {
