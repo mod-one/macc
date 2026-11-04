@@ -23,11 +23,12 @@ fn key_for(shortcut: &str) -> Option<KeyCode> {
         "Enter" => KeyCode::Enter,
         "Esc" | "Esc/q" => KeyCode::Esc,
         "Space" | "Space/Enter" => KeyCode::Char(' '),
-        "Tab" | "Tab/1-7" => KeyCode::Tab,
+        "Tab" | "Tab/1-8" => KeyCode::Tab,
         "Backspace" => KeyCode::Backspace,
         "Shift+Tab" => KeyCode::BackTab,
         "Delete" => KeyCode::Delete,
         "F4" => KeyCode::F(4),
+        "F12" => KeyCode::F(12),
         s if s.chars().count() == 1 && !"↑↓←→".contains(s) => {
             KeyCode::Char(s.chars().next()?)
         }
@@ -105,8 +106,6 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
             ("Tab", "Choose option"),
             ("F5", "Send answer"),
             ("Enter", "Newline"),
-            ("F6", "Autonomy"),
-            ("F7", "Enable decisions"),
             ("F8", "New guidance"),
             ("F9", "Answer field"),
             ("F10", "Accept displayed patch"),
@@ -247,11 +246,18 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
     }
     let mut commands = rows(screen_action_bindings(screen));
     if matches!(screen, Screen::Automation | Screen::Settings) {
-        commands.extend((1..=7).map(|n| Command::new(&n.to_string(), "Open configuration tab")));
+        commands.extend((1..=8).map(|n| Command::new(&n.to_string(), "Open configuration tab")));
         commands.push(Command::new("Shift+Tab", "Previous tab"));
+        if state.config_tab_index == 7 {
+            commands.push(Command::new("e", "Edit exact decision setting"));
+            commands.push(Command::new(
+                "F12",
+                "Prepare decision policy approval challenge",
+            ));
+        }
         commands.push(Command::new(
             "←→",
-            "Adjust focused tool / supervisor setting",
+            "Adjust focused tool / supervisor / decisions setting",
         ));
     }
     if screen == Screen::CoordinatorLive {
@@ -340,7 +346,7 @@ pub(crate) fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'sta
             ("f", "Context"),
         ],
         Screen::Automation | Screen::Settings => vec![
-            ("Tab/1-7", "Tabs"),
+            ("Tab/1-8", "Tabs"),
             ("↑↓", "Move"),
             ("Space/Enter", "Edit"),
             ("s", "Save"),

@@ -2,6 +2,8 @@
 mod apply;
 #[path = "apply_view.rs"]
 mod apply_view;
+#[path = "decision_settings.rs"]
+mod decision_settings;
 #[path = "launch.rs"]
 mod launch;
 #[path = "supervisor_commands.rs"]
@@ -183,9 +185,10 @@ pub struct AppState {
     pub tool_priority_editor_grabbed: bool,
     pub settings_field_index: usize,
     supervisor_commands_editor: Option<supervisor_commands::CommandEditor>,
+    decision_settings_proof: String,
     pub settings_field_editing: bool,
     pub settings_field_input: String,
-    /// Unified config screen: active tab (0=General 1=Coordinator 2=Tools 3=Phases 4=Reliability 5=Admin)
+    /// Unified config screen: active tab (0=General 1=Coordinator 2=Tools 3=Phases 4=Reliability 5=Admin 6=Supervisor 7=Decisions)
     pub config_tab_index: usize,
     /// Unified config screen: selected row within the current tab
     pub config_view_index: usize,
@@ -364,6 +367,7 @@ impl AppState {
             tool_parallel_editor_index: 0,
             settings_field_index: 0,
             supervisor_commands_editor: None,
+            decision_settings_proof: String::new(),
             settings_field_editing: false,
             settings_field_input: String::new(),
             config_tab_index: 0,
@@ -1186,9 +1190,11 @@ impl AppState {
 
     /// Record a decision collected by the approval window.
     pub fn submit_approval(&mut self, decision: crate::approval::Decision) {
-        if self.decision_center.policy().enabled && self.decision_center.policy().trust_mode=="secure_approval" {
+        if self.decision_center.policy().enabled
+            && self.decision_center.policy().trust_mode == "secure_approval"
+        {
             self.decision_center.prepare_gate(&decision);
-            self.approval_window=None;
+            self.approval_window = None;
             return;
         }
         let command = CoordinatorCommand::GateDecision {
@@ -2463,6 +2469,7 @@ impl AppState {
     }
 
     pub fn load_config(&mut self, start_dir: Option<&std::path::Path>) {
+        self.decision_settings_proof.clear();
         self.release_ownership_on_exit();
 
         let current_dir = if let Some(d) = start_dir {
@@ -3507,19 +3514,33 @@ impl AppState {
         "Reliability",
         "Admin",
         "Supervisor",
+        "Decisions",
     ];
 
     // Keep navigation aligned with the shared typed settings contract when
     // supervisor fields are inserted; no trailing field may become unreachable.
-    const SUPERVISOR_CONFIG_FIELDS: [(u8,usize); macc_core::supervisor::settings::FIELDS.len()] = {
-        let mut fields=[(2,0);macc_core::supervisor::settings::FIELDS.len()];
-        let mut index=0;
-        while index<fields.len(){fields[index]=(2,index);index+=1;}
+    const SUPERVISOR_CONFIG_FIELDS: [(u8, usize); macc_core::supervisor::settings::FIELDS.len()] = {
+        let mut fields = [(2, 0); macc_core::supervisor::settings::FIELDS.len()];
+        let mut index = 0;
+        while index < fields.len() {
+            fields[index] = (2, index);
+            index += 1;
+        }
+        fields
+    };
+
+    const DECISION_CONFIG_FIELDS: [(u8, usize); decision_settings::FIELDS.len()] = {
+        let mut fields = [(3, 0); decision_settings::FIELDS.len()];
+        let mut i = 0;
+        while i < fields.len() {
+            fields[i] = (3, i);
+            i += 1;
+        }
         fields
     };
 
     /// Returns the field list for the given tab as `(source, field_index)` pairs.
-    /// `source` 0 = global (settings), 1 = coordinator (automation).
+    /// `source` 0 = global, 1 = coordinator, 2 = supervisor, 3 = decisions.
     pub fn config_tab_fields(tab: usize) -> &'static [(u8, usize)] {
         match tab {
             // General: global settings (quiet, offline, debug, web port)
@@ -3576,6 +3597,7 @@ impl AppState {
                 (1, 25),
             ],
             6 => &Self::SUPERVISOR_CONFIG_FIELDS,
+            7 => &Self::DECISION_CONFIG_FIELDS,
             _ => &[],
         }
     }
@@ -3639,6 +3661,9 @@ impl AppState {
 
     /// Returns the display label for a config field, with the `[Category] ` prefix stripped.
     pub fn config_field_label(&self, source: u8, idx: usize) -> &'static str {
+        if source == 3 {
+            return decision_settings::FIELDS[idx].label;
+        }
         if source == 2 {
             return macc_core::supervisor::settings::FIELDS[idx].label;
         }
@@ -3658,6 +3683,9 @@ impl AppState {
 
     /// Returns the current display value for a config field.
     pub fn config_field_value(&self, source: u8, idx: usize) -> String {
+        if source == 3 {
+            return self.decision_field_value(idx);
+        }
         if source == 2 {
             return self.supervisor_field_value(idx);
         }
@@ -3670,6 +3698,9 @@ impl AppState {
 
     /// Returns the help text for a config field.
     pub fn config_field_help(&self, source: u8, idx: usize) -> &'static str {
+        if source == 3 {
+            return decision_settings::FIELDS[idx].help;
+        }
         if source == 2 {
             return macc_core::supervisor::settings::FIELDS[idx].help;
         }
@@ -3692,6 +3723,10 @@ impl AppState {
     /// Toggle or begin editing for whichever config field is currently selected.
     pub fn toggle_current_config_field(&mut self) {
         if let Some((source, idx)) = self.current_config_field() {
+            if source == 3 {
+                self.edit_decision_field(idx, true);
+                return;
+            }
             if source == 2 {
                 self.edit_supervisor_field(idx, true);
                 return;
@@ -3709,6 +3744,10 @@ impl AppState {
     /// Begin text editing for the currently selected config field.
     pub fn begin_current_config_edit(&mut self) {
         if let Some((source, idx)) = self.current_config_field() {
+            if source == 3 {
+                self.edit_decision_field(idx, false);
+                return;
+            }
             if source == 2 {
                 self.edit_supervisor_field(idx, false);
                 return;
@@ -3743,6 +3782,12 @@ impl AppState {
 
     /// Commit whichever config field edit is active.
     pub fn commit_config_edit(&mut self) {
+        if let Some((3, idx)) = self.current_config_field() {
+            if self.settings_field_editing {
+                self.commit_decision_edit(idx);
+            }
+            return;
+        }
         if let Some((2, idx)) = self.current_config_field() {
             if self.settings_field_editing {
                 self.commit_supervisor_edit(idx);
@@ -5590,6 +5635,18 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             return;
         }
 
+        match self.persist_decision_settings() {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!("Decisions save blocked: {e}"),
+                    None,
+                );
+                return;
+            }
+        }
         self.apply_tool_defaults();
         self.ensure_mandatory_skills_selected();
         let draft = self

@@ -441,6 +441,26 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         && !state.is_config_editing()
     {
         match key {
+            KeyCode::Char('8') => {
+                state.jump_config_tab(7);
+                return;
+            }
+            KeyCode::F(12) if state.config_tab_index == 7 => {
+                state.decision_settings_challenge();
+                return;
+            }
+            KeyCode::Left | KeyCode::Right
+                if matches!(state.current_config_field(), Some((3, _))) =>
+            {
+                if let Some((3, index)) = state.current_config_field() {
+                    state.adjust_decision_field(index, key == KeyCode::Right);
+                }
+                return;
+            }
+            KeyCode::Char('e') if matches!(state.current_config_field(), Some((3, _))) => {
+                state.begin_current_config_edit();
+                return;
+            }
             KeyCode::Left | KeyCode::Right
                 if matches!(state.current_config_field(), Some((2, _))) =>
             {
@@ -1585,9 +1605,20 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .split(body_area);
 
             // ── Tab bar ───────────────────────────────────────────────────────
+            let mut first_tab = 0;
+            while first_tab < state.config_tab_index
+                && AppState::CONFIG_TAB_NAMES[first_tab..=state.config_tab_index]
+                    .iter()
+                    .map(|name| name.len() + 4)
+                    .sum::<usize>()
+                    > outer_chunks[0].width as usize
+            {
+                first_tab += 1;
+            }
             let tab_spans: Vec<Span> = AppState::CONFIG_TAB_NAMES
                 .iter()
                 .enumerate()
+                .skip(first_tab)
                 .flat_map(|(i, name)| {
                     let (label_style, sep_style) = if i == state.config_tab_index {
                         (
@@ -1808,6 +1839,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 text.push_str("\n\n");
                 text.push_str(&lines.join("\n"));
                 wrapped_paragraph(text, "Field Info")
+            } else if let Some((3, index)) = state.current_config_field() {
+                wrapped_paragraph(state.decision_field_info(index), "Decisions settings")
             } else if let Some((2, index)) = state.current_config_field() {
                 wrapped_paragraph(
                     state

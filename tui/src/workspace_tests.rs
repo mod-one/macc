@@ -291,3 +291,45 @@ fn literal_colon_stays_in_session_input_and_palette_preserves_the_draft() {
     assert!(!state.sessions.input_active());
     assert!(text(&render(&state, 120, 36)).contains("1800 seconds"));
 }
+
+#[test]
+fn decisions_configuration_has_a_tab_and_inbox_keeps_only_operational_actions() {
+    let (_tmp, mut state) = fixture();
+    state.push_screen(Screen::Automation);
+    handle_key(&mut state, KeyCode::Char('8'));
+    assert_eq!(state.config_tab_index, 7);
+    assert_eq!(state.current_config_field(), Some((3, 0)));
+    let before = state.working_copy.clone();
+    handle_key(&mut state, KeyCode::Down);
+    handle_key(&mut state, KeyCode::Enter);
+    assert_ne!(state.working_copy, before);
+    handle_key(&mut state, KeyCode::Down);
+    handle_key(&mut state, KeyCode::Char('e'));
+    handle_key(&mut state, KeyCode::Char('9'));
+    handle_key(&mut state, KeyCode::Esc);
+    assert_eq!(state.config_tab_index, 7);
+    for width in [80, 120] {
+        let output = text(&render(&state, width, 32));
+        assert!(output.contains("[Decisions]"), "{output}");
+        assert!(output.contains("Decisions settings"));
+        assert!(output.contains("[s] Save"));
+    }
+    handle_key(&mut state, KeyCode::Char('s'));
+    let saved =
+        macc_core::load_canonical_config(&state.project_paths.as_ref().unwrap().config_path)
+            .unwrap();
+    assert_eq!(
+        saved
+            .automation
+            .coordinator
+            .unwrap()
+            .decisions
+            .unwrap()
+            .human_question_min_risk,
+        macc_core::coordinator::decisions::Consultation::Critical
+    );
+    let mut center = crate::decision_center::Center::default();
+    // No hidden configuration action may remain on the former inbox shortcuts.
+    assert!(center.key_event(KeyCode::F(6)).is_none());
+    assert!(center.key_event(KeyCode::F(7)).is_none());
+}

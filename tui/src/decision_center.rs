@@ -315,22 +315,6 @@ impl Center {
             }
             return None;
         }
-        if key == KeyCode::F(6) {
-            let mut p = self.policy();
-            p.human_question_min_risk = match p.human_question_min_risk {
-                dm::Consultation::Low => dm::Consultation::Medium,
-                dm::Consultation::Medium => dm::Consultation::High,
-                dm::Consultation::High => dm::Consultation::Critical,
-                dm::Consultation::Critical => dm::Consultation::NeverAsk,
-                dm::Consultation::NeverAsk => dm::Consultation::Low,
-            };
-            return Some(Action::Policy(p));
-        }
-        if key == KeyCode::F(7) {
-            let mut p = self.policy();
-            p.enabled = !p.enabled;
-            return Some(Action::Policy(p));
-        }
         if key == KeyCode::F(8) {
             self.feedback = true;
             self.message = "New project direction: type your text; F5 records it".into();
@@ -813,9 +797,9 @@ impl Center {
             ])
             .split(rect);
         let p = self.policy();
-        let mut text=format!("Durable decisions: {} | mode: {:?} | pending: {}\nHigher risk threshold grants more autonomy. NeverAsk records agent choices without questions.\n{}\n\n",p.enabled,p.human_question_min_risk,self.pending(),self.message);
+        let mut text=format!("Durable decisions: {} | mode: {:?} | pending: {}\nConfiguration: Automation / Coordinator > Decisions. NeverAsk records agent choices without questions.\n{}\n\n",p.enabled,p.human_question_min_risk,self.pending(),self.message);
         if self.show_help {
-            text.push_str("KEYS: Home opens lifecycle/approval/operation actions; F2 next request/history; Tab option or field choice; F3 advisory; F4 delivery/ACK/compliance; F5 explicit submit; F6 autonomy; F7 enable; F8 new guidance; F9 edit next response field; F10 explicitly accept displayed patch; F11 answer/reject/request changes/investigate; F12 write isolated approver challenge; Enter newline; PgUp/PgDn scroll evidence; Esc defer without submitting.\n\n");
+            text.push_str("KEYS: Home opens lifecycle/approval/operation actions; F2 next request/history; Tab option or field choice; F3 advisory; F4 delivery/ACK/compliance; F5 explicit submit; F8 new guidance; F9 edit next response field; F10 explicitly accept displayed patch; F11 answer/reject/request changes/investigate; F12 write isolated approver challenge; Enter newline; PgUp/PgDn scroll evidence; Esc defer without submitting.\n\n");
         }
         if let Some(d) = &self.current {
             text.push_str(&format!("{}\nTask: {} | kind: {} | risk: {:?} | status: {} | version {}\n\n{}\n\nRecommendation: {}\n",d.request.question,d.request.task_id,d.request.kind,d.effective_risk,d.status,d.version,d.request.context,d.request.recommendation));
@@ -865,7 +849,7 @@ impl Center {
             }
         } else {
             text.push_str(
-                "No decisions yet. F7 enables the feature; F8 records a new project direction.\n",
+                "No decisions yet. Configure Automation / Coordinator > Decisions; F8 records a new project direction.\n",
             );
         }
         if let Some(contexts) = self.inspected_contexts.as_ref() {
@@ -976,7 +960,7 @@ impl Center {
                 ),
             chunks[1],
         );
-        frame.render_widget(Paragraph::new(if compact{"[F1] Keys [Home] Actions\n[F5] Send [Esc] Later"}else{"[F5] Send  [Esc] Later  [F1] Keys  [Home] Actions\n[F2] Next / history  [Tab] Option  [F3] Advisory [F4] Contexts\n[F5] Send / save  [Enter] Newline  [PgUp/PgDn] Scroll\n[F6] Autonomy [F7] Enable [F8] Direction [F9] Field [F10] Patch [F11] Outcome [F12] Approver challenge\n[Home] Actions / approvals / operations  [Esc] Later / close — never submits an answer"}).wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL)),chunks[2]);
+        frame.render_widget(Paragraph::new(if compact{"[F1] Keys [Home] Actions\n[F5] Send [Esc] Later"}else{"[F5] Send  [Esc] Later  [F1] Keys  [Home] Actions\n[F2] Next / history  [Tab] Option  [F3] Advisory [F4] Contexts\n[F5] Send / save  [Enter] Newline  [PgUp/PgDn] Scroll\n[F8] Direction [F9] Field [F10] Patch [F11] Outcome [F12] Approver challenge\n[Home] Actions / approvals / operations  [Esc] Later / close — never submits an answer"}).wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL)),chunks[2]);
     }
 }
 impl Drop for Center {

@@ -17,7 +17,9 @@ macc decisions verify
 macc decisions recover
 ```
 
-TUI: `D` opens the decision center; `Tab` selects an option, `Enter` inserts a newline, `F5` submits, `Esc` defers, `F4` inspects issued contexts/receipts, `F6` changes autonomy, `F7` enables/disables, `F8` adds project direction, `F9` selects a structured response field, `F10` explicitly accepts the displayed patch, `F11` chooses answer/reject/request-changes, and `F12` writes the exact isolated-approver challenge. `F1` lists these shortcuts, including in compact mode. Drafts survive closing and restarting the client. The input remains visible on smaller terminals; details scroll separately.
+TUI: `D` opens the decision center; `Tab` selects an option, `Enter` inserts a newline, `F5` submits, `Esc` defers, `F4` inspects issued contexts/receipts, `F8` adds project direction, `F9` selects a structured response field, `F10` explicitly accepts the displayed patch, `F11` chooses answer/reject/request-changes, and `F12` writes the exact isolated-approver challenge. `F1` lists these shortcuts, including in compact mode. Drafts survive closing and restarting the client. The input remains visible on smaller terminals; details scroll separately.
+
+TUI configuration: **Automation / Coordinator → Decisions** (tab `8`) edits activation, consultation threshold, budgets, trust and advanced rules. `s` saves through native policy checks; `F12` exports an isolated policy-approval challenge. Secure-mode approval tickets remain operational actions in the decision center. Questions, answers and history stay in the center opened by `D`; its old `F6`/`F7` configuration shortcuts are removed.
 
 Web: **Decisions** opens the inbox/history. New questions open only when another editor/dialog is not active. The initial answer is custom: no option or graph patch is accepted by default. Requests are versioned; a competing answer does not overwrite a draft. History and exact issued contexts remain inspectable in full autonomy.
 
