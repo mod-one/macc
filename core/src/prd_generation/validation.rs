@@ -66,7 +66,7 @@ pub fn validate_prd_file(file_path: &Path, target_dir: Option<&Path>) -> Validat
     validate_prd_content(&raw, file_path)
 }
 
-pub(super) fn validate_prd_content(raw: &str, file_path: &Path) -> ValidationResult {
+pub(crate) fn validate_prd_content(raw: &str, file_path: &Path) -> ValidationResult {
     let mut result = ValidationResult::pass();
     let value: Value = match serde_json::from_str(raw) {
         Ok(v) => v,

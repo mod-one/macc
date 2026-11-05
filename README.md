@@ -427,6 +427,8 @@ Generated outputs land in `.macc/generated/prd/macc-prd-planner/<run-id>/`.
 For `prd validate`, relative input paths resolve from the effective `--cwd`
 directory (the current directory when omitted); absolute paths are preserved.
 
+When adding a folder to the coordinator PRD queue (TUI or `macc coordinator prds add <folder>`), MACC checks the immediate `.json` files in name order. Valid PRDs are retained; invalid files are skipped with a warning naming the file and validation error. Empty task lists, malformed tasks, duplicate task IDs, dependency cycles, queue ordering conflicts, and invalid decision requests or gates are rejected. Source files and saved execution progress are unchanged. Existing queue entries are preserved; errors in those entries must be fixed explicitly. In the TUI, use PgUp/PgDn to read the import report, Enter to accept the queue, then `s` in configuration to save it.
+
 </details>
 
 <details>

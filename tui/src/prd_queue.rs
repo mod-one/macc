@@ -16,6 +16,8 @@ pub struct Editor {
     input: Option<String>,
     message: String,
     confirm_reset: bool,
+    message_scroll: u16,
+    report_max_scroll: std::cell::Cell<u16>,
 }
 
 pub enum Outcome {
@@ -63,6 +65,7 @@ impl Editor {
             ("a", "Import PRD…"),
             ("Delete", "Remove PRD"),
             ("R", "Reset progress…"),
+            ("PgUp/PgDn", "Scroll import report"),
             ("Enter", "Save queue"),
             ("Esc", "Cancel"),
         ]
@@ -89,10 +92,11 @@ impl Editor {
                 KeyCode::Char(c) => input.push(c),
                 KeyCode::Enter => {
                     match macc_core::prd_queue::import(&self.root, input.trim(), &self.files) {
-                        Ok(files) => {
-                            self.files = files;
+                        Ok(report) => {
+                            self.message = report.message();
+                            self.files = report.files;
                             self.input = None;
-                            self.message = "Imported. Use Space and arrows to reorder.".into();
+                            self.message_scroll = 0;
                         }
                         Err(e) => self.message = e.to_string(),
                     }
@@ -102,6 +106,14 @@ impl Editor {
             return Outcome::Continue;
         }
         match key {
+            KeyCode::PageDown => {
+                self.message_scroll = self
+                    .message_scroll
+                    .saturating_add(3)
+                    .min(self.report_max_scroll.get())
+            }
+            KeyCode::PageUp => self.message_scroll = self.message_scroll.saturating_sub(3),
+            KeyCode::Home => self.message_scroll = 0,
             KeyCode::Char('R') => self.confirm_reset = true,
             KeyCode::Char('a') => {
                 self.input = Some(String::new());
@@ -153,11 +165,25 @@ impl Editor {
         let mut lines = vec![
             Line::from("PRDs run in this order. A blocked/incomplete PRD stops the queue."),
             Line::from("a Add file/directory | Space Grab/release | Up/Down Move | d Remove | Enter Accept | Esc Cancel"),
-            Line::from("Directories: immediate *.json files, sorted by name; no live directory expansion."),
+            Line::from("Directories: immediate *.json files, sorted by name. Invalid files are skipped with warnings."),
             Line::from("R Reset saved progress (confirmation required; does not undo delivered tasks)"),
             Line::from(""),
         ];
-        let visible = area.height.saturating_sub(10).max(1) as usize;
+        let report_height = if self.message.is_empty() {
+            0
+        } else {
+            (self.message.lines().count() as u16 + 2)
+                .min(area.height / 2)
+                .max(3)
+        };
+        let sections = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(report_height),
+            ])
+            .split(area);
+        let visible = sections[0].height.saturating_sub(9).max(1) as usize;
         let start = self.selected.saturating_sub(visible - 1);
         for (index, file) in self.files.iter().enumerate().skip(start).take(visible) {
             let line = Line::from(format!(
@@ -191,7 +217,6 @@ impl Editor {
                 "Path (relative to project or absolute): {input}_"
             )));
         }
-        lines.push(Line::from(self.message.clone()));
         if self.confirm_reset {
             lines.push(
                 Line::from(
@@ -210,8 +235,32 @@ impl Editor {
                     .borders(Borders::ALL)
                     .title("Coordinator PRD queue"),
             ),
-            area,
+            sections[0],
         );
+        if report_height > 0 {
+            let paragraph = Paragraph::new(self.message.as_str())
+                .style(Style::default().fg(if self.message.contains("Warning:") {
+                    Color::Yellow
+                } else {
+                    Color::Cyan
+                }))
+                .wrap(Wrap { trim: false });
+            let max_scroll = paragraph
+                .line_count(sections[1].width.saturating_sub(2))
+                .saturating_sub(sections[1].height.saturating_sub(2) as usize)
+                .min(u16::MAX as usize) as u16;
+            self.report_max_scroll.set(max_scroll);
+            frame.render_widget(
+                paragraph
+                    .scroll((self.message_scroll.min(max_scroll), 0))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Import / status — PgUp/PgDn scroll; Home top"),
+                    ),
+                sections[1],
+            );
+        }
     }
 }
 
@@ -244,6 +293,42 @@ pub fn edit(root: PathBuf, files: Vec<String>) -> anyhow::Result<Option<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_folder_import_shows_scrollable_warnings_and_keeps_valid_files() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("empty.json"), r#"{"tasks":[]}"#).unwrap();
+        std::fs::write(root.path().join("valid.json"), r#"{"tasks":[{"id":"A"}]}"#).unwrap();
+        let mut editor = Editor::new(root.path().into(), vec![]);
+        editor.key(KeyCode::Char('a'));
+        editor.key(KeyCode::Char('.'));
+        editor.key(KeyCode::Enter);
+        assert_eq!(editor.files, ["valid.json"]);
+        assert!(editor.input.is_none());
+        assert!(editor.message.contains("Added 1 PRD(s)"));
+        assert!(editor.message.contains("empty.json"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| editor.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(rendered.contains("Warning:"));
+        assert!(rendered.contains("PgUp/PgDn"));
+        editor
+            .message
+            .push_str(&"\nAdditional rejection detail".repeat(20));
+        terminal.draw(|frame| editor.draw(frame)).unwrap();
+        editor.key(KeyCode::PageDown);
+        assert!(editor.message_scroll > 0);
+        editor.key(KeyCode::PageUp);
+        assert_eq!(editor.message_scroll, 0);
+        assert!(matches!(editor.key(KeyCode::Enter), Outcome::Save));
+    }
 
     #[test]
     fn grab_moves_files_and_cancel_leaves_original_unchanged() {

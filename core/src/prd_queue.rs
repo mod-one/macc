@@ -30,21 +30,46 @@ pub struct Entry {
     pub task_ids: Vec<String>,
 }
 
-/// Import immediate JSON children only; the saved list never expands at run time.
-pub fn import(root: &Path, input: &str, current: &[String]) -> Result<Vec<String>> {
+/// Result of a best-effort import. Rejections never delete or edit source files.
+#[derive(Debug, Default)]
+pub struct ImportReport {
+    pub files: Vec<String>,
+    pub added: usize,
+    pub skipped: usize,
+    pub warnings: Vec<String>,
+}
+
+impl ImportReport {
+    pub fn message(&self) -> String {
+        let mut message = format!(
+            "Added {} PRD(s); skipped {} file(s).",
+            self.added, self.skipped
+        );
+        if !self.warnings.is_empty() {
+            message
+                .push_str("\nWarning: rejected files were not added; source files are unchanged.");
+            for warning in &self.warnings {
+                message.push_str(&format!("\n- {warning}"));
+            }
+        }
+        message
+    }
+}
+
+/// Import immediate JSON children in name order, retaining valid files and
+/// reporting each rejected candidate instead of aborting the whole folder.
+pub fn import(root: &Path, input: &str, current: &[String]) -> Result<ImportReport> {
     if input.trim().is_empty() {
         return Err(invalid("Enter a PRD file or directory path."));
     }
     let path = root.join(input);
-    let mut candidates = if path.is_dir() {
+    let candidates = if path.is_dir() {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(&path).map_err(|e| invalid(e.to_string()))? {
             let entry = entry.map_err(|e| invalid(e.to_string()))?;
-            if entry
-                .file_type()
-                .map_err(|e| invalid(e.to_string()))?
-                .is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "json")
+            let kind = entry.file_type().map_err(|e| invalid(e.to_string()))?;
+            if entry.path().extension().is_some_and(|ext| ext == "json")
+                && (kind.is_file() || kind.is_symlink())
             {
                 files.push(entry.path());
             }
@@ -57,26 +82,67 @@ pub fn import(root: &Path, input: &str, current: &[String]) -> Result<Vec<String
     if candidates.is_empty() {
         return Err(invalid("No JSON files found in this directory."));
     }
+    // Existing invalid entries must be repaired explicitly, not silently removed.
+    let mut inspected = current
+        .iter()
+        .map(|file| {
+            let (mut entry, deps) = inspect(&root.join(file))?;
+            entry.path = file.clone();
+            Ok((entry, deps))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    validate_inspected(&inspected)?;
     let canonical_root = root.canonicalize().map_err(|e| invalid(e.to_string()))?;
-    let mut result = current.to_vec();
+    let mut report = ImportReport {
+        files: current.to_vec(),
+        ..Default::default()
+    };
     let mut seen: HashSet<PathBuf> = current
         .iter()
         .map(|p| root.join(p).canonicalize())
         .collect::<std::io::Result<_>>()
         .map_err(|e| invalid(e.to_string()))?;
-    for path in candidates.drain(..) {
-        let path = path.canonicalize().map_err(|e| invalid(e.to_string()))?;
-        inspect(&path)?;
-        if seen.insert(path.clone()) {
-            result.push(
-                path.strip_prefix(&canonical_root)
-                    .unwrap_or(&path)
-                    .display()
-                    .to_string(),
-            );
+    for candidate in candidates {
+        let attempt = (|| -> Result<Option<String>> {
+            let path = candidate
+                .canonicalize()
+                .map_err(|e| invalid(e.to_string()))?;
+            if seen.contains(&path) {
+                return Ok(None);
+            }
+            let file = path
+                .strip_prefix(&canonical_root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            if !path.is_file() {
+                return Err(invalid("Not a regular PRD file"));
+            }
+            let (mut entry, deps) = inspect(&path)?;
+            entry.path = file.clone();
+            inspected.push((entry, deps));
+            if let Err(error) = validate_inspected(&inspected) {
+                inspected.pop();
+                return Err(error);
+            }
+            seen.insert(path);
+            Ok(Some(file))
+        })();
+        match attempt {
+            Ok(Some(file)) => {
+                report.files.push(file);
+                report.added += 1;
+            }
+            Ok(None) => report.skipped += 1,
+            Err(error) => {
+                report.skipped += 1;
+                report
+                    .warnings
+                    .push(format!("{}: {error}", candidate.display()));
+            }
         }
     }
-    Ok(result)
+    Ok(report)
 }
 
 fn inspect(path: &Path) -> Result<(Entry, Vec<Vec<String>>)> {
@@ -85,6 +151,17 @@ fn inspect(path: &Path) -> Result<(Entry, Vec<Vec<String>>)> {
         serde_json::from_slice(&bytes).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+    let validation = crate::prd_generation::validation::validate_prd_content(
+        std::str::from_utf8(&bytes).map_err(|e| invalid(e.to_string()))?,
+        path,
+    );
+    if !validation.ok {
+        return Err(invalid(format!(
+            "{}: {}",
+            path.display(),
+            validation.errors.join("; ")
+        )));
+    }
     let tasks = value
         .get("tasks")
         .and_then(Value::as_array)
@@ -110,6 +187,7 @@ fn inspect(path: &Path) -> Result<(Entry, Vec<Vec<String>>)> {
                 .iter()
                 .map(|item| {
                     item.as_str()
+                        .filter(|id| !id.trim().is_empty())
                         .map(str::to_owned)
                         .ok_or_else(|| invalid(format!("{id}: dependency must be a task ID")))
                 })
@@ -117,6 +195,45 @@ fn inspect(path: &Path) -> Result<(Entry, Vec<Vec<String>>)> {
             Some(_) => return Err(invalid(format!("{id}: dependencies must be an array"))),
         };
         deps.push(dependencies);
+    }
+    let positions: std::collections::HashMap<_, _> =
+        ids.iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let mut remaining = vec![0usize; ids.len()];
+    let mut consumers = vec![Vec::new(); ids.len()];
+    for (i, dependencies) in deps.iter().enumerate() {
+        for dep in dependencies {
+            if let Some(&parent) = positions.get(dep) {
+                remaining[i] += 1;
+                consumers[parent].push(i);
+            }
+        }
+    }
+    let mut ready: Vec<_> = remaining
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (*n == 0).then_some(i))
+        .collect();
+    let mut resolved = 0;
+    while let Some(i) = ready.pop() {
+        resolved += 1;
+        for &child in &consumers[i] {
+            remaining[child] -= 1;
+            if remaining[child] == 0 {
+                ready.push(child);
+            }
+        }
+    }
+    if resolved != ids.len() {
+        return Err(invalid(format!(
+            "{}: dependency cycle involving {}",
+            path.display(),
+            ids.iter()
+                .enumerate()
+                .filter(|(i, _)| remaining[*i] > 0)
+                .map(|(_, id)| id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
     Ok((
         Entry {
@@ -129,25 +246,32 @@ fn inspect(path: &Path) -> Result<(Entry, Vec<Vec<String>>)> {
 }
 
 pub fn validate(root: &Path, files: &[String]) -> Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    let mut dependencies = Vec::new();
+    let inspected = files
+        .iter()
+        .map(|file| {
+            let (mut entry, deps) = inspect(&root.join(file))?;
+            entry.path = file.clone();
+            Ok((entry, deps))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    validate_inspected(&inspected)?;
+    Ok(inspected.into_iter().map(|(entry, _)| entry).collect())
+}
+
+fn validate_inspected(inspected: &[(Entry, Vec<Vec<String>>)]) -> Result<()> {
     let mut seen = HashSet::new();
-    for file in files {
-        let (mut entry, deps) = inspect(&root.join(file))?;
-        entry.path = file.clone();
+    for (entry, _) in inspected {
         for id in &entry.task_ids {
-            if !seen.insert(id.clone()) {
+            if !seen.insert(id) {
                 return Err(invalid(format!("Duplicate task ID in PRD queue: {id}")));
             }
         }
-        entries.push(entry);
-        dependencies.push(deps);
     }
     let mut available = HashSet::new();
-    for (entry, deps) in entries.iter().zip(dependencies) {
-        available.extend(entry.task_ids.iter().cloned());
-        for dependency in deps.into_iter().flatten() {
-            if seen.contains(&dependency) && !available.contains(&dependency) {
+    for (entry, deps) in inspected {
+        available.extend(entry.task_ids.iter());
+        for dependency in deps.iter().flatten() {
+            if seen.contains(dependency) && !available.contains(dependency) {
                 return Err(invalid(format!(
                     "{} depends on later PRD task {dependency}; reorder the queue",
                     entry.path
@@ -155,7 +279,7 @@ pub fn validate(root: &Path, files: &[String]) -> Result<Vec<Entry>> {
             }
         }
     }
-    Ok(entries)
+    Ok(())
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -564,6 +688,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn folder_import_keeps_valid_files_and_reports_every_invalid_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        for (file, content) in [
+            ("00-empty.json", r#"{"tasks":[]}"#),
+            ("01-valid.json", r#"{"tasks":[{"id":"A"}]}"#),
+            ("02-broken.json", "not JSON"),
+            ("03-empty-task.json", r#"{"tasks":[{}]}"#),
+            ("04-blank-id.json", r#"{"tasks":[{"id":" "}]}"#),
+            ("05-duplicate.json", r#"{"tasks":[{"id":"A"}]}"#),
+            (
+                "06-cycle.json",
+                r#"{"tasks":[{"id":"X","dependencies":["Y"]},{"id":"Y","dependencies":["X"]}]}"#,
+            ),
+            (
+                "07-invalid-request.json",
+                r#"{"tasks":[{"id":"Q"}],"decision_requests":{}}"#,
+            ),
+            (
+                "08-valid.json",
+                r#"{"tasks":[{"id":"B","dependencies":["A"]}]}"#,
+            ),
+            (
+                "09-invalid-gate.json",
+                r#"{"tasks":[{"id":"G","gate":{"required_verdict":"maybe"}}]}"#,
+            ),
+            ("ignored.txt", "not a PRD"),
+        ] {
+            std::fs::write(root.path().join(file), content).unwrap();
+        }
+        let before = std::fs::read(root.path().join("00-empty.json")).unwrap();
+        let report = import(root.path(), ".", &[]).unwrap();
+        assert_eq!(report.files, ["01-valid.json", "08-valid.json"]);
+        assert_eq!(
+            (report.added, report.skipped, report.warnings.len()),
+            (2, 8, 8)
+        );
+        assert!(report.message().contains("Warning:"));
+        assert!(report.message().contains("07-invalid-request.json"));
+        assert!(validate(root.path(), &report.files).is_ok());
+        assert_eq!(
+            before,
+            std::fs::read(root.path().join("00-empty.json")).unwrap()
+        );
+        let again = import(root.path(), ".", &report.files).unwrap();
+        assert_eq!(again.files, report.files);
+        assert_eq!(again.added, 0);
+    }
+
+    #[test]
+    fn rejected_single_file_and_all_invalid_folder_preserve_existing_queue() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("existing.json"),
+            r#"{"tasks":[{"id":"E"}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join("invalid")).unwrap();
+        std::fs::write(root.path().join("invalid/empty.json"), r#"{"tasks":[]}"#).unwrap();
+        let current = vec!["existing.json".into()];
+        for input in ["invalid", "invalid/empty.json", "missing.json"] {
+            let report = import(root.path(), input, &current).unwrap();
+            assert_eq!(report.files, current);
+            assert_eq!(report.added, 0);
+            assert_eq!(report.warnings.len(), 1);
+        }
+    }
+
+    #[test]
+    fn import_rejects_queue_conflicts_and_invalid_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("a.json"),
+            r#"{"tasks":[{"id":"A","dependencies":["B"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("b.json"), r#"{"tasks":[{"id":"B"}]}"#).unwrap();
+        std::fs::write(
+            root.path().join("bad.json"),
+            r#"{"tasks":[{"id":"C","dependencies":[{}]}]}"#,
+        )
+        .unwrap();
+        let report = import(root.path(), ".", &[]).unwrap();
+        assert_eq!(report.files, ["a.json"]);
+        assert_eq!(report.warnings.len(), 2);
+        assert!(report.message().contains("later PRD task B"));
+        assert!(validate(root.path(), &report.files).is_ok());
+    }
+
+    #[test]
     fn changed_queue_error_names_the_difference_and_the_commands_to_run() {
         let e = |p: &str, f: &str| Entry {
             path: p.into(),
@@ -812,13 +1025,18 @@ mod tests {
     }
 
     #[test]
-    fn directory_import_rejects_invalid_inputs_atomically() {
+    fn directory_import_reports_invalid_inputs_and_preserves_existing_files() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("a.json"), r#"{"tasks":[{"id":"A"}]}"#).unwrap();
         std::fs::write(root.path().join("b.json"), "{}").unwrap();
         let files = vec!["a.json".to_string()];
-        assert!(import(root.path(), ".", &files).is_err());
+        let report = import(root.path(), ".", &files).unwrap();
+        assert_eq!(report.files, files);
+        assert_eq!(report.added, 0);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.message().contains("b.json"));
         assert_eq!(files, vec!["a.json"]);
+        assert!(!state_path(root.path()).exists());
     }
 
     #[test]
@@ -890,7 +1108,7 @@ mod tests {
         assert!(validate(root.path(), &["b.json".into(), "a.json".into()]).is_err());
         assert!(validate(root.path(), &["a.json".into(), "a.json".into()]).is_err());
         assert_eq!(
-            import(root.path(), ".", &["a.json".into()]).unwrap(),
+            import(root.path(), ".", &["a.json".into()]).unwrap().files,
             vec!["a.json", "b.json"]
         );
     }

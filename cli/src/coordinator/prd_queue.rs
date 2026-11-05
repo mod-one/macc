@@ -27,7 +27,9 @@ fn ask_reset(
         }
     );
     println!("  - the recorded PRD fingerprints are cleared, so the current queue is accepted as the new baseline");
-    println!("  - delivered tasks and their state are NOT undone; the queue file list is unchanged");
+    println!(
+        "  - delivered tasks and their state are NOT undone; the queue file list is unchanged"
+    );
     if !interactive {
         return Err(MaccError::Validation(
             "Confirmation required: run `macc coordinator prds reset --confirm` in non-interactive mode".into(),
@@ -40,13 +42,11 @@ fn ask_reset(
         source: e,
     })?;
     let mut answer = String::new();
-    input
-        .read_line(&mut answer)
-        .map_err(|e| MaccError::Io {
-            path: "stdin".into(),
-            action: "read confirmation".into(),
-            source: e,
-        })?;
+    input.read_line(&mut answer).map_err(|e| MaccError::Io {
+        path: "stdin".into(),
+        action: "read confirmation".into(),
+        source: e,
+    })?;
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
@@ -133,7 +133,14 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
             })
     };
     match action {
-        "add" => files = prd_queue::import(&paths.root, parameter(1)?, &files)?,
+        "add" => {
+            let report = prd_queue::import(&paths.root, parameter(1)?, &files)?;
+            eprintln!("{}", report.message());
+            if report.added == 0 {
+                return Ok(());
+            }
+            files = report.files;
+        }
         "remove" => {
             let index = position(1)?;
             files.remove(index);
@@ -151,8 +158,8 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
             None => return Ok(()),
         },
         "reset" => {
-            let confirmed = args.get(1).map(String::as_str) == Some("--confirm")
-                || confirm_reset(&paths.root)?;
+            let confirmed =
+                args.get(1).map(String::as_str) == Some("--confirm") || confirm_reset(&paths.root)?;
             if !confirmed {
                 println!("Reset cancelled; queue progress unchanged.");
                 return Ok(());
@@ -210,6 +217,8 @@ mod tests {
                 &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
             )
         };
+        std::fs::write(root.path().join("empty.json"), r#"{"tasks":[]}"#).unwrap();
+        std::fs::write(root.path().join("malformed.json"), "not JSON").unwrap();
         command(&["add", "."]).unwrap();
         command(&["move", "2", "1"]).unwrap();
         let read_files = || {
@@ -242,6 +251,11 @@ mod tests {
         assert_eq!(prd_queue::load(root.path()).unwrap().next, 1);
         assert!(ask_reset(root.path(), true, &mut "y\n".as_bytes()).unwrap());
         assert_eq!(prd_queue::load(root.path()).unwrap().next, 1);
+        let before = std::fs::read(&paths.config_path).unwrap();
+        command(&["add", "empty.json"]).unwrap();
+        assert_eq!(before, std::fs::read(&paths.config_path).unwrap());
+        assert_eq!(prd_queue::load(root.path()).unwrap().next, 1);
+        assert!(root.path().join("empty.json").exists());
         command(&["reset", "--confirm"]).unwrap();
         assert_eq!(prd_queue::load(root.path()).unwrap().next, 0);
         assert_eq!(read_files(), vec!["a.json"]);
