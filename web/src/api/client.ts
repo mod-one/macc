@@ -849,3 +849,10 @@ export function getCoordinatorLaunchReview(): Promise<import('./models').Coordin
 export function launchCoordinator(decision: import('./models').CoordinatorLaunchDecision): Promise<ApiCoordinatorCommandResult> {
   return sendJson('/coordinator/run', 'POST', {}, decision);
 }
+
+export function getPrdQueueReview(): Promise<import('./models').PrdQueueReview> {
+  return sendJson('/coordinator/prd-queue', 'GET');
+}
+export function acceptPrdQueueReview(revision: string): Promise<{ accepted: boolean }> {
+  return sendJson('/coordinator/prd-queue/accept', 'POST', {}, { revision, confirmed: true });
+}

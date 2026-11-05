@@ -174,3 +174,7 @@ Changes are reloaded on the next coordinator cycle. Clearing a cooldown only
 allows another attempt; it does not renew the provider's quota. Existing
 ownership checks still apply. Previously blocked tasks are not automatically
 unblocked by upgrading MACC or resetting a tool cooldown.
+
+## PRD series lifecycle
+
+See [PRD queue transitions](COORDINATOR_PRD_QUEUE.md) for automatic completed-series replacement, append-only queues, archived generations and explicit client acceptance.

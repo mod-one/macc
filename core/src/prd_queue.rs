@@ -1,7 +1,13 @@
 //! Ordered PRD inputs shared by the coordinator and its terminal clients.
 mod budget;
+mod identity;
 mod logging;
 pub mod readiness;
+pub mod review;
+pub mod transition;
+mod transition_safety;
+#[cfg(test)]
+mod transition_tests;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -311,7 +317,7 @@ pub(crate) fn changed_error(recorded: &[Entry], current: &[Entry]) -> MaccError 
         details.push("the PRD order changed".into());
     }
     invalid(format!(
-        "PRD queue changed since progress was last recorded ({}).\n\
+        "MACC-PRD-QUEUE-TRANSITION: PRD queue changed since progress was last recorded ({}).\n\
          What to do:\n  \
          1. Review the queue:      macc coordinator prds check\n  \
          2. Inspect the progress:  macc coordinator prds status\n  \
@@ -335,11 +341,8 @@ pub fn active_path(
         return Ok(root.join(path));
     }
     if let Some(config) = config.filter(|c| !c.prd_files.is_empty()) {
-        let progress = load(root)?;
         let entries = validate(root, &config.prd_files)?;
-        if !progress.entries.is_empty() && progress.entries != entries {
-            return Err(changed_error(&progress.entries, &entries));
-        }
+        let progress = transition::preview(root, config, &entries)?;
         return config
             .prd_files
             .get(progress.next)
@@ -389,7 +392,18 @@ pub fn current(root: &Path, config: Option<&crate::config::CoordinatorConfig>) -
         let single = config.and_then(|c| c.prd_file.as_deref());
         (single.unwrap_or("prd.json").to_owned(), 1, false)
     } else {
-        let next = load(root).map(|progress| progress.next).unwrap_or(0);
+        // Display-only: do not run Git/storage safety checks on every TUI frame.
+        let next = load(root)
+            .map(|p| {
+                let old: Vec<_> = p.entries.iter().map(|e| e.path.as_str()).collect();
+                let proposed: Vec<_> = files.iter().map(String::as_str).collect();
+                if old.is_empty() || proposed.starts_with(&old) {
+                    p.next
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
         let index = next.min(files.len() - 1);
         (files[index].clone(), index + 1, next >= files.len())
     };
@@ -513,10 +527,7 @@ async fn run_queue(
 ) -> Result<()> {
     use crate::coordinator_storage::CoordinatorStorage;
     let entries = validate(root, &config.prd_files)?;
-    let mut progress = load(root)?;
-    if !progress.entries.is_empty() && progress.entries != entries {
-        return Err(invalid("PRD queue or file contents changed. Inspect `macc coordinator prds status`, then explicitly reset queue progress."));
-    }
+    let mut progress = transition::reconcile_locked(root, config)?;
     progress.entries = entries;
     if progress.next > progress.entries.len() {
         return Err(invalid("Invalid PRD queue cursor"));

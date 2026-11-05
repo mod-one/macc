@@ -175,6 +175,26 @@ pub enum Action {
         #[arg(long)]
         render: bool,
     },
+    /// Read a bounded page of an exact plan/prerequisite source pinned to this invocation
+    ContextSource {
+        #[arg(long, conflicts_with = "plan", required_unless_present = "plan")]
+        dependency: Option<String>,
+        #[arg(long)]
+        plan: bool,
+        #[arg(long)]
+        pointer: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 8192)]
+        limit: usize,
+    },
+    /// Preview exact decision prompt byte use before dispatch
+    ContextBudget {
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "dev")]
+        phase: String,
+    },
     /// Trusted wrapper: verify the actual prompt includes the pinned context
     Receipt {
         #[arg(long)]
@@ -421,6 +441,9 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
     if matches!(action, Action::List) {
         return dm::snapshot(root);
     }
+    if let Action::ContextBudget { task, phase } = action {
+        return Ok(json!(dm::context_budget(root, task, phase)?));
+    }
     let p = dm::policy(root)?;
     if let Action::Transport {
         action:
@@ -616,7 +639,11 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             ArtifactAction::List => Ok(json!(store.artifacts(&plan.id)?)),
             ArtifactAction::Show { id } => {
                 let a = store.artifact(id)?;
-                if std::env::var_os("MACC_DECISION_ATTEMPT").is_some()&&!store.can_deliver_evidence(id)?{return Err(dm::error("Artifact content is private until the operator explicitly releases it to the configured AI tools"));}
+                if std::env::var_os("MACC_DECISION_ATTEMPT").is_some()
+                    && !store.can_deliver_evidence(id)?
+                {
+                    return Err(dm::error("Artifact content is private until the operator explicitly releases it to the configured AI tools"));
+                }
                 if a.plan_id != plan.id {
                     return Err(dm::error("Evidence is outside this plan"));
                 }
@@ -1104,6 +1131,28 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             };
             store.project(root)?;
             Ok(json!(applied))
+        }
+        Action::ContextBudget { .. } => unreachable!("handled before active context dispatch"),
+        Action::ContextSource {
+            dependency,
+            pointer,
+            offset,
+            limit,
+            ..
+        } => {
+            let issued_plan = env("MACC_DECISION_PLAN")?;
+            if issued_plan != plan.id {
+                return Err(dm::error("Pinned source plan is not the current task plan"));
+            }
+            store.context_source(
+                &issued_plan,
+                &env("MACC_DECISION_ATTEMPT")?,
+                &env("MACC_DECISION_PHASE")?,
+                dependency.as_deref(),
+                pointer.as_deref(),
+                *offset,
+                *limit,
+            )
         }
         Action::Context { render } => {
             let context = store.read_context(

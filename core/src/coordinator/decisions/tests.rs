@@ -15,7 +15,7 @@ fn git(root: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&out.stdout).trim().into()
 }
-fn fixture() -> (tempfile::TempDir, Store, Plan, TaskRegistry, Policy) {
+pub(super) fn fixture() -> (tempfile::TempDir, Store, Plan, TaskRegistry, Policy) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     git(root, &["init", "-b", "main"]);

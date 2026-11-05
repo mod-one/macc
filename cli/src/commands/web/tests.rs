@@ -1,3 +1,5 @@
+#[path = "queue_transition_tests.rs"]
+mod queue_transition_tests;
 #[path = "hooks_tests.rs"]
 mod hooks_tests;
 #[path = "o2_api_tests.rs"]

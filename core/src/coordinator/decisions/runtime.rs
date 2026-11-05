@@ -212,6 +212,7 @@ pub fn prepare_context(
     if !p.enabled {
         return Ok(None);
     }
+    validate_context_identity(task_id, attempt, phase)?;
     let (mut store, plan) = active_plan(root)?;
     let context = store.context(&plan, task_id, attempt, phase, &p)?;
     let semantic_digest = digest(&json!([

@@ -305,13 +305,23 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         }
         let mut prompt = coordinator_runtime::build_phase_prompt(mode, task_id, &phase_tool, task)?;
         let decision_attempt = uuid::Uuid::new_v4().to_string();
-        let decision_context = crate::coordinator::decisions::prepare_context(
+        let decision_context = match crate::coordinator::decisions::prepare_context(
             self.repo_root,
             task_id,
             mode,
             &worktree,
             &decision_attempt,
-        )?;
+        ) {
+            Ok(context) => context,
+            Err(error)
+                if error
+                    .to_string()
+                    .contains(crate::coordinator::decisions::CONTEXT_BUDGET_CODE) =>
+            {
+                return Ok(Err(format!("E903: {error}")))
+            }
+            Err(error) => return Err(error),
+        };
         if let Some((context, _)) = &decision_context {
             prompt.push_str(&context.render());
         }

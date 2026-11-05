@@ -1,0 +1,20 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { expect, it, vi } from 'vitest';
+import { PrdQueueTransition } from './PrdQueueTransition';
+import { acceptPrdQueueReview, getPrdQueueReview } from '../api/client';
+vi.mock('../api/client', () => ({ acceptPrdQueueReview: vi.fn(), getPrdQueueReview: vi.fn() }));
+it('requires an explicit review and checkbox, sends its revision, and refreshes launch conditions', async () => {
+  vi.mocked(getPrdQueueReview).mockResolvedValue({revision:'review-2',previous:[{path:'old.json'}],proposed:[{path:'new.json'}],completed:1,changes:['Removed old.json','Added new.json'],automatic:false,explanation:'Review the change'});
+  vi.mocked(acceptPrdQueueReview).mockResolvedValue({accepted:true});
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  render(<PrdQueueTransition onAccepted={refresh} />);
+  expect(acceptPrdQueueReview).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'Review PRD queue change…'}));
+  expect(await screen.findByText('Added new.json')).toBeInTheDocument();
+  const accept = screen.getByRole('button',{name:'Accept queue change'});
+  expect(accept).toBeDisabled();
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(accept);
+  await waitFor(() => expect(acceptPrdQueueReview).toHaveBeenCalledWith('review-2'));
+  await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+});

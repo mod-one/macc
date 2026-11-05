@@ -83,7 +83,7 @@ impl Default for Policy {
             similarity_max_candidates: 128,
             similarity_min_percent: 75,
             human_question_min_risk: Consultation::High,
-            max_context_bytes: 32768,
+            max_context_bytes: 131072,
             max_request_bytes: 65536,
             trust_mode: "local_trust".into(),
             trust_registry: None,

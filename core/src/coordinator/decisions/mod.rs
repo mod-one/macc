@@ -4,6 +4,12 @@ mod approvals;
 mod backup;
 pub use backup::*;
 mod context;
+mod context_budget;
+mod context_render;
+mod context_sources;
+pub use context_budget::{context_budget, ContextBudget, CONTEXT_BUDGET_CODE};
+mod context_identity;
+pub(crate) use context_identity::validate as validate_context_identity;
 mod effects;
 mod graph;
 mod intake;
@@ -51,3 +57,5 @@ pub fn error(message: impl Into<String>) -> crate::MaccError {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod tests_context_budget;

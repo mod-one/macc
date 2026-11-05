@@ -1214,3 +1214,10 @@ Purpose: list all PRD generation runs under `.macc/generated/prd/macc-prd-planne
 ### GET `/api/v1/prd/generation-runs/{run_id}`
 
 Purpose: show metadata and file list for a specific run. Response 200: `{ runId, path, files, metadata }`. Response 404: run not found.
+
+
+### PRD queue transition review
+
+`GET /api/v1/coordinator/prd-queue` returns `{ revision, previous, proposed, completed, changes, automatic, explanation }`. `previous` and `proposed` contain queue entries (`path`, `fingerprint`, `task_ids`). This is a preview: no progress reset or coordinator launch.
+
+`POST /api/v1/coordinator/prd-queue/accept` takes `{ revision, confirmed: true }` and returns `{ accepted: true }`. It requires the standard project owner gate, a fresh revision and the shared runtime/worktree safety guards. Previous progress and delivery snapshots are archived before resetting the cursor. Refused/stale acceptance leaves work untouched and uses the existing API error envelope. Launch must be reviewed again after acceptance. See [PRD queue transitions](COORDINATOR_PRD_QUEUE.md).

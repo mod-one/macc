@@ -99,7 +99,8 @@ pub fn context(
         "source_status":git(&paths.root,&["status","--porcelain"])?,
         "source_diff":git(&paths.root,&["diff","HEAD","--binary"])?,
         "tools":canonical.tools,"supervisor":canonical.automation.supervisor,
-        "availability":availability,"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?}),
+        "prd_queue":canonical.automation.coordinator.as_ref().map(|c|json!({"files":c.prd_files,"entries":macc_core::prd_queue::validate(&paths.root,&c.prd_files).ok(),"progress":macc_core::prd_queue::load(&paths.root).ok()})),
+        "availability":availability,"decision_policy":canonical.automation.coordinator.as_ref().and_then(|c|c.decisions.as_ref()),"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?}),
     )
 }
 

@@ -281,10 +281,18 @@ pub fn edit(root: PathBuf, files: Vec<String>) -> anyhow::Result<Option<Vec<Stri
                 Outcome::Continue => {}
                 Outcome::Save => return Ok(Some(editor.files)),
                 Outcome::Cancel => return Ok(None),
-                Outcome::Reset => editor.report_reset(macc_core::prd_queue::save(
-                    &editor.root,
-                    &macc_core::prd_queue::Progress::default(),
-                )),
+                Outcome::Reset => {
+                    let paths = macc_core::ProjectPaths::from_root(&editor.root);
+                    let result =
+                        macc_core::load_canonical_config(&paths.config_path).and_then(|config| {
+                            // The CLI editor owns the queue lock for its entire lifetime.
+                            macc_core::prd_queue::transition::reset_locked(
+                                &editor.root,
+                                &config.automation.coordinator.unwrap_or_default(),
+                            )
+                        });
+                    editor.report_reset(result);
+                }
             }
         }
     }

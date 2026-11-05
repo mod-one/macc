@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ConfirmDialog } from './ConfirmDialog';
+import { PrdQueueTransition } from './PrdQueueTransition';
 import { closeCoordinatorLaunch, refreshCoordinatorLaunch, useCoordinatorLaunchStore } from '../stores/coordinatorLaunchStore';
 
 export function CoordinatorLaunchDialog() {
@@ -32,6 +33,7 @@ function LaunchConfirmation({ open, loading, review, error }: ReturnType<typeof 
           <option value="">Choose a source…</option>{review.branchSources.map((source) => <option key={source} value={source}>{source}</option>)}
         </select></label>}
       {review.dirtyReference && <label className="flex items-start gap-2 text-amber-300"><input type="checkbox" checked={allowDirty} onChange={(event) => setAllowDirty(event.target.checked)} />I reviewed the uncommitted changes and allow this dirty reference once</label>}
+      {review.blockers.some((text) => text.includes('MACC-PRD-QUEUE-TRANSITION')) && <PrdQueueTransition onAccepted={refreshCoordinatorLaunch} />}
       {review.blockers.map((text) => <p role="alert" key={text} className="text-rose-300">{text}</p>)}
       {review.warnings.map((text) => <p key={text} className="text-amber-300">{text}</p>)}
     </div>}
