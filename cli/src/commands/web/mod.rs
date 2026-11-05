@@ -27,6 +27,7 @@ mod plan;
 #[allow(clippy::result_large_err)]
 mod prd;
 mod prd_generation;
+mod queue_transition;
 #[allow(clippy::result_large_err)]
 mod registry;
 mod search;
@@ -324,6 +325,8 @@ fn build_web_router(state: WebState) -> Router {
             get(terminal::terminal_ws_handler),
         )
         .route("/api/v1/coordinator/launch-review", get(launch::review))
+        .route("/api/v1/coordinator/prd-queue", get(queue_transition::inspect))
+        .route("/api/v1/coordinator/prd-queue/accept", post(queue_transition::accept))
         .route(
             "/api/v1/coordinator/run",
             post(launch::run),

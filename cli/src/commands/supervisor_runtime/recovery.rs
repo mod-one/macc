@@ -28,6 +28,15 @@ pub(super) async fn intervene(
         ));
     }
     ensure_not_stopped(paths)?;
+    if report
+        .incident
+        .reason
+        .contains(macc_core::prd_queue::transition::CODE)
+    {
+        return Err(MaccError::Validation(format!(
+            "{}: review and explicitly accept the PRD queue transition; no application repair or AI diagnosis is appropriate", macc_core::prd_queue::transition::CODE
+        )));
+    }
     stop_orphan_jobs(&report.incident).await?;
     let progress = super::report::Progress { paths, config, dir };
     config.validate()?;

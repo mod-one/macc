@@ -1415,7 +1415,13 @@ fn main() {
     let provider = services::engine_provider::EngineProvider::new(engine);
 
     if let Err(e) = run_with_engine_provider(cli, provider) {
-        if !concise_apply_errors {
+        // Queue transitions already carry an actionable, multiline diagnostic.
+        // Avoid printing that entire diagnostic again through the stderr logger.
+        if !concise_apply_errors
+            && !e
+                .to_string()
+                .contains(macc_core::prd_queue::transition::CODE)
+        {
             error!(error = %e, "Command failed");
         }
         if let MaccError::Validation(ref msg) = e {

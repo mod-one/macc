@@ -1726,6 +1726,11 @@ pub fn coordinator_dispatch<E: crate::engine::Engine + ?Sized>(
     env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let _queue_transition_lock = crate::prd_queue::transition::begin_sync(
+        &paths.root,
+        coordinator_cfg,
+        env_cfg.prd.as_deref(),
+    )?;
     let prd_file =
         crate::prd_queue::active_path(&paths.root, coordinator_cfg, env_cfg.prd.as_deref())?;
     engine.coordinator_sync_registry_from_prd(&paths.root, &prd_file)?;
@@ -1862,6 +1867,11 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
     env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let _queue_transition_lock = crate::prd_queue::transition::begin_sync(
+        &paths.root,
+        coordinator_cfg,
+        env_cfg.prd.as_deref(),
+    )?;
     let prd_file =
         crate::prd_queue::active_path(&paths.root, coordinator_cfg, env_cfg.prd.as_deref())?;
     let storage_mode = coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;

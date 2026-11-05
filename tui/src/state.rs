@@ -5560,7 +5560,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             Duration::ZERO,
             "PRD queue reset",
         )?;
-        macc_core::prd_queue::save(&paths.root, &macc_core::prd_queue::Progress::default())
+        let config = self
+            .config
+            .as_ref()
+            .and_then(|c| c.automation.coordinator.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        macc_core::prd_queue::transition::reset_locked(&paths.root, &config)
     }
 
     pub fn save_config(&mut self) {

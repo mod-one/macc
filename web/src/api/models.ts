@@ -1077,3 +1077,13 @@ export interface CoordinatorLaunchDecision {
   confirmed: boolean; revision: string; supervisor: boolean;
   createFrom: string | null; allowDirtyReference: boolean;
 }
+
+export interface PrdQueueReview {
+  revision: string;
+  previous: { path: string }[];
+  proposed: { path: string }[];
+  completed: number;
+  changes: string[];
+  automatic: boolean;
+  explanation: string;
+}

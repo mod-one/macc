@@ -10,12 +10,26 @@ pub struct Readiness {
 }
 
 pub fn inspect(paths: &ProjectPaths, config: Option<&CoordinatorConfig>) -> Result<Readiness> {
-    let current = current(&paths.root, config);
+    let mut current = current(&paths.root, config);
     if config.is_some_and(|c| !c.prd_files.is_empty()) {
         let entries = validate(&paths.root, &config.unwrap().prd_files)?;
-        let progress = load(&paths.root)?;
-        if !progress.entries.is_empty() && progress.entries != entries {
-            return Err(changed_error(&progress.entries, &entries));
+        let progress = transition::preview(&paths.root, config.unwrap(), &entries)?;
+        let index = progress.next.min(entries.len().saturating_sub(1));
+        if let Some(entry) = entries.get(index) {
+            if progress.next < entries.len() {
+                transition_safety::target(
+                    &transition::registry(&paths.root, config.unwrap())?,
+                    entry,
+                )?;
+            }
+            current.path = entry.path.clone();
+            current.name = Path::new(&entry.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            current.position = index + 1;
+            current.completed = progress.next >= entries.len();
         }
     }
     let mut path = paths.root.join(&current.path);
@@ -134,7 +148,7 @@ mod tests {
         assert!(inspect(&paths, Some(&cfg))
             .unwrap_err()
             .to_string()
-            .contains("queue changed"));
+            .contains(transition::CODE));
     }
     #[test]
     fn legacy_prd_and_new_tasks_without_runtime_state_remain_supported() {

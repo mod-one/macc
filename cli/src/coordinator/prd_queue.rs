@@ -26,8 +26,10 @@ fn ask_reset(
             &progress.status
         }
     );
-    println!("  - the recorded PRD fingerprints are cleared, so the current queue is accepted as the new baseline");
-    println!("  - delivered tasks and their state are NOT undone; the queue file list is unchanged");
+    println!("  - the current PRD fingerprints are recorded as the reviewed new baseline");
+    println!(
+        "  - delivered tasks and their state are NOT undone; the queue file list is unchanged"
+    );
     if !interactive {
         return Err(MaccError::Validation(
             "Confirmation required: run `macc coordinator prds reset --confirm` in non-interactive mode".into(),
@@ -40,13 +42,11 @@ fn ask_reset(
         source: e,
     })?;
     let mut answer = String::new();
-    input
-        .read_line(&mut answer)
-        .map_err(|e| MaccError::Io {
-            path: "stdin".into(),
-            action: "read confirmation".into(),
-            source: e,
-        })?;
+    input.read_line(&mut answer).map_err(|e| MaccError::Io {
+        path: "stdin".into(),
+        action: "read confirmation".into(),
+        source: e,
+    })?;
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
@@ -109,6 +109,13 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
                 entries.len(),
                 entries.iter().map(|e| e.task_ids.len()).sum::<usize>()
             );
+            let review = prd_queue::review::inspect(&paths.root, coordinator)?;
+            if !review.changes.is_empty() {
+                for change in &review.changes {
+                    println!("  {change}");
+                }
+                println!("{}", review.explanation);
+            }
         }
         return Ok(());
     }
@@ -151,13 +158,13 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
             None => return Ok(()),
         },
         "reset" => {
-            let confirmed = args.get(1).map(String::as_str) == Some("--confirm")
-                || confirm_reset(&paths.root)?;
+            let confirmed =
+                args.get(1).map(String::as_str) == Some("--confirm") || confirm_reset(&paths.root)?;
             if !confirmed {
                 println!("Reset cancelled; queue progress unchanged.");
                 return Ok(());
             }
-            prd_queue::save(&paths.root, &prd_queue::Progress::default())?;
+            prd_queue::transition::reset_locked(&paths.root, coordinator)?;
             println!("Queue progress reset; existing task delivery state is preserved.");
             return Ok(());
         }
