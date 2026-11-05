@@ -402,7 +402,8 @@ impl ParsedCommit {
 
     /// Parse duration into seconds if present.
     pub fn duration_seconds(&self) -> Option<u64> {
-        self.duration().map(crate::save::logs::parse_duration_to_seconds)
+        self.duration()
+            .map(crate::save::logs::parse_duration_to_seconds)
     }
 }
 

@@ -156,11 +156,9 @@ fn parse_try_again_at_seconds_at(
 
     use chrono::{Datelike, TimeZone as _};
 
-    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) = (
-        caps.name("month"),
-        caps.name("day"),
-        caps.name("year"),
-    ) {
+    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) =
+        (caps.name("month"), caps.name("day"), caps.name("year"))
+    {
         let month = match m_str.as_str().to_ascii_lowercase().as_str() {
             "january" | "jan" => 1,
             "february" | "feb" => 2,
@@ -228,10 +226,16 @@ fn is_try_again_at_significantly_in_past_at(
     let Some(caps) = try_again_at_regex().captures(text) else {
         return false;
     };
-    let Some(hour_raw) = caps.name("hour").and_then(|m| m.as_str().parse::<u32>().ok()) else {
+    let Some(hour_raw) = caps
+        .name("hour")
+        .and_then(|m| m.as_str().parse::<u32>().ok())
+    else {
         return false;
     };
-    let Some(min) = caps.name("min").and_then(|m| m.as_str().parse::<u32>().ok()) else {
+    let Some(min) = caps
+        .name("min")
+        .and_then(|m| m.as_str().parse::<u32>().ok())
+    else {
         return false;
     };
     let ampm = match caps.name("ampm") {
@@ -241,11 +245,9 @@ fn is_try_again_at_significantly_in_past_at(
 
     use chrono::{Datelike, TimeZone as _};
 
-    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) = (
-        caps.name("month"),
-        caps.name("day"),
-        caps.name("year"),
-    ) {
+    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) =
+        (caps.name("month"), caps.name("day"), caps.name("year"))
+    {
         let month = match m_str.as_str().to_ascii_lowercase().as_str() {
             "january" | "jan" => 1,
             "february" | "feb" => 2,
@@ -261,8 +263,12 @@ fn is_try_again_at_significantly_in_past_at(
             "december" | "dec" => 12,
             _ => return false,
         };
-        let Some(day) = d_str.as_str().parse::<u32>().ok() else { return false; };
-        let Some(year) = y_str.as_str().parse::<i32>().ok() else { return false; };
+        let Some(day) = d_str.as_str().parse::<u32>().ok() else {
+            return false;
+        };
+        let Some(year) = y_str.as_str().parse::<i32>().ok() else {
+            return false;
+        };
         (year, month, day)
     } else {
         (now_utc.year(), now_utc.month(), now_utc.day())
@@ -279,7 +285,8 @@ fn is_try_again_at_significantly_in_past_at(
     use chrono::Utc;
     let Some(mut retry_dt) = Utc
         .with_ymd_and_hms(year, month, day, hour, min, 0)
-        .single() else {
+        .single()
+    else {
         return false;
     };
 

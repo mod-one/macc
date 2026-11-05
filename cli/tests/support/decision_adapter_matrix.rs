@@ -77,9 +77,15 @@ else:
         }
         std::fs::write(root.join(".macc/tool.json"), spec.to_string()).unwrap();
         for invocation in 0..2 {
-            if invocation==1 {
-                let status=value(cli(root,&["status"],None));let mut policy=status["policy"].clone();policy["usage"]["capture_mode"]=json!(1);
-                value(cli(root,&["policy","--revision",status["revision"].as_str().unwrap()],Some(&policy)));
+            if invocation == 1 {
+                let status = value(cli(root, &["status"], None));
+                let mut policy = status["policy"].clone();
+                policy["usage"]["capture_mode"] = json!(1);
+                value(cli(
+                    root,
+                    &["policy", "--revision", status["revision"].as_str().unwrap()],
+                    Some(&policy),
+                ));
             }
             let attempt = format!("{tool}-{invocation}");
             let (context, file) = store

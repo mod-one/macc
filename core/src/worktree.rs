@@ -285,9 +285,11 @@ pub(crate) fn resolve_tool_effort(
         .iter()
         .find(|field| Some(&field.id) == key.as_ref())
         .or_else(|| {
-            spec.fields
-                .iter()
-                .find(|field| field.id == "effort" || field.id == "effortLevel" || field.id == "model_reasoning_effort")
+            spec.fields.iter().find(|field| {
+                field.id == "effort"
+                    || field.id == "effortLevel"
+                    || field.id == "model_reasoning_effort"
+            })
         });
     if let Some(field) = field {
         if let Some(value) = field

@@ -176,11 +176,7 @@ fn serialize_message(handle: &ProcessHandle, payload_fields: Map<String, Value>)
     Value::Object(message).to_string()
 }
 
-fn build_raw_event(
-    event_type: &str,
-    message: &str,
-    payload_fields: &Map<String, Value>,
-) -> Value {
+fn build_raw_event(event_type: &str, message: &str, payload_fields: &Map<String, Value>) -> Value {
     let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let mut obj = serde_json::json!({
         "schema_version": "1",

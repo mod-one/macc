@@ -95,5 +95,10 @@ pub(super) fn run(app: &AppContext, command: &PolicyCommand, json: bool) -> Resu
             }
         }
     };
-    output(&action, &execute(&paths.root, action.clone())?, json, is_list)
+    output(
+        &action,
+        &execute(&paths.root, action.clone())?,
+        json,
+        is_list,
+    )
 }

@@ -350,13 +350,25 @@ fn worker_slot_reassignment_does_not_trigger_false_reconciliation_block() {
     let t = fixture();
     let r = t.path();
     let git = |args: &[&str]| {
-        let out = Command::new("git").arg("-C").arg(r).args(args).output().unwrap();
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(r)
+            .args(args)
+            .output()
+            .unwrap();
         assert!(out.status.success(), "{:?}", out);
     };
     let wt1 = r.join(".macc/worktree/worker-01");
     let wt2 = r.join(".macc/worktree/worker-02");
     std::fs::create_dir_all(r.join(".macc/worktree")).unwrap();
-    git(&["worktree", "add", "-b", "ai/test/worker-01", wt1.to_str().unwrap(), "main"]);
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "ai/test/worker-01",
+        wt1.to_str().unwrap(),
+        "main",
+    ]);
     std::fs::copy(r.join("worktree.prd.json"), wt1.join("worktree.prd.json")).unwrap();
 
     let spec = json!({"id":"test-tool","performer":{"command":"fake","session":{"enabled":true,"scope":"task_role_tool","create":{"command":"fake","args":["new","{session_id}"]}}}});
@@ -373,7 +385,8 @@ fn worker_slot_reassignment_does_not_trigger_false_reconciliation_block() {
             "test-tool",
             &spec,
             &routing,
-        ).unwrap(),
+        )
+        .unwrap(),
         phase: "dev".into(),
     };
     let p1 = prepare(r, &c1).expect("prepare worker-01");
@@ -386,10 +399,18 @@ fn worker_slot_reassignment_does_not_trigger_false_reconciliation_block() {
             result: "success".into(),
             acknowledged: true,
         },
-    ).unwrap();
+    )
+    .unwrap();
     release(r, &lease1.key, false).unwrap();
 
-    git(&["worktree", "add", "-b", "ai/test/worker-02", wt2.to_str().unwrap(), "main"]);
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "ai/test/worker-02",
+        wt2.to_str().unwrap(),
+        "main",
+    ]);
     std::fs::copy(r.join("worktree.prd.json"), wt2.join("worktree.prd.json")).unwrap();
 
     let c2 = ContextRequest {
@@ -401,7 +422,8 @@ fn worker_slot_reassignment_does_not_trigger_false_reconciliation_block() {
             "test-tool",
             &spec,
             &routing,
-        ).unwrap(),
+        )
+        .unwrap(),
         phase: "dev".into(),
     };
     let p2 = prepare(r, &c2).expect("prepare worker-02 reassignment should succeed");
@@ -410,6 +432,8 @@ fn worker_slot_reassignment_does_not_trigger_false_reconciliation_block() {
     let view = inspect(r).unwrap();
     assert_eq!(view.checkpoints[0].validation_state, "verified");
     let (db, a) = db::active(r).unwrap();
-    let latest_cp = latest(&db, &a.project_id, "A", "performer").unwrap().unwrap();
+    let latest_cp = latest(&db, &a.project_id, "A", "performer")
+        .unwrap()
+        .unwrap();
     assert_eq!(latest_cp.worktree, wt2.display().to_string());
 }

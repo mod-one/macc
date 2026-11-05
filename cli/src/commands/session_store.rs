@@ -111,9 +111,11 @@ impl Command for SessionStoreCommand {
             super::o2_format::emit_session_store(kind, val, self.json)
         };
         match &self.command {
-            SessionStoreCommands::Usage => {
-                super::o2_format::emit_session_store("usage", store::usage::inspect(root)?, self.json)
-            }
+            SessionStoreCommands::Usage => super::o2_format::emit_session_store(
+                "usage",
+                store::usage::inspect(root)?,
+                self.json,
+            ),
             SessionStoreCommands::CompactionOptions => emit(
                 macc_core::o2::compaction::execution_options(root, &input()?)?,
             ),

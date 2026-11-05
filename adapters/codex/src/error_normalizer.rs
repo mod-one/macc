@@ -179,11 +179,9 @@ fn parse_try_again_at_seconds_at(
 
     use chrono::{Datelike, TimeZone as _};
 
-    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) = (
-        caps.name("month"),
-        caps.name("day"),
-        caps.name("year"),
-    ) {
+    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) =
+        (caps.name("month"), caps.name("day"), caps.name("year"))
+    {
         let month = match m_str.as_str().to_ascii_lowercase().as_str() {
             "january" | "jan" => 1,
             "february" | "feb" => 2,
@@ -258,10 +256,16 @@ fn is_try_again_at_significantly_in_past_at(
     let Some(caps) = try_again_at_regex().captures(text) else {
         return false;
     };
-    let Some(hour_raw) = caps.name("hour").and_then(|m| m.as_str().parse::<u32>().ok()) else {
+    let Some(hour_raw) = caps
+        .name("hour")
+        .and_then(|m| m.as_str().parse::<u32>().ok())
+    else {
         return false;
     };
-    let Some(min) = caps.name("min").and_then(|m| m.as_str().parse::<u32>().ok()) else {
+    let Some(min) = caps
+        .name("min")
+        .and_then(|m| m.as_str().parse::<u32>().ok())
+    else {
         return false;
     };
     let ampm = match caps.name("ampm") {
@@ -271,11 +275,9 @@ fn is_try_again_at_significantly_in_past_at(
 
     use chrono::{Datelike, TimeZone as _};
 
-    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) = (
-        caps.name("month"),
-        caps.name("day"),
-        caps.name("year"),
-    ) {
+    let (year, month, day) = if let (Some(m_str), Some(d_str), Some(y_str)) =
+        (caps.name("month"), caps.name("day"), caps.name("year"))
+    {
         let month = match m_str.as_str().to_ascii_lowercase().as_str() {
             "january" | "jan" => 1,
             "february" | "feb" => 2,
@@ -291,8 +293,12 @@ fn is_try_again_at_significantly_in_past_at(
             "december" | "dec" => 12,
             _ => return false,
         };
-        let Some(day) = d_str.as_str().parse::<u32>().ok() else { return false; };
-        let Some(year) = y_str.as_str().parse::<i32>().ok() else { return false; };
+        let Some(day) = d_str.as_str().parse::<u32>().ok() else {
+            return false;
+        };
+        let Some(year) = y_str.as_str().parse::<i32>().ok() else {
+            return false;
+        };
         (year, month, day)
     } else {
         (now_local.year(), now_local.month(), now_local.day())
@@ -308,7 +314,8 @@ fn is_try_again_at_significantly_in_past_at(
 
     let Some(mut retry_dt) = chrono::Local
         .with_ymd_and_hms(year, month, day, hour, min, 0)
-        .latest() else {
+        .latest()
+    else {
         return false;
     };
 
@@ -678,12 +685,18 @@ mod tests {
         let stderr = "ERROR: You've hit your usage limit. Upgrade to Pro \
             or try again at January 1st, 2020 5:14 PM.";
         let err = norm(0, stderr, "MACC_TASK_RESULT: success_with_changes");
-        assert!(err.is_none(), "expected quota to be rejected for past timestamp at exit 0");
+        assert!(
+            err.is_none(),
+            "expected quota to be rejected for past timestamp at exit 0"
+        );
 
         // With exit code 1, it should not be QuotaExhausted, but Unknown
         let err_nonzero = norm(1, stderr, "");
         assert!(err_nonzero.is_some());
-        assert_ne!(err_nonzero.unwrap().canonical_class, CanonicalClass::QuotaExhausted);
+        assert_ne!(
+            err_nonzero.unwrap().canonical_class,
+            CanonicalClass::QuotaExhausted
+        );
     }
 
     #[test]

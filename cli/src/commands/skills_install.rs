@@ -249,8 +249,8 @@ mod tests {
     use super::*;
     use std::{fs, path::Path, sync::Arc};
     fn git(root: &Path, args: &[&str]) -> String {
-        let out = macc_core::git::run_git_output_mapped(root, args, "run test git command")
-            .unwrap();
+        let out =
+            macc_core::git::run_git_output_mapped(root, args, "run test git command").unwrap();
         assert!(
             out.status.success(),
             "{}",

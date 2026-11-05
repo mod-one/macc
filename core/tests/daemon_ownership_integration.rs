@@ -543,8 +543,12 @@ fn takeover_request_evicts_owner_that_fails_to_answer_heartbeat() {
     let handle = coordinator_handle(&repo_root);
     register_process(&repo_root, handle.clone()).expect("register coordinator");
 
-    claim_owner(&repo_root, &handle, fresh_client("tui-owner", ClientKind::Tui))
-        .expect("tui-owner claims");
+    claim_owner(
+        &repo_root,
+        &handle,
+        fresh_client("tui-owner", ClientKind::Tui),
+    )
+    .expect("tui-owner claims");
     let req_id = request_takeover(
         &repo_root,
         &handle,
@@ -580,8 +584,7 @@ fn takeover_request_evicts_owner_that_fails_to_answer_heartbeat() {
     })
     .unwrap();
 
-    let transferred =
-        verify_takeover_owner_liveness(&repo_root, &handle).expect("verify liveness");
+    let transferred = verify_takeover_owner_liveness(&repo_root, &handle).expect("verify liveness");
     assert!(transferred);
     let lease_after = project_lease(&repo_root).unwrap().unwrap();
     assert_eq!(

@@ -251,8 +251,7 @@ pub fn request_takeover(
                 .map(|hb| hb.with_timezone(&Utc) >= req_dt)
                 .unwrap_or(true);
             if needs_backdate {
-                owner.last_heartbeat =
-                    (req_dt - chrono::Duration::milliseconds(1)).to_rfc3339();
+                owner.last_heartbeat = (req_dt - chrono::Duration::milliseconds(1)).to_rfc3339();
             }
         }
 

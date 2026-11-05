@@ -72,11 +72,7 @@ pub fn evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig)
             .retain(|viewer| !is_dead_local_client(viewer) && !is_stale_client(viewer, cutoff));
 
         // 2. If the current owner is a verified dead local PID, evict it in 0ms.
-        if record
-            .owner
-            .as_ref()
-            .is_some_and(is_dead_local_client)
-        {
+        if record.owner.as_ref().is_some_and(is_dead_local_client) {
             if let Some(dead_owner) = record.owner.take() {
                 emit_owner_stale(record, &dead_owner);
             }
@@ -119,9 +115,7 @@ pub fn evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig)
                 }
             } else if config.takeover_timeout_seconds > 0 {
                 let takeover_cutoff = now
-                    - Duration::seconds(
-                        config.takeover_timeout_seconds.min(i64::MAX as u64) as i64,
-                    );
+                    - Duration::seconds(config.takeover_timeout_seconds.min(i64::MAX as u64) as i64);
                 let expired = requested_at.map(|ts| ts < takeover_cutoff).unwrap_or(true);
                 if expired {
                     match config.takeover_default_response {

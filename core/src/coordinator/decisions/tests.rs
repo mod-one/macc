@@ -405,7 +405,9 @@ fn autonomous_graph_proposal_is_committed_atomically_with_its_decision() {
 fn human_can_apply_recommended_graph_proposal_explicitly() {
     let (_tmp, mut store, plan, _, p) = fixture();
     let mut r = question("plan-change");
-    r.options = vec![OptionChoice {proposed_patch:None,requires_replan:false,
+    r.options = vec![OptionChoice {
+        proposed_patch: None,
+        requires_replan: false,
         id: "apply".into(),
         label: "Apply the shown patch".into(),
         consequences: vec!["Adds a follow-up task".into()],
@@ -424,7 +426,9 @@ fn human_can_apply_recommended_graph_proposal_explicitly() {
         .answer_details(
             &d.id,
             d.version,
-            &AnswerInput { conditions:Vec::new(), artifacts:Vec::new(),
+            &AnswerInput {
+                conditions: Vec::new(),
+                artifacts: Vec::new(),
                 text: "Oui, conserver le contrat".into(),
                 option: Some("apply".into()),
                 apply_patch: true,
@@ -912,7 +916,9 @@ fn concurrent_human_answers_cannot_silently_override_subject_authority() {
 fn free_text_and_rejection_never_implicitly_apply_proposed_patch() {
     let (_tmp, mut s, plan, _, p) = fixture();
     let mut r = question("custom-answer");
-    r.options = vec![OptionChoice {proposed_patch:None,requires_replan:false,
+    r.options = vec![OptionChoice {
+        proposed_patch: None,
+        requires_replan: false,
         id: "yes".into(),
         label: "Apply".into(),
         consequences: vec![],
@@ -963,7 +969,9 @@ fn governance_rules_raise_risk_enforce_fields_and_recheck_pending() {
     assert!(s
         .answer(&d.id, d.version, "yes", None, "Owner", false, &p)
         .is_err());
-    let input = AnswerInput { conditions:Vec::new(), artifacts:Vec::new(),
+    let input = AnswerInput {
+        conditions: Vec::new(),
+        artifacts: Vec::new(),
         text: "Reviewed".into(),
         fields: std::collections::BTreeMap::from([(
             "reason".into(),

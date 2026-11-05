@@ -307,7 +307,11 @@ pub(super) fn build_coordinator_sse_event(event: &CoordinatorEvent) -> Event {
 
 pub(super) fn build_ownership_changed_sse_event(seq: i64) -> Event {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let event_id = format!("evt-ownership_changed---{}-{}", seq, unix_timestamp_millis());
+    let event_id = format!(
+        "evt-ownership_changed---{}-{}",
+        seq,
+        unix_timestamp_millis()
+    );
     let payload = serde_json::json!({
         "schema_version": COORDINATOR_EVENT_SCHEMA_VERSION,
         "event_id": event_id,
