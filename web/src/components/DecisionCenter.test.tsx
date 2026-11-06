@@ -56,8 +56,8 @@ it('does not dismiss an active never_ask dialog before the authoritative resolut
 });
 it('records a manual intervention only with the exact actual result and explicit performed confirmation',async()=>{
  const data=snapshot();data.decisions[0].request.kind='intervention';data.decisions[0].request.options=[];data.decisions[0].request.intervention={action:'Connect the USB device',inaccessible_reason:'No physical access',expected_result:'Return the device identifier',verification:'Report the actual output'};api.get.mockResolvedValue(data);
- render(<DecisionCenter/>);await screen.findByRole('dialog');expect(screen.getByText(/Unavailable capability: No physical access/)).toBeInTheDocument();expect(screen.getByRole('button',{name:'Send answer'})).toBeDisabled();
- fireEvent.change(screen.getByLabelText('Actual observed result / command output'),{target:{value:'USB device connected: serial ABC-42\nstatus ready'}});expect(screen.getByRole('button',{name:'Send answer'})).toBeDisabled();fireEvent.click(screen.getByLabelText('I performed the requested action'));fireEvent.click(screen.getByRole('button',{name:'Send answer'}));await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({text:'USB device connected: serial ABC-42\nstatus ready',fields:{performed:'yes',result:'USB device connected: serial ABC-42\nstatus ready'},outcome:'answer'})));
+ render(<DecisionCenter/>);await screen.findByRole('dialog');expect(screen.getByText(/Unavailable capability: No physical access/)).toBeInTheDocument();fireEvent.click(screen.getByRole('button',{name:'Send answer'}));expect(api.mutate).not.toHaveBeenCalled();
+ fireEvent.change(screen.getByLabelText(/Actual observed result \/ command output/),{target:{value:'USB device connected: serial ABC-42\nstatus ready'}});fireEvent.click(screen.getByRole('button',{name:'Send answer'}));expect(api.mutate).not.toHaveBeenCalled();fireEvent.click(screen.getByLabelText('I performed the requested action'));fireEvent.click(screen.getByRole('button',{name:'Send answer'}));await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({text:'USB device connected: serial ABC-42\nstatus ready',fields:{performed:'yes',result:'USB device connected: serial ABC-42\nstatus ready'},outcome:'answer'})));
 });
 it('requests further investigation without turning that request into consent',async()=>{
  render(<DecisionCenter/>);await screen.findByRole('dialog');fireEvent.change(screen.getByLabelText('Response outcome'),{target:{value:'investigate'}});fireEvent.change(screen.getByLabelText('Answer / conditions / remarks'),{target:{value:'Inspect the existing API before I choose.'}});fireEvent.click(screen.getByRole('button',{name:'Send answer'}));await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({outcome:'investigate',apply_patch:false,text:'Inspect the existing API before I choose.'})));
@@ -67,4 +67,30 @@ it('requires explicit approval conditions and sends their exact task reference',
 });
 it('never shares retained evidence merely by selecting it as an answer attachment',async()=>{
  const data=snapshot();data.artifacts=[{id:'artifact-1',digest:'abc',label:'device-output.txt',media_type:'text/plain',size:12,recorded_at:'2026-11-03T19:00:00Z',share_content:false,permission_version:0}];api.get.mockResolvedValue(data);render(<DecisionCenter/>);await screen.findByRole('dialog');fireEvent.click(screen.getByLabelText('device-output.txt (12 bytes)'));expect(api.mutate).not.toHaveBeenCalled();fireEvent.click(screen.getByRole('button',{name:'Review sharing file contents with AI tools'}));expect(api.mutate).not.toHaveBeenCalled();fireEvent.click(screen.getByRole('button',{name:'Allow this file in the configured AI context'}));await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({action:'operator',intent:expect.objectContaining({action:'evidence_permission',id:'artifact-1',version:0,share:true})})));
+});
+it('guides a reconnected note to the exact missing intervention fields before any API call',async()=>{
+ const data=snapshot();const request=data.decisions[0].request;request.kind='intervention';request.options=[];request.intervention={action:'Restore the existing ADB forward',inaccessible_reason:'No USB access',expected_result:'Port and actual ADB state'};request.response_fields=[{id:'port_output',label:'Forwarded port and ADB output',required:true,multiline:true,choices:[]}];api.get.mockResolvedValue(data);
+ render(<DecisionCenter/>);await screen.findByRole('dialog');
+ fireEvent.change(screen.getByLabelText('Additional note (optional)'),{target:{value:'reconnected !'}});
+ fireEvent.click(screen.getByRole('button',{name:'Send answer'}));
+ expect(api.mutate).not.toHaveBeenCalled();expect(screen.getByLabelText('I performed the requested action')).toHaveFocus();expect(screen.getByLabelText('I performed the requested action')).not.toBeChecked();expect(screen.getByRole('alert')).toHaveTextContent('Your response has not been sent');
+ expect(screen.getByLabelText('Additional note (optional)')).toHaveValue('reconnected !');
+ fireEvent.change(screen.getByLabelText('Forwarded port and ADB output *'),{target:{value:'5037; adb get-state: device'}});
+ fireEvent.change(screen.getByLabelText(/Actual observed result \/ command output/),{target:{value:'Listener restored. Device is visible.'}});
+ fireEvent.click(screen.getByLabelText('I performed the requested action'));
+ fireEvent.click(screen.getByRole('button',{name:'Send answer'}));
+ await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({fields:{performed:'yes',result:'Listener restored. Device is visible.',port_output:'5037; adb get-state: device'},text:'reconnected !'})));
+});
+it('allows an honest inability response without inventing an intervention result',async()=>{
+ const data=snapshot();data.decisions[0].request.kind='intervention';data.decisions[0].request.options=[];data.decisions[0].request.intervention={action:'Connect the device',inaccessible_reason:'No USB access',expected_result:'Actual device output'};data.decisions[0].request.response_fields=[{id:'output',label:'Device output',required:true,multiline:true,choices:[]}];api.get.mockResolvedValue(data);
+ render(<DecisionCenter/>);await screen.findByRole('dialog');fireEvent.change(screen.getByLabelText('Response outcome'),{target:{value:'reject'}});fireEvent.change(screen.getByLabelText('Answer / conditions / remarks'),{target:{value:'I do not have the device with me.'}});fireEvent.click(screen.getByRole('button',{name:'Send answer'}));
+ await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({outcome:'reject',fields:{},text:'I do not have the device with me.'})));
+});
+it('keeps server validation feedback visible across polling refreshes',async()=>{
+ api.mutate.mockRejectedValueOnce(new Error('The exact request has expired'));render(<DecisionCenter/>);await screen.findByRole('dialog');fireEvent.change(screen.getByLabelText('Answer / conditions / remarks'),{target:{value:'Draft to preserve'}});fireEvent.click(screen.getByRole('button',{name:'Send answer'}));expect(await screen.findByRole('alert')).toHaveTextContent('expired');
+ await waitFor(()=>expect(api.get.mock.calls.length).toBeGreaterThanOrEqual(2),{timeout:4500});expect(screen.getByRole('alert')).toHaveTextContent('expired');expect(screen.getByLabelText('Answer / conditions / remarks')).toHaveValue('Draft to preserve');
+});
+it('offers an explicit current-version review while preserving an older draft',async()=>{
+ render(<DecisionCenter/>);await screen.findByRole('dialog');fireEvent.change(screen.getByLabelText('Answer / conditions / remarks'),{target:{value:'Response to version one'}});const newer=snapshot();newer.decisions[0].version=2;api.get.mockResolvedValue(newer);
+ const review=await screen.findByRole('button',{name:'Review latest request'},{timeout:4500});expect(screen.getByRole('button',{name:'Send answer'})).toBeDisabled();expect(screen.getByLabelText('Answer / conditions / remarks')).toHaveValue('Response to version one');fireEvent.click(review);expect(screen.getByLabelText('Answer / conditions / remarks')).toHaveValue('');expect(sessionStorage.getItem('macc.decisionDrafts')).toContain('Response to version one');expect(api.mutate).not.toHaveBeenCalled();
 });

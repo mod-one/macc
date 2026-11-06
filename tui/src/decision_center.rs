@@ -1,15 +1,14 @@
 //! Nonblocking decision inbox; drafts are keyed by immutable request version.
 mod actions;
+#[cfg(test)]
+mod form_tests;
+mod interaction;
+mod view;
 use crossterm::event::KeyCode;
 use macc_core::{
     coordinator::decisions as dm,
     process_ownership::{ProcessHandle, ProcessKind},
     service::process_ownership_gate::{gate_owner_action, ClientContext},
-};
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 use serde_json::{json, Value};
 use std::{
@@ -26,6 +25,7 @@ struct Draft {
     effects: dm::AnswerEffects,
     fields: BTreeMap<String, String>,
     active_field: usize,
+    cursors: BTreeMap<String, usize>,
     apply_patch: bool,
     outcome: dm::AnswerOutcome,
     text: String,
@@ -50,6 +50,13 @@ pub struct Center {
     feedback: bool,
     show_help: bool,
     submitting: bool,
+    focus: usize,
+    expanded: bool,
+    advanced_fields: bool,
+    quick_menu: bool,
+    menu_index: usize,
+    reviewing_patch: bool,
+    patch_accept: bool,
 }
 pub enum Action {
     SetArtifact(dm::ArtifactRef),
@@ -209,6 +216,7 @@ impl Center {
                 self.open = true;
                 self.manual = false;
                 self.scroll = 0;
+                self.focus = 0;
             }
         }
     }
@@ -218,7 +226,7 @@ impl Center {
         if let Some(snapshot) = self.snapshot.as_ref() {
             self.actions.prepare_gate(decision, snapshot);
         }
-        self.message="Review the approver identity and role. F5 requests independent approval; it does not invent a vote.".into();
+        self.message="Review the approver identity and role. Tab to Send, then Enter, requests independent approval; it does not invent a vote.".into();
     }
     pub fn show(&mut self) {
         self.current = self
@@ -229,6 +237,7 @@ impl Center {
         self.open = true;
         self.manual = true;
         self.scroll = 0;
+        self.focus = 0;
     }
     pub fn pending(&self) -> usize {
         self.list()
@@ -236,7 +245,7 @@ impl Center {
             .filter(|d| d.status == "pending_human")
             .count()
     }
-    pub fn key_event(&mut self, key: KeyCode) -> Option<Action> {
+    fn legacy_key(&mut self, key: KeyCode) -> Option<Action> {
         if !matches!(key, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace) {
             self.save_drafts();
         }
@@ -260,9 +269,7 @@ impl Center {
                 return None;
             }
             let snapshot = self.snapshot.clone().unwrap_or_default();
-            let result = self
-                .actions
-                .key_event(key, self.current.as_ref(), &snapshot);
+            let result = self.actions.keyboard(key, self.current.as_ref(), &snapshot);
             if let Some(Action::SetArtifact(reference)) = &result {
                 if let Some(d) = &self.current {
                     let draft = self.drafts.entry(Self::key(d)).or_default();
@@ -317,7 +324,9 @@ impl Center {
         }
         if key == KeyCode::F(8) {
             self.feedback = true;
-            self.message = "New project direction: type your text; F5 records it".into();
+            self.message =
+                "New project direction: type your text, then Tab to Send and Enter to record it"
+                    .into();
             return None;
         }
         match key {
@@ -538,10 +547,13 @@ impl Center {
     }
     pub fn submit(&mut self, root: PathBuf, client_id: String, action: Action) {
         self.save_drafts();
-        if self.rx.is_some() {
-            self.message = "Refresh in progress; submit again when complete".into();
+        if self.submitting {
+            self.message = "An action is already being recorded. Your draft is kept.".into();
             return;
         }
+        // Replace an obsolete read-only poll instead of losing the user's Send.
+        // The native mutation still checks the exact request version and authority.
+        self.rx = None;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.submitting = !matches!(action, Action::InspectContext(_));
@@ -712,256 +724,6 @@ impl Center {
             let _ = tx.send(result.map_err(|e| e.to_string()));
         });
     }
-    pub fn draw(&self, frame: &mut Frame) {
-        if !self.open {
-            return;
-        }
-        let area = frame.size();
-        let rect = Rect {
-            x: area.x + area.width / 20,
-            y: area.y + area.height / 20,
-            width: area.width.saturating_sub(area.width / 10),
-            height: area.height.saturating_sub(area.height / 10),
-        };
-        frame.render_widget(Clear, rect);
-        if rect.height < 10 || rect.width < 30 {
-            let rect = area;
-            frame.render_widget(Clear, rect);
-            let key = if self.feedback {
-                "feedback".into()
-            } else {
-                self.current.as_ref().map(Self::key).unwrap_or_default()
-            };
-            let draft = self.drafts.get(&key).cloned().unwrap_or_default();
-            let (details, editor) = if self.actions.open {
-                self.actions.view(
-                    self.current.as_ref(),
-                    self.snapshot.as_ref().unwrap_or(&Value::Null),
-                )
-            } else {
-                let d = self.current.as_ref();
-                let editor = if draft.active_field > 0 {
-                    d.and_then(|d| d.request.response_fields.get(draft.active_field - 1))
-                        .map(|f| {
-                            format!(
-                                "{}: {}",
-                                f.label,
-                                draft.fields.get(&f.id).cloned().unwrap_or_default()
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            format!(
-                                "Evidence: {}",
-                                draft.fields.get("evidence").cloned().unwrap_or_default()
-                            )
-                        })
-                } else {
-                    format!("Answer: {}", draft.text)
-                };
-                (format!("{}\n{}\n{}\nF2 next · Tab choice · F9 field · Home actions\nPgUp/PgDn scroll; Enter newline; F5 submits explicitly",d.map(|d|d.request.question.as_str()).unwrap_or("Decision inbox"),d.map(|d|d.request.context.as_str()).unwrap_or(""),self.message),editor)
-            };
-            let body = Rect {
-                height: rect.height.saturating_sub(1),
-                ..rect
-            };
-            frame.render_widget(
-                Paragraph::new(if self.show_help {
-                    details
-                } else {
-                    format!("{editor}\n{details}")
-                })
-                .wrap(Wrap { trim: false })
-                .scroll((self.scroll, 0)),
-                body,
-            );
-            if rect.height > 0 {
-                frame.render_widget(
-                    Paragraph::new("F1 Info F5 Send Esc"),
-                    Rect {
-                        x: rect.x,
-                        y: rect.y + rect.height - 1,
-                        width: rect.width,
-                        height: 1,
-                    },
-                );
-            }
-            return;
-        }
-        let compact = rect.height < 18 || rect.width < 65;
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(if compact { 4 } else { 7 }),
-                Constraint::Length(if compact { 4 } else { 6 }),
-            ])
-            .split(rect);
-        let p = self.policy();
-        let mut text=format!("Durable decisions: {} | mode: {:?} | pending: {}\nConfiguration: Automation / Coordinator > Decisions. NeverAsk records agent choices without questions.\n{}\n\n",p.enabled,p.human_question_min_risk,self.pending(),self.message);
-        if self.show_help {
-            text.push_str("KEYS: Home opens lifecycle/approval/operation actions; F2 next request/history; Tab option or field choice; F3 advisory; F4 delivery/ACK/compliance; F5 explicit submit; F8 new guidance; F9 edit next response field; F10 explicitly accept displayed patch; F11 answer/reject/request changes/investigate; F12 write isolated approver challenge; Enter newline; PgUp/PgDn scroll evidence; Esc defer without submitting.\n\n");
-        }
-        if let Some(d) = &self.current {
-            text.push_str(&format!("{}\nTask: {} | kind: {} | risk: {:?} | status: {} | version {}\n\n{}\n\nRecommendation: {}\n",d.request.question,d.request.task_id,d.request.kind,d.effective_risk,d.status,d.version,d.request.context,d.request.recommendation));
-            if let Some(action) = &d.request.intervention {
-                text.push_str(&format!("\nUSER ACTION NEEDED\n{}\nUnavailable capability: {}\nExpected result: {}\nVerification: {}\nF9 edits performed (Tab selects yes/no) and actual observed result. No passwords/tokens.\n",action.action,action.inaccessible_reason,action.expected_result,action.verification));
-            }
-            for (i, o) in d.request.options.iter().enumerate() {
-                text.push_str(&format!(
-                    "{}. {} — {}\n",
-                    i + 1,
-                    o.label,
-                    o.consequences.join("; ")
-                ));
-            }
-            let option = self
-                .drafts
-                .get(&Self::key(d))
-                .and_then(|draft| draft.option.checked_sub(1))
-                .and_then(|i| d.request.options.get(i))
-                .map(|o| o.id.as_str());
-            if let Some(patch) = d
-                .request
-                .patch_for(option)
-                .or(d.request.proposed_patch.as_ref())
-            {
-                text.push_str(&format!(
-                    "\nProposed graph change (F10 explicitly accepts the displayed patch):\n{}\n",
-                    patch.describe().join("\n")
-                ));
-            }
-            if let Some(r) = &d.resolution {
-                text.push_str(&format!(
-                    "\nRecorded outcome [{} by {}]:\n{}\n",
-                    r.origin, r.actor, r.text
-                ));
-                for c in &r.conditions {
-                    text.push_str(&format!(
-                        "Required condition: {} — task {:?}, evidence {:?} {:?}\n",
-                        c.description, c.task_id, c.source_path, c.source_digest
-                    ));
-                }
-                if let Some(result) = r.fields.get("result") {
-                    text.push_str(&format!(
-                        "Actual user-reported result (not machine attestation):\n{result}\n"
-                    ));
-                }
-            }
-        } else {
-            text.push_str(
-                "No decisions yet. Configure Automation / Coordinator > Decisions; F8 records a new project direction.\n",
-            );
-        }
-        if let Some(contexts) = self.inspected_contexts.as_ref() {
-            text.push_str(&format!(
-                "\nExact issued contexts and separate receipts:\n{}\n",
-                serde_json::to_string_pretty(contexts).unwrap_or_default()
-            ));
-        }
-        let name = if self.feedback {
-            "feedback".into()
-        } else {
-            self.current.as_ref().map(Self::key).unwrap_or_default()
-        };
-        let draft = self.drafts.get(&name).cloned().unwrap_or_default();
-        let mut answer = format!(
-            "{} (option {}; 0 = custom; advisory {}):\n{}",
-            if self.feedback {
-                "New project direction"
-            } else {
-                "Answer draft"
-            },
-            draft.option,
-            draft.advisory,
-            draft.text
-        );
-        let secure = self.policy().trust_mode == "secure_approval"
-            && self
-                .snapshot
-                .as_ref()
-                .is_none_or(|s| s["approval_broker_available"] != true);
-        if let Some(d) = &self.current {
-            let mut fields = d.request.response_fields.clone();
-            fields.extend(interaction_fields(&d.request.kind));
-            if matches!(d.request.kind.as_str(), "approval" | "authorization")
-                && !fields.iter().any(|f| f.id == "evidence")
-            {
-                fields.push(dm::ResponseField {
-                    id: "evidence".into(),
-                    label: "Approval evidence".into(),
-                    required: true,
-                    multiline: false,
-                    choices: vec![],
-                });
-            }
-            if secure {
-                fields.push(dm::ResponseField {
-                    id: "__attestation".into(),
-                    label: "Isolated approver attestation JSON".into(),
-                    required: true,
-                    multiline: true,
-                    choices: vec![],
-                });
-            }
-            if draft.active_field > 0 {
-                if let Some(field) = fields.get(draft.active_field - 1) {
-                    answer = format!(
-                        "Editing {}{} (F9 next field)\n{}",
-                        field.label,
-                        if field.required { " *" } else { "" },
-                        draft.fields.get(&field.id).cloned().unwrap_or_default()
-                    );
-                }
-            }
-        }
-        answer = format!(
-            "Outcome: {:?}; effects: {:?}; explicit patch acceptance: {}; evidence: {}\n{}",
-            draft.outcome,
-            draft.effects,
-            draft.apply_patch,
-            draft.artifacts.len(),
-            answer
-        );
-        if self.actions.open {
-            let (snapshot_text, editor) = self.actions.view(
-                self.current.as_ref(),
-                self.snapshot.as_ref().unwrap_or(&Value::Null),
-            );
-            text = format!("{}\n{}", self.message, snapshot_text);
-            answer = editor;
-        }
-        frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .scroll((self.scroll, 0))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Decisions — source and outcome remain attributed"),
-                ),
-            chunks[0],
-        );
-        let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
-        let lines = answer
-            .lines()
-            .map(|line| line.chars().count().div_ceil(width).max(1))
-            .sum::<usize>();
-        let offset = lines
-            .saturating_sub(usize::from(chunks[1].height.saturating_sub(2)))
-            .min(u16::MAX as usize) as u16;
-        frame.render_widget(
-            Paragraph::new(answer)
-                .wrap(Wrap { trim: false })
-                .scroll((offset, 0))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Your response — F5 sends, Esc keeps draft"),
-                ),
-            chunks[1],
-        );
-        frame.render_widget(Paragraph::new(if compact{"[F1] Keys [Home] Actions\n[F5] Send [Esc] Later"}else{"[F5] Send  [Esc] Later  [F1] Keys  [Home] Actions\n[F2] Next / history  [Tab] Option  [F3] Advisory [F4] Contexts\n[F5] Send / save  [Enter] Newline  [PgUp/PgDn] Scroll\n[F8] Direction [F9] Field [F10] Patch [F11] Outcome [F12] Approver challenge\n[Home] Actions / approvals / operations  [Esc] Later / close — never submits an answer"}).wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL)),chunks[2]);
-    }
 }
 impl Drop for Center {
     fn drop(&mut self) {
@@ -1050,7 +812,7 @@ mod tests {
         let mut c = center("never_ask");
         assert!(c.key_event(KeyCode::Char('x')).is_none());
         assert!(c.key_event(KeyCode::F(5)).is_none());
-        assert!(c.drafts["q@1"].text.is_empty());
+        assert!(c.drafts.get("q@1").is_none_or(|d| d.text.is_empty()));
     }
     #[test]
     fn dialog_renders_without_panicking_at_small_and_large_sizes() {
@@ -1153,7 +915,7 @@ fn run_operator(
     if p.trust_mode == "secure_approval" && proof.is_none() && dm::broker_available(&p) {
         let ticket = store.begin_approval(intent, actor)?;
         let mut snapshot = dm::snapshot(root)?;
-        snapshot["operator_notice"]=json!(format!("Independent approval {}: {}. Home > Independent approval requests opens its page/status. Your draft remains unsent.",ticket.status,ticket.message));
+        snapshot["operator_notice"]=json!(format!("Independent approval {}: {}. More actions > Independent approval requests opens its page/status. Your draft remains unsent.",ticket.status,ticket.message));
         return Ok(snapshot);
     }
     let result = store.apply_operator(&intent, proof.as_ref(), actor)?;
@@ -1211,7 +973,7 @@ mod lifecycle_tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(rendered.contains("F5"), "{width}x{height}: {rendered}");
+            assert!(rendered.contains("Enter"), "{width}x{height}: {rendered}");
             assert!(rendered.contains("Esc"));
         }
         assert_eq!(c.drafts["q@1"].text, "é\n");
@@ -1221,8 +983,8 @@ mod lifecycle_tests {
         let mut c = super::tests::center("high");
         let d = c.current.as_mut().unwrap();
         d.request.options.push(serde_json::from_value(json!({"id":"b","label":"Alternative B","proposed_patch":{"plan_id":"p","base_graph_version":1,"idempotency_key":"b","reason":"Alternative","operations":[{"op":"add_task","task":{"id":"B"}}]}})).unwrap());
-        c.key_event(KeyCode::Tab);
-        c.key_event(KeyCode::Tab);
+        c.key_event(KeyCode::Right);
+        c.key_event(KeyCode::Right);
         c.key_event(KeyCode::F(10));
         let Some(Action::Answer {
             option,
@@ -1242,10 +1004,10 @@ fn interaction_fields(kind: &str) -> Vec<dm::ResponseField> {
     if kind == "intervention" {
         fields.push(dm::ResponseField {
             id: "performed".into(),
-            label: "I performed the requested action (Tab yes/no)".into(),
+            label: "I performed the requested action".into(),
             required: true,
             multiline: false,
-            choices: vec!["no".into(), "yes".into()],
+            choices: vec!["yes".into(), "no".into()],
         });
         fields.push(dm::ResponseField {
             id: "result".into(),

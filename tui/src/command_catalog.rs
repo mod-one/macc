@@ -100,18 +100,13 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
     }
     if state.decision_center.open {
         return rows(vec![
-            ("F1", "All decision shortcuts"),
-            ("Home", "Lifecycle / approvals / operations"),
-            ("F2", "Next decision / history"),
-            ("Tab", "Choose option"),
-            ("F5", "Send answer"),
-            ("Enter", "Newline"),
-            ("F8", "New guidance"),
-            ("F9", "Answer field"),
-            ("F10", "Accept displayed patch"),
-            ("F11", "Answer / reject / changes"),
-            ("F12", "Prepare isolated approver challenge"),
-            ("Esc", "Later"),
+            ("Tab", "Next field or button"),
+            ("Shift+Tab", "Previous field or button"),
+            ("↑↓", "Choose a value / action"),
+            ("Enter", "Edit text or activate focused button"),
+            ("Home", "Evidence / approvals / lifecycle actions"),
+            ("PgUp/PgDn", "Scroll request details"),
+            ("Esc", "Later — keep draft"),
         ]);
     }
     if let Some(window) = &state.approval_window {

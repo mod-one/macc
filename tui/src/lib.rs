@@ -223,11 +223,11 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
-    if key == KeyCode::F(1) {
+    if key == KeyCode::F(1) && !state.decision_center.open {
         state.toggle_help();
         return;
     }
-    if key == KeyCode::F(2) {
+    if key == KeyCode::F(2) && !state.decision_center.open {
         open_command_palette(state);
         return;
     }
@@ -2750,7 +2750,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if state.help_open {
         render_help_overlay(f, state);
     }
-    command_footer::draw(f, state);
+    if !state.decision_center.open
+        || state.command_palette_open
+        || state.help_open
+        || state.launch_dialog.is_some()
+        || state.apply_confirmation_open()
+    {
+        command_footer::draw(f, state);
+    }
 }
 
 fn kind_label(kind: PlannedOpKind) -> &'static str {

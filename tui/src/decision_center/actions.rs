@@ -29,6 +29,7 @@ pub(super) struct Panel {
     gate: Option<Value>,
     outcome: usize,
     evidence_confirmation: Option<String>,
+    button: Option<usize>,
 }
 const MODES: &[(&str, &str)] = &[
     ("revise", "Revise / propose replacement"),
@@ -48,6 +49,7 @@ const MODES: &[(&str, &str)] = &[
 impl Panel {
     pub fn show(&mut self) {
         self.open = true;
+        self.button = None;
         self.evidence_confirmation = None;
         self.mode = "menu".into();
         self.index = 0;
@@ -358,6 +360,106 @@ impl Panel {
             _ => 2,
         };
     }
+    fn buttons(&self) -> Vec<(&'static str, KeyCode)> {
+        match self.mode.as_str() {
+            "menu" | "analytics" => vec![],
+            "evidence" => vec![
+                ("Attach reference", KeyCode::F(5)),
+                ("Review / confirm AI sharing", KeyCode::F(6)),
+            ],
+            "approvals" => vec![
+                ("Check approval", KeyCode::F(4)),
+                ("Apply approved action", KeyCode::F(5)),
+            ],
+            "operations" => vec![
+                ("Send", KeyCode::F(5)),
+                ("Run trusted probe", KeyCode::F(4)),
+                ("Change outcome", KeyCode::F(11)),
+                ("Prepare challenge", KeyCode::F(12)),
+            ],
+            "gates" => vec![
+                ("Send", KeyCode::F(5)),
+                ("Change response", KeyCode::F(11)),
+                ("Prepare challenge", KeyCode::F(12)),
+            ],
+            "upload" => vec![("Register evidence", KeyCode::F(5))],
+            _ => vec![
+                ("Send", KeyCode::F(5)),
+                ("Prepare challenge", KeyCode::F(12)),
+            ],
+        }
+    }
+    pub fn navigation(&self, snapshot: &Value) -> String {
+        let buttons = self.buttons();
+        let manual = snapshot["policy"]["trust_mode"] == "secure_approval"
+            && snapshot["approval_broker_available"] != true;
+        let count = self.field_count(manual);
+        let values = buttons
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _))| {
+                format!(
+                    "{}[{label}]",
+                    if self.button == Some(i) { "›" } else { " " }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        format!("{values}\nTab/Shift+Tab: fields and buttons · Enter: activate button · Esc: back\nInput {} / {}", self.field + 1, count)
+    }
+    pub fn keyboard(
+        &mut self,
+        key: KeyCode,
+        d: Option<&dm::Decision>,
+        snapshot: &Value,
+    ) -> Option<Action> {
+        if self.mode == "menu" || self.mode == "analytics" {
+            return self.key_event(key, d, snapshot);
+        }
+        let buttons = self.buttons();
+        let manual = snapshot["policy"]["trust_mode"] == "secure_approval"
+            && snapshot["approval_broker_available"] != true;
+        let count = if matches!(self.mode.as_str(), "evidence" | "approvals") {
+            0
+        } else {
+            self.field_count(manual)
+        };
+        if matches!(key, KeyCode::Tab | KeyCode::BackTab) {
+            self.evidence_confirmation = None;
+            let total = count + buttons.len();
+            let pos = self
+                .button
+                .map(|b| count + b)
+                .unwrap_or(self.field.min(count));
+            let next =
+                (pos + if key == KeyCode::Tab {
+                    1
+                } else {
+                    total.saturating_sub(1)
+                }) % total.max(1);
+            self.button = (next >= count).then_some(next.saturating_sub(count));
+            if next < count {
+                self.field = next;
+            }
+            return None;
+        }
+        if key == KeyCode::Esc {
+            self.button = None;
+        }
+        if let Some(button) = self.button {
+            if matches!(key, KeyCode::Enter | KeyCode::Char(' ')) {
+                return self.key_event(buttons.get(button)?.1, d, snapshot);
+            }
+            if matches!(key, KeyCode::Char(_) | KeyCode::Backspace) {
+                return None;
+            }
+        }
+        // List views have no text editor: Enter uses their first explicit action.
+        if count == 0 && key == KeyCode::Enter {
+            return self.key_event(buttons.first()?.1, d, snapshot);
+        }
+        self.key_event(key, d, snapshot)
+    }
     pub fn key_event(
         &mut self,
         key: KeyCode,
@@ -459,7 +561,7 @@ impl Panel {
                     });
                 }
                 self.evidence_confirmation = Some(id);
-                self.notice="Explicit disclosure: contents may be sent to configured external AI providers for this plan. F6 again confirms sharing/revocation; Esc cancels. Do not disclose credentials.".into();
+                self.notice="Explicit disclosure: contents may be sent to configured external AI providers for this plan. activate Review / confirm AI sharing again to confirm sharing/revocation; Esc cancels. Do not disclose credentials.".into();
                 return None;
             }
             self.evidence_confirmation = None;
@@ -529,7 +631,7 @@ impl Panel {
                                 apply: true,
                             });
                         }
-                        self.notice="Open the independent approval page, then F4 checks its result; pending is not consent".into();
+                        self.notice="Open the independent approval page, then Check approval checks its result; pending is not consent".into();
                     }
                     _ => {}
                 }
@@ -612,7 +714,7 @@ impl Panel {
         }
         if self.mode == "approvals" {
             let tickets = Self::tickets(snapshot);
-            let mut text="Independent approval requests — ↑/↓ select, F4 checks status, F5 applies approved action\n".to_owned();
+            let mut text="Independent approval requests — ↑/↓ select, Check approval checks status, Apply approved action applies approved action\n".to_owned();
             for (i, ticket) in tickets.iter().enumerate() {
                 text.push_str(&format!(
                     "{} {}: {}\n{}\n{}\n",
@@ -627,7 +729,7 @@ impl Panel {
                 text.push_str(&format!("\nExact submitted action (later draft edits do not alter it):\n{}\nPgUp/PgDn scroll; Esc returns.\n",serde_json::to_string_pretty(&ticket["intent"]).unwrap_or_default()));
             }
             if tickets.is_empty() {
-                text.push_str("No pending independent approval. Signed/manual approval remains available through F12.\n");
+                text.push_str("No pending independent approval. Signed/manual approval remains available through Prepare challenge.\n");
             }
             return (text, self.notice.clone());
         }
@@ -637,7 +739,7 @@ impl Panel {
                 .cloned()
                 .unwrap_or_default();
             let mut text =
-                "Retained evidence — ↑/↓ selects, F5 attaches reference, F6 reviews AI content disclosure, Esc cancels\n"
+                "Retained evidence — ↑/↓ selects, Enter attaches reference; Tab to Review AI sharing for disclosure, Esc cancels\n"
                     .to_string();
             for (i, a) in rows.iter().enumerate() {
                 text.push_str(&format!(
@@ -690,7 +792,7 @@ impl Panel {
             .find(|(mode, _)| *mode == self.mode)
             .map(|(_, title)| *title)
             .unwrap_or("Action");
-        let mut text=format!("{title}\nF9 changes input field; F5 submits explicitly; F12 prepares a challenge.\n{}\n",self.notice);
+        let mut text=format!("{title}\nTab moves between input fields and action buttons; Enter activates a focused button.\n{}\n",self.notice);
         if self.mode == "reuse" {
             text.push_str("Creates new human guidance, without copying votes, conditional approvals, operation permissions or private attachments. Later revocation of the old record does not revoke this independently authored direction.\n");
             if let Some(rows) = snapshot["reference_directions"].as_array() {
@@ -716,12 +818,12 @@ impl Panel {
         }
         if self.mode == "gates" {
             if let Some(g) = &self.gate {
-                text.push_str(&format!("Gate {} — {}\nSubject {} at {}\nRequired roles: {}\nResponse: {} (F11 changes); ↑/↓ selects gate\n{}\n",g["task_id"],g["question"],g["subject_task"],g["subject_revision"],g["required_roles"],["approve","reject","request changes"][self.outcome],g["description"]));
+                text.push_str(&format!("Gate {} — {}\nSubject {} at {}\nRequired roles: {}\nResponse: {} (use Change response button); ↑/↓ selects gate\n{}\n",g["task_id"],g["question"],g["subject_task"],g["subject_revision"],g["required_roles"],["approve","reject","request changes"][self.outcome],g["description"]));
             }
         }
         if self.mode == "operations" {
             if let Some(op) = &self.operation {
-                text.push_str(&format!("Operation {} v{} — {}\nOutcome to record: {} (F11 changes; F4 runs trusted probe)\n",op["operation_id"],op["version"],op["state"],["final failure","verified success","verified keyed retry"][self.outcome]));
+                text.push_str(&format!("Operation {} v{} — {}\nOutcome to record: {} (use Change outcome / Run trusted probe buttons)\n",op["operation_id"],op["version"],op["state"],["final failure","verified success","verified keyed retry"][self.outcome]));
             }
         }
         (text, format!("{label}\n{value}"))
