@@ -2,7 +2,9 @@ use crate::{MaccError, Result};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 
+mod housekeeping;
 mod supervisor_prune;
+pub use housekeeping::fetch_housekeeping;
 pub use supervisor_prune::{prune_merged_supervisor_branch, prune_merged_supervisor_branches};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,11 +505,12 @@ fn parse_graph_refs(raw: &str) -> Vec<String> {
 }
 
 pub fn rev_parse_verify(repo_or_worktree: &Path, reference: &str) -> Result<bool> {
-    Ok(run_git_status(
+    Ok(run_git_output(
         repo_or_worktree,
-        &["rev-parse", "--verify", reference],
+        &["rev-parse", "--verify", "--quiet", reference],
         "run git rev-parse --verify",
     )?
+    .status
     .success())
 }
 

@@ -493,3 +493,9 @@ Fresh v3 contexts have new digests; active attempts issued by an older binary
 must be refreshed, rather than reinterpreting an old receipt. No database schema
 upgrade is required. Exact context history/delivery diagnostics include the byte
 report in CLI, TUI and Web service responses.
+
+### Negative diagnostic delivery
+
+See [Diagnostic delivery and external verification](diagnostic-delivery.md) for
+review protocol v4, native report receipts, external-verification waiting and the
+strict separation between diagnostic completion, feature acceptance and release.

@@ -4,6 +4,8 @@ mod approvals;
 mod backup;
 pub use backup::*;
 mod context;
+mod diagnostic;
+pub use diagnostic::DiagnosticDelivery;
 mod context_budget;
 mod context_render;
 mod context_sources;
@@ -59,3 +61,6 @@ pub fn error(message: impl Into<String>) -> crate::MaccError {
 mod tests;
 #[cfg(test)]
 pub(crate) mod tests_context_budget;
+
+#[cfg(test)]
+mod tests_diagnostic;

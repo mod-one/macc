@@ -553,6 +553,7 @@ pub(super) fn apply_state_transitions(
         } => {
             task.set_workflow_state(WorkflowState::Merged);
             let runtime = task.ensure_runtime();
+            super::phase_failure::clear(runtime);
             runtime.completion_kind = Some(completion_kind.as_str().to_string());
             runtime.set_status(RuntimeStatus::Idle);
             runtime.current_phase = None;
@@ -576,6 +577,7 @@ pub(super) fn apply_state_transitions(
         } => {
             task.set_workflow_state(WorkflowState::InProgress);
             let runtime = task.ensure_runtime();
+            super::phase_failure::clear(runtime);
             runtime.completion_kind = Some(completion_kind.as_str().to_string());
             runtime.set_status(RuntimeStatus::PhaseDone);
             runtime.current_phase = Some("dev".to_string());

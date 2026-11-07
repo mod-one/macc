@@ -212,11 +212,7 @@ impl LiveTaskRow {
             .and_then(|w| w.branch.clone())
             .filter(|b| !b.is_empty() && b != "-");
 
-        let last_error_code = task
-            .task_runtime
-            .last_error_code
-            .clone()
-            .filter(|c| !c.is_empty());
+        let last_error_code = super::phase_diagnostics::effective_code(task).map(str::to_owned);
         let last_error = task
             .task_runtime
             .last_error
@@ -226,7 +222,7 @@ impl LiveTaskRow {
             .task_runtime
             .result_explanation
             .clone()
-            .filter(|e| !e.is_empty());
+            .filter(|e| super::result_protocol::valid_explanation(e));
 
         // Worker fallback: resolve from worktree directory name if worker_id is empty
         if worker_id.is_empty() {

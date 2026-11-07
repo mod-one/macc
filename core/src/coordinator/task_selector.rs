@@ -339,12 +339,8 @@ fn blocked_task_reason(task: &Task) -> String {
             .unwrap_or_else(|| "missing".to_string());
         return format!("gate verdict is {verdict}; an accepted verdict is required");
     }
-    let code = task
-        .task_runtime
-        .last_error_code
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown error");
+    let code =
+        crate::coordinator::phase_diagnostics::effective_code(task).unwrap_or("unknown error");
     // Structured evidence outranks the normalized error text, which is often
     // just the truncated head of a performer log.
     let preconditions: Vec<&str> = task
@@ -361,12 +357,26 @@ fn blocked_task_reason(task: &Task) -> String {
             preconditions.join("; ")
         );
     }
+    let active_phase_error = task
+        .task_runtime
+        .current_phase
+        .as_deref()
+        .is_some_and(|p| p != "dev")
+        || task
+            .task_runtime
+            .last_error_origin
+            .as_deref()
+            .is_some_and(|o| o == "decisions" || o == "phase");
     let message = task
         .task_runtime
         .result_explanation
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty() && code != "E903")
+        .filter(|value| {
+            crate::coordinator::result_protocol::valid_explanation(value)
+                && code != "E903"
+                && !active_phase_error
+        })
         .or(task.task_runtime.last_error_message.as_deref())
         .or(task.task_runtime.last_error.as_deref())
         .filter(|value| !value.is_empty())

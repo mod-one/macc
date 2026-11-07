@@ -976,6 +976,18 @@ impl AppState {
         status: macc_core::Result<macc_core::service::coordinator_workflow::CoordinatorStatus>,
     ) {
         if let Ok(status) = status {
+            if self.coordinator_pause_error.is_some() {
+                if let Some(summary) = &status.last_run_summary {
+                    if self
+                        .coordinator_pause_task_id
+                        .as_deref()
+                        .is_none_or(|t| t == "-")
+                    {
+                        self.coordinator_pause_task_id = summary.task_id.clone();
+                        self.coordinator_pause_phase = summary.phase.clone();
+                    }
+                }
+            }
             self.coordinator_run_summary = status.last_run_summary;
             self.coordinator_pending_approvals = status.pending_approvals;
             self.approvals_last_refresh = Some(Instant::now());

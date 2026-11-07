@@ -1,3 +1,4 @@
+import { DiagnosticDeliveryStatus } from '../../components/DiagnosticDeliveryStatus';
 /**
  * Console — merged coordinator control + live worker monitor
  * Replaces the old Console (control panel) and Live (stream wall) pages.
@@ -773,8 +774,10 @@ const Console: React.FC = () => {
             </span>
           </div>
           <div style={{ marginTop: 4, color: 'var(--text-muted)' }}>
+            {status.last_run_summary.phase && <span>Phase: {status.last_run_summary.phase} · </span>}
             Cause: {status.last_run_summary.cause}
           </div>
+          {status.last_run_summary.diagnostic_delivery && <DiagnosticDeliveryStatus delivery={status.last_run_summary.diagnostic_delivery} />}
           {status.last_run_summary.task_id && (
             <button
               type="button"

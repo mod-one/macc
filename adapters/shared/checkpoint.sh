@@ -30,7 +30,7 @@ finish_checkpoint() {
   if ! response="$(jq -nc --argjson key "$sqlite_lease_key" --arg phase "$checkpoint_phase" --arg result "$result" --argjson ack "$acknowledged" \
       '$key+{phase:$phase,result:$result,acknowledged:$ack}' | session_service checkpoint-finish 2>&1)"; then
     echo "$response" >&2
-    if [[ "$response" == *"requires reconciliation"* ]]; then checkpoint_precondition "$response"; return 2; fi
+    if [[ "$response" == *"requires reconciliation"* || "$response" == *"DM_PENDING:"* || "$response" == *"DM_STALE:"* || "$response" == *"DM_COMPLIANCE:"* ]]; then checkpoint_precondition "$response"; return 2; fi
     printf 'MACC_RUNNER_ERROR: E901\nMACC_TASK_RESULT_EXP: Checkpoint finalization failed: %s; existing Git work is retained.\n' "$(printf '%s' "$response" | tr '\n' ' ')" >&2
     echo 'Error: task checkpoint could not be persisted; existing Git work is retained' >&2
     return 1
@@ -49,6 +49,10 @@ checkpoint_acknowledged() {
 
 checkpoint_precondition() {
   printf 'MACC_TASK_PRECONDITION: Validated task checkpoint required: %s\n' "$(printf '%s' "$1" | tr '\n' ' ')"
-  echo 'MACC_TASK_RESULT_EXP: Checkpoint validation requires reconciliation before another AI invocation; existing work is preserved.'
+  if [[ "$1" == *"DM_PENDING:"* || "$1" == *"DM_STALE:"* || "$1" == *"DM_COMPLIANCE:"* ]]; then
+    echo 'MACC_TASK_RESULT_EXP: Native decision prerequisite is unresolved; inspect the recorded decision and preserve the existing work.'
+  else
+    echo 'MACC_TASK_RESULT_EXP: Checkpoint validation requires reconciliation before another AI invocation; existing work is preserved.'
+  fi
   echo 'MACC_TASK_RESULT: precondition_unmet'
 }

@@ -3770,20 +3770,34 @@ fn approval_request_lines(
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
     let area = ui::centered_rect(75, 45, ui::content_area(f.size()));
     f.render_widget(Clear, area);
+    let diagnostic_label = state.coordinator_run_summary.as_ref().and_then(|s|s.diagnostic_delivery.as_ref()).map(|_| "Diagnostic report complete · feature changes requested · external verification pending\n").unwrap_or("");
     let message = state
         .coordinator_pause_error
         .as_deref()
         .unwrap_or("Coordinator paused due to an error.");
+    let message_with_status = format!("{diagnostic_label}{message}");
+    let message = message_with_status.as_str();
     let command_name = state.coordinator_pause_command.as_deref().unwrap_or("run");
-    let retry_target = match (
-        state.coordinator_pause_task_id.as_deref(),
-        state.coordinator_pause_phase.as_deref(),
-    ) {
-        (Some(task), Some(phase)) => format!("task={} phase={}", task, phase),
-        (Some(task), None) => format!("task={} phase=dev", task),
-        _ => "global/blocking (no task context)".to_string(),
-    };
     let summary = state.coordinator_run_summary.as_ref();
+    let task = state
+        .coordinator_pause_task_id
+        .as_deref()
+        .filter(|v| *v != "-" && !v.is_empty())
+        .or_else(|| summary.and_then(|s| s.task_id.as_deref()));
+    let phase = state
+        .coordinator_pause_phase
+        .as_deref()
+        .filter(|p| *p != "run")
+        .or_else(|| {
+            summary
+                .filter(|s| s.task_id.as_deref() == task)
+                .and_then(|s| s.phase.as_deref())
+        });
+    let retry_target = match (task, phase) {
+        (Some(task), Some(phase)) => format!("task={task} phase={phase}"),
+        (Some(task), None) => format!("task={task} phase=dev"),
+        _ => "global/blocking (no task context)".into(),
+    };
     let (title, text, border) = pause_overlay_content(
         message,
         &retry_target,
@@ -3856,7 +3870,11 @@ fn pause_overlay_content(
         );
         body.push_str(&format!("\nCommand: {}\n", command_name));
         return (
-            "Coordinator Blocked — Preconditions Not Satisfied",
+            if message.contains("DM_EXTERNAL_VERIFICATION:") {
+                "Coordinator Waiting — External Verification"
+            } else {
+                "Coordinator Blocked — Preconditions Not Satisfied"
+            },
             body,
             Color::Yellow,
         );
@@ -4117,6 +4135,23 @@ mod pause_overlay_content_tests {
         assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
         assert!(body.contains("  - allowed_paths must include apps/web/src/config.ts\n"));
         assert!(!body.contains("# Performer log"), "{body}");
+    }
+
+    #[test]
+    fn diagnostic_delivery_waits_for_external_verification_without_retry_menu() {
+        let (title, body, _) = pause_overlay_content(
+            "DM_EXTERNAL_VERIFICATION: Diagnostic report complete; release not authorized",
+            "task=VERIFY phase=review",
+            "run",
+            Some("E903"),
+            Some("VERIFY"),
+            &["Independent assistance observation pending".into()],
+            Some("Verify the selected assistance or explicitly reconcile the decision."),
+        );
+        assert_eq!(title, "Coordinator Waiting — External Verification");
+        assert!(body.contains("Independent assistance observation pending"));
+        assert!(body.contains("explicitly reconcile"));
+        assert!(!body.contains("retry failed phase"));
     }
 
     #[test]

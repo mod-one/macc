@@ -807,6 +807,7 @@ pub(crate) fn apply_phase_success_typed(
     }
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
+    super::phase_failure::clear(runtime);
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some(transition.runtime_phase.to_string());
     runtime.pid = None;
@@ -835,6 +836,7 @@ pub(crate) fn apply_review_phase_success_typed(
     };
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
+    super::phase_failure::clear(runtime);
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
@@ -856,14 +858,7 @@ pub(crate) fn apply_phase_failure_typed(
     let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode), None)?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
-    runtime.set_status(RuntimeStatus::Failed);
-    runtime.current_phase = Some(phase_mode.to_string());
-    runtime.last_error = Some(reason.to_string());
-    if reason.starts_with("E903:") {
-        runtime.set_last_error_details("E903", "precondition", reason);
-        runtime.completion_kind = Some("precondition_unmet".into());
-        runtime.unmet_preconditions = vec![reason.to_string()];
-    }
+    super::phase_failure::record(runtime, phase_mode, reason);
     runtime.pid = None;
     task.touch_state_changed(now);
     Ok(())
@@ -1266,7 +1261,10 @@ fn apply_job_completion_typed(
         is_healthy_worktree,
         now,
     );
-    task.task_runtime.result_explanation = input.result_explanation.clone();
+    task.task_runtime.result_explanation = input
+        .result_explanation
+        .clone()
+        .filter(|v| crate::coordinator::result_protocol::valid_explanation(v));
     task.task_runtime.unmet_preconditions = input.unmet_preconditions.clone();
     apply_state_transitions(task, &strategy, now)
 }

@@ -24,6 +24,10 @@ pub struct CoordinatorRunSummary {
     pub headline: String,
     pub cause: String,
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_delivery: Option<crate::coordinator::decisions::DiagnosticDelivery>,
     pub error_code: Option<String>,
     pub occurred_at: String,
     pub next_action: String,
@@ -56,7 +60,9 @@ pub fn load_latest_run_summary(
         .and_then(task_error_message)
         .or_else(|| latest.stop_reason.clone())
         .unwrap_or_else(|| default_cause(&latest.status).to_string());
-    let error_code = blocked_task.and_then(|task| task.task_runtime.last_error_code.clone());
+    let error_code = blocked_task
+        .and_then(crate::coordinator::phase_diagnostics::effective_code)
+        .map(str::to_owned);
     let unmet_preconditions = blocked_task
         .map(|task| task.task_runtime.unmet_preconditions.clone())
         .unwrap_or_default();
@@ -83,6 +89,10 @@ pub fn load_latest_run_summary(
         headline,
         cause,
         task_id,
+        phase: blocked_task.and_then(|t| t.task_runtime.current_phase.clone()),
+        diagnostic_delivery: blocked_task
+            .and_then(|t| t.task_runtime.extra.get("diagnostic_delivery"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         error_code,
         occurred_at,
         next_action,
@@ -203,11 +213,12 @@ fn severity_for(
 
 fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: usize) -> String {
     if let Some(task) = blocked {
-        let code = task
-            .task_runtime
-            .last_error_code
-            .as_deref()
-            .unwrap_or("unknown error");
+        if task.task_runtime.extra.contains_key("diagnostic_delivery") {
+            return format!("Diagnostic report complete for {}; external verification pending; feature acceptance withheld.",task.id);
+        }
+
+        let code =
+            crate::coordinator::phase_diagnostics::effective_code(task).unwrap_or("unknown error");
         if code == "E903" || !task.task_runtime.unmet_preconditions.is_empty() {
             // Runs recorded before the structured list existed carry no
             // items: say "a precondition" rather than inventing a count.
@@ -241,6 +252,10 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
+        if task.task_runtime.extra.contains_key("diagnostic_delivery") {
+            return "Open Decisions: independently verify the selected assistance, or explicitly reconcile that selection. Then retry the retained review. An unchanged restart or a diagnostic report cannot supply external evidence or authorize release.".into();
+        }
+
         let out_of_scope = out_of_scope_fix_paths(task);
         if !out_of_scope.is_empty() {
             return format!(

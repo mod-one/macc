@@ -129,6 +129,8 @@ export interface ApiCoordinatorRunHistoryItem {
 }
 
 export interface ApiCoordinatorRunSummary {
+  phase?: string | null;
+  diagnostic_delivery?: { report_path: string; report_digest: string; completed: boolean; feature_accepted: boolean; release_authorized: boolean; unverified_decisions: string[] } | null;
   run_id: string;
   status: string;
   severity: 'info' | 'success' | 'warning' | 'error';

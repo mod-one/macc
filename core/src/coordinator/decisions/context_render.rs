@@ -86,6 +86,10 @@ impl ContextPackage {
             self.context_digest
         ));
         if self.phase == "review" {
+            if self.schema_version >= 4 {
+                out.push_str("For verification tasks whose explicit execution contract permits diagnostic completion separately from acceptance, independently verify their committed task-owned JSON report. If its task matches, verdict is changes_requested, featureAccepted=false and releaseAuthorized=false, you may print MACC_DIAGNOSTIC_RESULT: {\"report_path\":\"relative/task-owned/report.json\",\"report_digest\":\"sha256:exact-file-byte-hash\",\"completed\":true,\"feature_accepted\":false,\"release_authorized\":false}. This records report delivery only; all decision compliance checks remain mandatory. An assist intervention still requires independent verification or an explicit governed revision; never silently select defer. Missing or changed artifacts do not qualify.\n");
+            }
+
             out.push_str("Independently verify each binding against artifacts/tests. Print MACC_DECISION_COMPLIANCE: {\"decision-id\":{\"status\":\"pass|fail|needs_human_review\",\"evidence\":\"concrete artifacts/commands/results\"}}. A receipt/performer claim is not compliance evidence.\n");
         }
         sections.push(("trailer", out));

@@ -2,6 +2,7 @@
 mod activity;
 mod checkpoint_recovery;
 mod decision_budget_recovery;
+mod external_verification;
 mod policy;
 mod product_findings;
 mod prompt;

@@ -128,6 +128,7 @@ if [[ ! -f "$evidence_helper" ]]; then
   evidence_helper="${worktree}/.macc/automation/completion_evidence.sh"
 fi
 source "$evidence_helper"
+source "$(dirname "$evidence_helper")/result_protocol.sh"
 
 tool_json="${worktree}/.macc/tool.json"
 worktree_meta="${worktree}/.macc/worktree.json"
@@ -724,6 +725,7 @@ CONT
 }
 
 build_prompt() {
+  printf 'MACC_PROMPT_BEGIN: instructions-only\n'
   local task_json="$1"
   local task_id="$2"
   local task_title="$3"
@@ -775,7 +777,7 @@ PROMPT
   if [[ -n "${MACC_DECISION_CONTEXT_FILE:-}" ]]; then
     "${MACC_DECISION_CLI:-macc}" --cwd "$MACC_DECISION_ROOT" decisions context --render | jq -er '.rendered' || return 1
   fi
-  printf '\n%s\n' "$prompt_closing_line"
+  printf '\n%s\nMACC_PROMPT_END: instructions-only\n' "$prompt_closing_line"
 }
 
 # True when the task JSON declares `gate.kind: human_approval`.
@@ -787,7 +789,7 @@ is_human_approval_gate() {
 extract_task_result_marker() {
   local output_file="$1"
   local raw=""
-  raw="$(grep -E 'MACC_TASK_RESULT:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT:[[:space:]]*//')"
+  raw="$(terminal_result_lines "$output_file" | grep -E '^MACC_TASK_RESULT:' | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT:[[:space:]]*//')"
   raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' '_' | tr -d '\r' | xargs)"
   case "$raw" in
     success_with_changes) printf '%s' "success_with_changes" ;;
@@ -807,14 +809,14 @@ extract_task_result_exp() {
   # `…a brief "MACC_TASK_RESULT_EXP:" line.` mid-sentence; when the tool then
   # omits its own explanation, an unanchored match would report `" line.` as
   # the explanation instead of the explicit missing-explanation placeholder.
-  raw="$(grep -E '^[[:space:]]*MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^[[:space:]]*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
-  printf '%s' "$raw" | tr -d '\r' | xargs
+  raw="$(terminal_result_lines "$output_file" | grep -E '^MACC_TASK_RESULT_EXP:' | tail -n 1 | sed -E 's/^[[:space:]]*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
+  printf '%s' "$raw" | tr -d '\r' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g'
 }
 
 extract_task_gate_verdict() {
   local output_file="$1"
   local raw=""
-  raw="$(grep -E 'MACC_TASK_GATE_VERDICT:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_GATE_VERDICT:[[:space:]]*//')"
+  raw="$(terminal_result_lines "$output_file" | grep -E '^MACC_TASK_GATE_VERDICT:' | tail -n 1 | sed -E 's/^.*MACC_TASK_GATE_VERDICT:[[:space:]]*//')"
   raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' '_' | tr -d '\r' | xargs)"
   case "$raw" in
     accepted|rejected|pending) printf '%s' "$raw" ;;
@@ -832,7 +834,7 @@ extract_task_preconditions() {
   # mid-sentence. An unanchored match turned that instruction into a bogus
   # first "condition" shown to the operator. A placeholder value (`<…>`) is
   # rejected for the same reason.
-  grep -E '^[[:space:]]*MACC_TASK_PRECONDITION:' "$output_file" \
+  terminal_result_lines "$output_file" | grep -E '^MACC_TASK_PRECONDITION:' \
     | sed -E 's/^[[:space:]]*MACC_TASK_PRECONDITION:[[:space:]]*//' \
     | tr -d '\r' \
     | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \

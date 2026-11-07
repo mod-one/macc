@@ -992,6 +992,7 @@ pub fn raw_event_to_runtime_event(
 }
 
 pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
+    let output = super::result_protocol::projection(output);
     for line in output.lines().rev() {
         let trimmed = line.trim();
         if let Some(raw) = trimmed.strip_prefix("REVIEW_VERDICT:") {
@@ -1543,6 +1544,7 @@ fn read_completion_details_from_worktree_log(
 ) -> Option<CompletionDetails> {
     let log_path = performer_task_log_path(worktree_path, task_id);
     let raw = std::fs::read_to_string(log_path).ok()?;
+    let raw = super::result_protocol::completion_projection(&raw);
     let mut result_kind = None;
     let mut message = None;
     let mut result_explanation = None;
@@ -2081,7 +2083,7 @@ pub fn cleanup_merged_local_branch(
     branch: &str,
     base: &str,
 ) -> Result<BranchCleanupResult> {
-    if branch.is_empty() || branch == base {
+    if branch.is_empty() || branch == base || branch == "HEAD" || branch == "(detached)" {
         return Ok(BranchCleanupResult::Skipped {
             reason: "empty_or_base_branch".to_string(),
         });
@@ -2476,3 +2478,7 @@ mod precondition_log_fallback_tests {
         assert!(details.unmet_preconditions.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_result_tests.rs"]
+mod runtime_result_tests;

@@ -267,6 +267,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             )));
         }
         let worktree = std::path::PathBuf::from(worktree_path);
+        let review_head_before = if mode == "review" {
+            Some(crate::git::head_commit(&worktree)?)
+        } else {
+            None
+        };
         let tool_json = worktree.join(".macc").join("tool.json");
         // Ensure tool.json exists and matches the phase tool.  When the
         // coordinator falls back to a different tool after quota exhaustion,
@@ -331,6 +336,9 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             action: "create coordinator phase prompt directory".into(),
             source: e,
         })?;
+        let prompt = format!(
+            "MACC_PROMPT_BEGIN: instructions-only\n{prompt}\nMACC_PROMPT_END: instructions-only\n"
+        );
         let prompt_path = prompt_dir.join(format!(
             "coordinator-phase-{}-{}.prompt.txt",
             mode,
@@ -511,6 +519,27 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         &combined_output,
                         &policy,
                     ) {
+                        if error.to_string().contains("DM_COMPLIANCE:") {
+                            let diagnostic = store.diagnostic_delivery(
+                                context,
+                                &serde_json::to_value(task)
+                                    .map_err(|e| crate::MaccError::Validation(e.to_string()))?,
+                                &worktree,
+                                review_head_before.as_deref().unwrap_or_default(),
+                                &combined_output,
+                            );
+                            let diagnostic = match diagnostic {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    return Ok(Err(format!(
+                                        "E103: Invalid diagnostic delivery: {error}"
+                                    )))
+                                }
+                            };
+                            if diagnostic.is_some() {
+                                return Ok(Err("E903: DM_EXTERNAL_VERIFICATION: Native diagnostic report delivered; independent intervention verification is pending".into()));
+                            }
+                        }
                         return Ok(Err(error.to_string()));
                     }
                 }

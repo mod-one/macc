@@ -901,6 +901,12 @@ pub async fn advance_tasks_native(
                                     Some(&reason),
                                     &now,
                                 )?;
+                                super::diagnostic_delivery::attach(
+                                    repo_root,
+                                    &mut registry,
+                                    &task_id,
+                                    &reason,
+                                )?;
                             }
                         }
                     }

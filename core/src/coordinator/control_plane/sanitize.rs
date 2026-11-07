@@ -35,9 +35,7 @@ pub(super) async fn prepare_clean_worktree(
     // The worktree is moved onto the base commit by the `reset --hard
     // <base_branch>` below, after the fetch; detaching here only needs to get
     // HEAD off whatever branch it held.
-    if !crate::git::checkout_async(worktree_path, base_branch, options.tag_abandoned).await?
-        && !crate::git::checkout_detach_async(worktree_path).await?
-    {
+    if !crate::git::checkout_detach_async(worktree_path).await? {
         return Ok(Some("checkout_base_branch"));
     }
     if options.fetch_remote {
@@ -47,7 +45,7 @@ pub(super) async fn prepare_clean_worktree(
                 worktree_path.display(),
                 base_branch
             );
-        } else if !crate::git::fetch_async(worktree_path, "origin").await? {
+        } else if !crate::git::fetch_housekeeping(worktree_path, "origin").await? {
             if options.fail_on_fetch_error {
                 return Ok(Some("fetch_origin"));
             }

@@ -408,6 +408,8 @@ pub struct ContextPackage {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_delivery: Option<super::DiagnosticDelivery>,
     pub context_digest: String,
     pub prompt_digest: String,
     pub issued_at: String,

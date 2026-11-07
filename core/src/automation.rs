@@ -1,6 +1,7 @@
 use crate::{MaccError, ProjectPaths, Result};
 use std::path::{Component, Path, PathBuf};
 
+const EMBEDDED_RESULT_PROTOCOL_SH: &str = include_str!("../../automat/result_protocol.sh");
 const EMBEDDED_COMPLETION_EVIDENCE_SH: &str = include_str!("../../automat/completion_evidence.sh");
 const EMBEDDED_PERFORMER_SH: &str = include_str!("../../automat/performer.sh");
 const EMBEDDED_COORDINATOR_SH: &str = include_str!("../../automat/coordinator.sh");
@@ -26,6 +27,10 @@ pub fn ensure_embedded_automation_scripts(paths: &ProjectPaths) -> Result<Vec<Pa
             action: "create automation hooks directory".into(),
             source: e,
         })?;
+    }
+    let protocol_path = paths.automation_dir().join("result_protocol.sh");
+    if write_executable_if_changed(&protocol_path, EMBEDDED_RESULT_PROTOCOL_SH)? {
+        created.push(protocol_path);
     }
     let evidence_path = paths.automation_dir().join("completion_evidence.sh");
     if write_executable_if_changed(&evidence_path, EMBEDDED_COMPLETION_EVIDENCE_SH)? {

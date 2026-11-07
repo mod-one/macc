@@ -83,6 +83,9 @@ session_resume_command="$(jq -r '.performer.session.resume.command // empty' "$t
 # Missing create capability means a normal fresh invocation, never guessed flags.
 session_create_command="$(jq -r '.performer.session.create.command // empty' "$tool_json")"
 session_id_strategy="$(jq -r '.performer.session.id_strategy // "discovered"' "$tool_json")"
+protocol_helper="${repo}/.macc/automation/result_protocol.sh"
+[[ -f "$protocol_helper" ]] || protocol_helper="$(dirname "${BASH_SOURCE[0]}")/../../automat/result_protocol.sh"
+if [[ -f "$protocol_helper" ]]; then source "$protocol_helper"; fi
 session_state_file="${repo}/.macc/state/tool-sessions.json"
 session_lock_dir="${session_state_file}.lock"
 session_lease_ttl="${SESSION_LEASE_TTL_SECONDS:-1800}"
@@ -513,8 +516,8 @@ run_default_call() {
 override_rc_for_success_marker() {
   local rc="$1"
   [[ "$rc" -eq 0 ]] && { echo 0; return; }
-  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes|precondition_unmet)' \
-      "$output_capture" 2>/dev/null; then
+  if declare -F terminal_result_lines >/dev/null && terminal_result_lines "$output_capture" | grep -qE '^MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes|precondition_unmet)' \
+      2>/dev/null; then
     echo 0
   else
     echo "$rc"

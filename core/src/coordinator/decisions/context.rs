@@ -291,7 +291,7 @@ impl Store {
             },
             graph_version: plan.graph_version,
             decision_epoch: plan.decision_epoch,
-            schema_version: 3,
+            schema_version: 4,
             plan_id: plan.id.clone(),
             task_id: task.into(),
             attempt_id: attempt.into(),
@@ -415,6 +415,7 @@ impl Store {
             ));
         }
         let receipt = ContextReceipt {
+            diagnostic_delivery: None,
             context_digest: context.context_digest.clone(),
             prompt_digest: digest(&prompt),
             issued_at: now(),
@@ -511,6 +512,8 @@ impl Store {
         policy: &Policy,
     ) -> crate::Result<ContextReceipt> {
         let context = self.read_context(plan, attempt, phase)?;
+        let projected_output = crate::coordinator::result_protocol::projection(output);
+        let output = projected_output.as_str();
         let raw: String = sql(self.db.query_row(
             "SELECT receipt FROM contexts WHERE plan_id=?1 AND attempt_id=?2 AND phase=?3",
             rusqlite::params![plan, attempt, phase],
@@ -522,6 +525,7 @@ impl Store {
                 .strip_prefix("MACC_DECISION_ACK:")
                 .is_some_and(|v| v.trim() == context.context_digest)
         });
+        receipt.diagnostic_delivery = None;
         receipt.compliance.clear();
         receipt.reviewed_commit = None;
         let mut verification_error = if !receipt.acknowledged {
@@ -575,7 +579,7 @@ impl Store {
                     if verification_error.is_none() {
                         receipt.completion_status = "compliance_failed".into();
                         verification_error = Some(format!(
-                            "Decision {} has no passing independent compliance evidence",
+                            "DM_COMPLIANCE: Decision {} has no passing independent compliance evidence",
                             binding.id
                         ));
                     }

@@ -38,6 +38,11 @@ pub(super) async fn intervene(
         )));
     }
     stop_orphan_jobs(&report.incident).await?;
+    if let Some(diagnosis) = super::external_verification::diagnosis(&report.incident) {
+        report.detail = diagnosis.summary.clone();
+        report.diagnosis = Some(diagnosis);
+        return Err(MaccError::Validation("DM_EXTERNAL_VERIFICATION: diagnostic report retained; provide and independently verify the selected assistance, or explicitly reconcile the decision. Source edits and an unchanged restart cannot satisfy it.".into()));
+    }
     let progress = super::report::Progress { paths, config, dir };
     config.validate()?;
     // The engine stopped while every incident task was between phases: no
