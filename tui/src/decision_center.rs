@@ -50,6 +50,8 @@ pub struct Center {
     feedback: bool,
     show_help: bool,
     submitting: bool,
+    answer_in_flight: Option<(String, u64)>,
+    auto_after: Option<Instant>,
     focus: usize,
     expanded: bool,
     advanced_fields: bool,
@@ -148,6 +150,7 @@ impl Center {
         if let Some(rx) = &self.rx {
             if let Ok(result) = rx.try_recv() {
                 self.rx = None;
+                let sent_answer = self.answer_in_flight.take();
                 match result {
                     Ok(value) => {
                         if let Some(contexts) = value.get("inspected_contexts") {
@@ -161,6 +164,9 @@ impl Center {
                             .get("selected_decision_id")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                        let recorded_by_action = selected.as_ref().is_some_and(|id| {
+                            sent_answer.as_ref().is_some_and(|(target, _)| id == target)
+                        });
                         self.snapshot = Some(value);
                         if let Some(id) = selected {
                             self.current = self.list().into_iter().find(|d| d.id == id);
@@ -174,6 +180,22 @@ impl Center {
                                 }
                             }
                             self.message=notice.unwrap_or_else(||"Decision recorded. Context delivery and compliance are tracked independently.".into());
+                            if recorded_by_action
+                                && sent_answer.as_ref().is_some_and(|(id, version)| {
+                                    self.list().iter().any(|d| {
+                                        d.id == *id
+                                            && d.version == *version
+                                            && d.status != "pending_human"
+                                            && d.resolution.is_some()
+                                    })
+                                })
+                            {
+                                self.open = false;
+                                self.quick_menu = false;
+                                self.actions.open = false;
+                                self.auto_after = Some(Instant::now() + Duration::from_secs(1));
+                                self.message = "Response sent.".into();
+                            }
                         }
                     }
                     Err(error) => self.message = error,
@@ -206,13 +228,14 @@ impl Center {
             }
             return;
         }
-        if !self.open && !busy {
+        if !self.open && !busy && self.auto_after.is_none_or(|until| Instant::now() >= until) {
             if let Some(next) = self
                 .list()
                 .into_iter()
                 .find(|d| d.status == "pending_human" && !self.deferred.contains(&Self::key(d)))
             {
                 self.current = Some(next);
+                self.message.clear();
                 self.open = true;
                 self.manual = false;
                 self.scroll = 0;
@@ -417,19 +440,7 @@ impl Center {
                     artifacts: draft.artifacts.clone(),
                     effects: draft.effects,
                     patch: None,
-                    text: if draft.text.trim().is_empty() && current.request.kind == "intervention"
-                    {
-                        draft.fields.get("result").cloned().unwrap_or_default()
-                    } else if draft.text.trim().is_empty() {
-                        current
-                            .request
-                            .options
-                            .get(draft.option.wrapping_sub(1))
-                            .map(|o| o.label.clone())
-                            .unwrap_or_default()
-                    } else {
-                        draft.text.clone()
-                    },
+                    text: response_text(&current.request, draft),
                     option: current
                         .request
                         .options
@@ -515,15 +526,7 @@ impl Center {
                     .option
                     .checked_sub(1)
                     .and_then(|i| current.request.options.get(i));
-                let text = if draft.text.trim().is_empty() {
-                    if current.request.kind == "intervention" {
-                        draft.fields.get("result").cloned().unwrap_or_default()
-                    } else {
-                        option.map(|o| o.label.clone()).unwrap_or_default()
-                    }
-                } else {
-                    draft.text.clone()
-                };
+                let text = response_text(&current.request, draft);
                 if text.trim().is_empty() {
                     self.message = "Choose an option with Tab or enter an answer".into();
                     return None;
@@ -551,6 +554,13 @@ impl Center {
             self.message = "An action is already being recorded. Your draft is kept.".into();
             return;
         }
+        self.answer_in_flight = match &action {
+            Action::Answer { id, version, .. } => Some((id.clone(), *version)),
+            Action::Approval { apply: true, .. } => {
+                self.current.as_ref().map(|d| (d.id.clone(), d.version))
+            }
+            _ => None,
+        };
         // Replace an obsolete read-only poll instead of losing the user's Send.
         // The native mutation still checks the exact request version and authority.
         self.rx = None;
@@ -1060,4 +1070,58 @@ fn condition_fields(
         source_path,
         source_digest,
     }])
+}
+
+// Render only explicitly entered values; no model invocation or inferred action.
+fn response_text(request: &dm::Request, draft: &Draft) -> String {
+    if !draft.text.trim().is_empty() {
+        return draft.text.clone();
+    }
+    if request.kind == "intervention" {
+        return draft.fields.get("result").cloned().unwrap_or_default();
+    }
+    if let Some(option) = draft
+        .option
+        .checked_sub(1)
+        .and_then(|i| request.options.get(i))
+    {
+        return option.label.clone();
+    }
+    if matches!(request.kind.as_str(), "approval" | "authorization") {
+        return String::new();
+    }
+    let chosen = request
+        .response_fields
+        .iter()
+        .filter_map(|f| {
+            draft
+                .fields
+                .get(&f.id)
+                .filter(|v| !f.choices.is_empty() && f.choices.contains(v))
+                .map(|v| (f.label.as_str(), v.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if chosen.len() == 1 {
+        chosen[0].1.into()
+    } else {
+        chosen
+            .iter()
+            .map(|(label, value)| format!("{label}: {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+fn compact_question(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= 200 {
+        return normalized;
+    }
+    let prefix = normalized.chars().take(197).collect::<String>();
+    format!(
+        "{}…",
+        prefix
+            .rsplit_once(' ')
+            .map(|(head, _)| head)
+            .unwrap_or(&prefix)
+    )
 }

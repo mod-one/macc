@@ -82,38 +82,50 @@ impl Center {
             if d.status == "pending_human"
                 && self.policy().human_question_min_risk != dm::Consultation::NeverAsk
             {
-                // Put confirmation and actual results before the optional free-form note.
                 let fields = self.form_fields();
-                let completed_intervention = d.request.kind == "intervention"
-                    && self
-                        .drafts
-                        .get(&Self::key(d))
-                        .is_none_or(|draft| draft.outcome == dm::AnswerOutcome::Answer);
+                let draft = self.drafts.get(&Self::key(d)).cloned().unwrap_or_default();
+                let completed_intervention =
+                    d.request.kind == "intervention" && draft.outcome == dm::AnswerOutcome::Answer;
+                let choice_fields = d.request.response_fields.iter().any(|f| {
+                    !f.choices.is_empty()
+                        && (f.required || self.advanced_fields || draft.fields.contains_key(&f.id))
+                }) && !matches!(
+                    d.request.kind.as_str(),
+                    "intervention" | "approval" | "authorization"
+                );
                 if completed_intervention {
                     for id in ["performed", "result"] {
                         if let Some(i) = fields.iter().position(|f| f.id == id) {
                             controls.push(Control::Field(i));
                         }
                     }
-                }
-                if !d.request.options.is_empty() {
+                } else if !d.request.options.is_empty() {
                     controls.push(Control::Option);
                 }
-                if !completed_intervention {
+                if !completed_intervention
+                    && ((!choice_fields && d.request.options.is_empty())
+                        || !d.request.options.is_empty() && draft.option == 0
+                        || self.advanced_fields
+                        || !draft.text.is_empty())
+                {
                     controls.push(Control::Note);
+                }
+                if completed_intervention && !d.request.options.is_empty() {
+                    controls.push(Control::Option);
                 }
                 controls.extend(
                     fields
                         .iter()
                         .enumerate()
                         .filter(|(_, f)| {
-                            (self.advanced_fields || !f.id.starts_with("__condition_"))
+                            (f.required || self.advanced_fields || draft.fields.contains_key(&f.id))
+                                && (self.advanced_fields || !f.id.starts_with("__condition_"))
                                 && !(d.request.kind == "intervention"
                                     && matches!(f.id.as_str(), "performed" | "result"))
                         })
                         .map(|(i, _)| Control::Field(i)),
                 );
-                if completed_intervention {
+                if completed_intervention && (self.advanced_fields || !draft.text.is_empty()) {
                     controls.push(Control::Note);
                 }
             }
@@ -121,7 +133,7 @@ impl Center {
         if self.feedback
             || controls
                 .iter()
-                .any(|c| matches!(c, Control::Note | Control::Field(_)))
+                .any(|c| matches!(c, Control::Note | Control::Field(_) | Control::Option))
         {
             controls.push(Control::Send);
         }
@@ -217,13 +229,7 @@ impl Center {
                 return None;
             }
         }
-        let has_text = !draft.text.trim().is_empty()
-            || draft.option > 0
-            || current.request.kind == "intervention"
-                && draft
-                    .fields
-                    .get("result")
-                    .is_some_and(|v| !v.trim().is_empty());
+        let has_text = !response_text(&current.request, &draft).trim().is_empty();
         if !has_text {
             self.message =
                 "Write an answer or choose an option before sending. Your draft is kept.".into();
@@ -392,6 +398,26 @@ impl Center {
                 self.menu_index = 0;
             }
             Control::Option => {
+                if let KeyCode::Char(c @ '0'..='9') = key {
+                    let choice = (c as u8 - b'0') as usize;
+                    if self
+                        .current
+                        .as_ref()
+                        .is_some_and(|d| choice <= d.request.options.len())
+                    {
+                        let d = self.current.as_ref().unwrap();
+                        let draft = self.drafts.entry(Self::key(d)).or_default();
+                        draft.option = choice;
+                        draft.apply_patch = false;
+                        self.focus_control(if choice == 0 {
+                            Control::Note
+                        } else {
+                            self.controls().get(1).copied().unwrap_or(Control::Send)
+                        });
+                        self.save_drafts();
+                        return None;
+                    }
+                }
                 if key == KeyCode::Enter {
                     self.focus = (self.focus + 1) % controls.len();
                     return None;
@@ -436,6 +462,14 @@ impl Center {
                     draft.active_field = i + 1;
                     let value = draft.fields.entry(field.id.clone()).or_default();
                     if !field.choices.is_empty() {
+                        if let KeyCode::Char(c @ '1'..='9') = key {
+                            if let Some(choice) = field.choices.get((c as u8 - b'1') as usize) {
+                                *value = choice.clone();
+                                self.focus = (self.focus + 1) % self.controls().len();
+                                self.save_drafts();
+                                return None;
+                            }
+                        }
                         if key == KeyCode::Enter && !value.is_empty() {
                             self.focus = (self.focus + 1) % controls.len();
                             return None;

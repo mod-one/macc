@@ -15,6 +15,7 @@ function describePatch(value:unknown):string[]{
  return operations.map((value:unknown)=>{const o=value as {op?:string;task_id?:string;task?:{id?:string;title?:string};depends_on?:string;replacement_task_id?:string;decision_id?:string;changes?:Record<string,unknown>};switch(o.op){case 'add_task':return `Add ${o.task?.id}: ${o.task?.title??'new task'}`;case 'update_task':return `Update ${o.task_id}: ${Object.keys(o.changes??{}).join(', ')}`;case 'add_dependency':return `${o.task_id} must wait for ${o.depends_on}`;case 'remove_dependency':return `Remove ${o.task_id}'s dependency on ${o.depends_on}`;case 'disable_task':return `Disable ${o.task_id}; preserve its retained work`;case 'supersede_task':return `Replace ${o.task_id} with ${o.replacement_task_id}; preserve history`;case 'bind_decision':return `Apply decision ${o.decision_id} to ${o.task_id}`;default:return o.op??'Unknown graph operation';}});
 }
 const parseAttestation=(value:string):unknown=>{try{return JSON.parse(value);}catch{return value;}};
+const compactQuestion=(value:string)=>{const clean=value.replace(/\s+/g,' ').trim();const chars=Array.from(clean);return chars.length<=200?clean:chars.slice(0,197).join('').replace(/\s+\S*$/,'')+'…';};
 const keyOf = (d: Decision) => `${d.id}@${d.version}`;
 function readDrafts(): Record<string, Draft> {
   try { const value: unknown = JSON.parse(sessionStorage.getItem('macc.decisionDrafts') ?? '{}'); if (!value || typeof value !== 'object' || Array.isArray(value)) return {}; return Object.fromEntries(Object.entries(value).filter(([,v]) => v && typeof v.text === 'string' && typeof v.option === 'string' && typeof v.advisory === 'boolean' && (v.applyPatch === undefined || typeof v.applyPatch === 'boolean') && (v.fields === undefined || (v.fields && typeof v.fields === 'object' && !Array.isArray(v.fields) && Object.values(v.fields).every(f=>typeof f==='string'))) && (v.outcome===undefined || ['answer','reject','request_changes','investigate'].includes(v.outcome)) && (v.effects===undefined || ['auto','no_graph_change','replan'].includes(v.effects)) && (v.conditions===undefined || validApprovalConditions(v.conditions)) && (v.artifacts===undefined || Array.isArray(v.artifacts)&&v.artifacts.every((a:unknown)=>a&&typeof a==='object'&&typeof (a as ArtifactRef).id==='string'&&typeof (a as ArtifactRef).digest==='string')))); } catch { return {}; }
@@ -29,6 +30,7 @@ export function DecisionCenter() {
   const [selected, setSelected] = React.useState<string | null>(null);
   const [viewed, setViewed] = React.useState<Decision | null>(null);
   const autoPresented = React.useRef(false);
+  const autoAfter = React.useRef(0);
   const [drafts, setDrafts] = React.useState<Record<string, Draft>>(readDrafts);
   const [deferred, setDeferred] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState(false);
@@ -54,8 +56,9 @@ export function DecisionCenter() {
   const neverAsk = snapshot?.policy.human_question_min_risk === 'never_ask';
   React.useEffect(() => {
     if (neverAsk) { const authoritative=snapshot?.decisions.find(d=>d.id===viewed?.id); if(autoPresented.current&&authoritative&&authoritative.status!=='pending_human'){setOpen(false);autoPresented.current=false;} return; }
+    if (Date.now() < autoAfter.current) return;
     const next = pending.find(d => !deferred.has(keyOf(d)));
-    if (!open && next && !inputBusy()) { setSelected(next.id); setViewed(next); autoPresented.current = true; setOpen(true); }
+    if (!open && next && !inputBusy()) { setSelected(next.id); setViewed(next); setMessage(''); autoPresented.current = true; setOpen(true); }
   }, [snapshot, deferred]); // A polling update must not replace an answer being typed.
   const fresh = snapshot?.decisions.find(d => d.id === selected);
   const current = open && viewed ? viewed : fresh ?? pending[0] ?? snapshot?.decisions.at(-1);
@@ -78,6 +81,10 @@ export function DecisionCenter() {
       const data=await getDecisions();setSnapshot(data);
       const object=result&&typeof result==='object'?result as Record<string,unknown>:null;const applied=object?.result&&typeof object.result==='object'?object.result as Record<string,unknown>:object;
       if(typeof object?.message==='string'&&typeof object?.status==='string')setMessage(`${object.message} (${object.status})`);
+      const submittedId=body.action==='answer'?body.id:body.action==='approval_apply'?applied?.id:null;
+      const recorded=applied?.request && applied?.resolution && data.decisions.find(d=>d.id===submittedId && d.version===applied.version && d.status!=='pending_human' && d.resolution && (body.action==='approval_apply'||d.version===body.version));
+      if(recorded){ autoAfter.current=Date.now()+1000;autoPresented.current=false;setOpen(false);setMessage('Response sent.'); }
+
       if(applied?.request&&typeof applied.id==='string'){setSelected(applied.id);setViewed(data.decisions.find(d=>d.id===applied.id)??null);}else if(body.action==='answer'){setViewed(data.decisions.find(d=>d.id===body.id)??null);}
     }catch(e){setError(String(e));}finally{setBusy(false);}
 
@@ -87,14 +94,15 @@ export function DecisionCenter() {
   const close = () => { if (current?.status === 'pending_human') setDeferred(old => new Set([...old, keyOf(current)])); setOpen(false); };
   return <Dialog.Root open={open} onOpenChange={value => value ? setOpen(true) : close()}>
     <button type="button" onClick={() => { const next = pending[0] ?? snapshot?.decisions.at(-1); setSelected(next?.id ?? null); setViewed(next ?? null); autoPresented.current = false; setOpen(true); }} aria-label={`Decisions, ${pending.length} pending`} className="rounded border px-2 py-1 text-xs">Decisions {pending.length > 0 ? `(${pending.length})` : ''}</button>
+    {!open && message==='Response sent.' && <span role="status" className="ml-2 text-xs">Response sent.</span>}
     <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" /><Dialog.Content onOpenAutoFocus={event => {
       const target = document.getElementById('decision-response')?.querySelector<HTMLElement>('input[type="radio"], [aria-required="true"], textarea');
       if (target) {event.preventDefault(); target.focus({preventScroll:true});}
     }} className="fixed left-1/2 top-1/2 z-50 flex max-h-[94dvh] w-[96vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-primary)] p-4 text-[var(--text-primary)] shadow-xl">
       <header className="max-h-[28dvh] shrink-0 overflow-y-auto border-b border-[var(--border)] pb-3">
-        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-[var(--text-secondary)]">{current?.request.kind === 'intervention' ? 'Action needed' : 'Performer question'}{pending.length > 0 ? ` · ${pending.length} pending` : ''}</p>
-        <Dialog.Title className="text-lg font-semibold">{current?.request.question ?? 'Decisions and performer questions'}</Dialog.Title>
-        <Dialog.Description className="mt-1 text-sm text-[var(--text-secondary)]">{current ? `Task ${current.request.task_id}. Complete the requested details, then send your response. You can decide later without losing your draft.` : 'Questions, recorded responses and project directions.'}</Dialog.Description>
+        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-[var(--text-secondary)]">{current && current.status!=='pending_human' ? 'Recorded response' : current?.request.kind === 'intervention' ? 'Action needed' : 'Performer question'}{pending.length > 0 ? ` · ${pending.length} pending` : ''}</p>
+        <Dialog.Title className="text-lg font-semibold">{current ? compactQuestion(current.request.question) : 'Decisions and performer questions'}</Dialog.Title>
+        <Dialog.Description className="mt-1 text-sm text-[var(--text-secondary)]">{current?.status==='pending_human' ? 'Choose an option or write your answer, then Send.' : 'Recorded responses and project directions.'}</Dialog.Description>
       </header>
       <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto break-words [overflow-wrap:anywhere] py-3">
         {(error || loadError) && <p role="alert" className="rounded-lg border border-[var(--error)] p-3 text-sm text-[var(--error)]">{error || loadError}</p>}
@@ -106,13 +114,13 @@ export function DecisionCenter() {
           {current && fresh && (current.version !== fresh.version || current.status !== fresh.status) && <p role="status">This request changed or was answered elsewhere. Your draft is preserved. <button type="button" onClick={() => {setViewed(fresh); setSelected(fresh.id); setMessage('');}} className="underline">Review latest request</button></p>}
           {neverAsk && <p role="status">{current?.status==='pending_human'?(autoPresented.current?'Full autonomy was requested. Waiting for its durable resolution before withdrawing this popup; your draft remains unsent.':'Full autonomy is active. The pending request is being reclassified; no answer is required.'):'Full autonomy is active. Choices are recorded below; no answer is required.'}</p>}
           {current && <section className="space-y-3">
-            <p className="text-xs text-[var(--text-secondary)]">{current.request.kind} · Risk: {current.effective_risk} · Task: {current.request.task_id} · Affects: {current.request.affected_tasks.join(', ')} · Version {current.version}</p>
+            {current.request.operation_spec && <section><h4>Exact external operation requested</h4><p>{current.request.operation_spec.adapter} → {current.request.operation_spec.target}</p><p>Reviewed commit: {current.request.operation_spec.source_revision}</p><pre className="overflow-auto text-xs">{JSON.stringify(current.request.operation_spec.arguments,null,2)}</pre></section>}
+            {current.request.intervention && <p className="text-sm"><strong>Result to return:</strong> {compactQuestion(current.request.intervention.expected_result)}</p>}
+            <details className="rounded-lg border border-[var(--border)] p-3"><summary className="cursor-pointer text-sm font-medium">Full question, consequences and verification</summary><div className="mt-3 space-y-2 text-sm"><p className="whitespace-pre-wrap">{current.request.question}</p>            <p className="text-xs text-[var(--text-secondary)]">{current.request.kind} · Risk: {current.effective_risk} · Task: {current.request.task_id} · Affects: {current.request.affected_tasks.join(', ')} · Version {current.version}</p>
             {current.investigation && <p role="status">{current.investigation.diagnosis}{current.investigation.missing_sources?.length ? ` Missing sources: ${current.investigation.missing_sources.join(', ')}` : ''}</p>}
             {current.policy_reason && <p className="text-sm">Routing: {current.policy_reason}</p>}
-            {current.request.operation_spec && <section><h4>Exact external operation requested</h4><p>{current.request.operation_spec.adapter} → {current.request.operation_spec.target}</p><p>Reviewed commit: {current.request.operation_spec.source_revision}</p><pre className="overflow-auto text-xs">{JSON.stringify(current.request.operation_spec.arguments,null,2)}</pre></section>}
-            {current.request.intervention && <section className="space-y-2 rounded-lg border border-[var(--accent)] bg-[var(--bg-secondary)] p-3"><h3 className="text-sm font-semibold">What you need to do</h3><p className="whitespace-pre-wrap">{current.request.intervention.action}</p><p className="text-sm"><strong>Result to return:</strong> {current.request.intervention.expected_result}</p></section>}
-            <details className="rounded-lg border border-[var(--border)] p-3"><summary className="cursor-pointer text-sm font-medium">Context and verification details</summary><div className="mt-3 space-y-2 text-sm"><p className="whitespace-pre-wrap">{current.request.context}</p>{current.request.intervention && <><p>Unavailable capability: {current.request.intervention.inaccessible_reason}</p><p>{current.request.intervention.verification}</p></>}<p><strong>Recommendation:</strong> {current.request.recommendation}</p></div></details>
-            {!current.request.intervention && <p className="rounded-lg border border-[var(--border)] p-3 text-sm"><strong>Recommendation:</strong> {current.request.recommendation}</p>}
+<p className="whitespace-pre-wrap">{current.request.context}</p><ul>{current.request.options.map(option=><li key={option.id}><strong>{option.label}:</strong> {option.consequences.join('; ')}</li>)}</ul>{current.request.intervention && <><p>Action: {current.request.intervention.action}</p><p>Unavailable capability: {current.request.intervention.inaccessible_reason}</p><p>{current.request.intervention.verification}</p></>}<p><strong>Recommendation:</strong> {current.request.recommendation}</p></div></details>
+
             {!!(selectedPatch??current.request.proposed_patch) && <section><h4>Proposed graph changes — explicit acceptance required</h4><ul className="list-disc pl-5">{describePatch(selectedPatch??current.request.proposed_patch).map((line,i)=><li key={i}>{line}</li>)}</ul><details><summary>Exact patch data</summary><pre className="max-h-60 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(selectedPatch??current.request.proposed_patch,null,2)}</pre></details></section>}
             {current.resolution ? <section><h4>Recorded outcome</h4><p className="whitespace-pre-wrap">{current.resolution.text}</p><pre className="whitespace-pre-wrap text-sm">{current.resolution.fields?.result}</pre>{current.resolution.conditions?.map(c=><p key={c.id}>Required condition: {c.description} {c.task_id?` · Verification task ${c.task_id}`:''} {c.source_path?` · Evidence ${c.source_path} ${c.source_digest}`:''}</p>)}<p className="text-xs">{current.resolution.origin} · {current.resolution.actor} · {current.resolution.recorded_at}</p></section> : current.status === 'pending_human' && !neverAsk && <DecisionResponseForm key={keyOf(current)} current={current} snapshot={snapshot} draft={draft} update={updateDraft} busy={busy}
               stale={!fresh || fresh.version !== current.version || fresh.status !== 'pending_human'} selectedPatch={selectedPatch}
@@ -131,7 +139,7 @@ export function DecisionCenter() {
           </section>}
         </>}
         {snapshot && <details className="rounded-lg border border-[var(--border)] p-3"><summary className="cursor-pointer text-sm font-medium">All requests and decision management</summary><div className="mt-3 space-y-4">
-          <label>Request / decision<select className="block w-full rounded border bg-[var(--bg-primary)] p-2" value={current?.id ?? ''} onChange={e => { setSelected(e.target.value); setViewed(snapshot.decisions.find(d => d.id === e.target.value) ?? null); setMessage(''); }}><option value="" disabled>No decisions yet</option>{snapshot.decisions.map(d => <option key={d.id} value={d.id}>{d.status} · {d.request.task_id} · {d.request.question}</option>)}</select></label>        {snapshot && <section className="flex flex-wrap items-center gap-3 rounded border p-3">
+          <label>Request / decision<select disabled={busy} className="block w-full rounded border bg-[var(--bg-primary)] p-2" value={current?.id ?? ''} onChange={e => { setSelected(e.target.value); setViewed(snapshot.decisions.find(d => d.id === e.target.value) ?? null); setMessage(''); }}><option value="" disabled>No decisions yet</option>{snapshot.decisions.map(d => <option key={d.id} value={d.id}>{d.status} · {d.request.task_id} · {d.request.question}</option>)}</select></label>        {snapshot && <section className="flex flex-wrap items-center gap-3 rounded border p-3">
           <label><input type="checkbox" checked={snapshot.enabled} disabled={busy} onChange={e => void submit({action: 'configure', policy: {...snapshot.policy, enabled: e.target.checked}}, 'Decision policy saved.')} /> Enable durable decisions</label>
           <label>Autonomy <select value={snapshot.policy.human_question_min_risk} disabled={busy} onChange={e => void submit({action: 'configure', policy: {...snapshot.policy, human_question_min_risk: e.target.value as AutonomyMode}}, 'Autonomy policy saved; pending work will be re-evaluated.')} className="rounded border bg-[var(--bg-primary)] p-1">
             {(['low', 'medium', 'high', 'critical', 'never_ask'] as const).map(mode => <option key={mode} value={mode}>{mode === 'never_ask' ? 'Full autonomy — never ask' : `Ask from ${mode} risk`}</option>)}

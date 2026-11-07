@@ -91,7 +91,7 @@ fn actual_app_routes_modal_keys_and_draws_one_footer_without_function_keys() {
             crate::workspace_tests::text(&crate::workspace_tests::render(&state, width, height));
         assert!(rendered.contains("Esc"), "{rendered}");
         assert!(
-            rendered.contains("○ yes") && rendered.contains("○ no"),
+            rendered.contains("1 yes") && rendered.contains("2 no"),
             "choice values must stay visible on small terminals: {rendered}"
         );
         assert!(!rendered.contains("[F"), "{rendered}");
@@ -239,4 +239,78 @@ fn task_plan_patch_is_scrollable_and_requires_a_separate_explicit_acceptance() {
             ..
         })
     ));
+}
+
+#[test]
+fn numbered_choice_goes_straight_to_send_without_an_extra_note() {
+    let mut c = super::tests::center("high");
+    c.key_event(KeyCode::Char('1'));
+    assert!(c.controls()[c.focus] == Control::Send);
+    let Some(Action::Answer { text, option, .. }) = c.key_event(KeyCode::Enter) else {
+        panic!("choose then Send")
+    };
+    assert_eq!(text, "Keep");
+    assert_eq!(option.as_deref(), Some("keep"));
+}
+#[test]
+fn a_single_typed_yes_no_field_is_the_answer_not_a_second_free_text_question() {
+    let mut c = super::tests::center("high");
+    c.current.as_mut().unwrap().request.options.clear();
+    c.current.as_mut().unwrap().request.response_fields = vec![dm::ResponseField {
+        id: "ready".into(),
+        label: "Is access restored?".into(),
+        required: true,
+        multiline: false,
+        choices: vec!["yes".into(), "no".into()],
+    }];
+    c.key_event(KeyCode::Char('1'));
+    assert!(c.controls()[c.focus] == Control::Send);
+    let Some(Action::Answer { text, fields, .. }) = c.key_event(KeyCode::Enter) else {
+        panic!("yes is enough for a declared binary question")
+    };
+    assert_eq!(text, "yes");
+    assert_eq!(fields["ready"], "yes");
+}
+#[test]
+fn recorded_answer_closes_the_popup_but_failure_and_pending_approval_do_not() {
+    for outcome in ["resolved", "pending_human", "error", "approval_waiting"] {
+        let mut c = super::tests::center("high");
+        let mut fresh = c.current.clone().unwrap();
+        if matches!(outcome, "resolved" | "approval_waiting") {
+            fresh.status = "resolved".into();
+            fresh.resolution=Some(serde_json::from_value(json!({"text":"yes","selected_option_id":null,"actor":"operator","origin":"human_local_trust","policy_digest":"p","recorded_at":"2026-11-07T10:00:00Z"})).unwrap());
+        }
+        let (tx, rx) = mpsc::channel();
+        c.rx = Some(rx);
+        c.last = Some(Instant::now());
+        c.submitting = true;
+        c.answer_in_flight = Some(("q".into(), 1));
+        tx.send(if outcome == "error" {
+            Err("validation failed".into())
+        } else {
+            Ok(json!({"policy":c.policy(),"decisions":[fresh],"selected_decision_id":if outcome=="resolved" {Some("q")} else {None}}))
+        })
+        .unwrap();
+        c.tick(None, false);
+        assert_eq!(c.open, outcome != "resolved", "{outcome}");
+        if outcome == "resolved" {
+            c.tick(None, false);
+            assert!(!c.open);
+        }
+    }
+}
+#[test]
+fn recorded_history_does_not_show_pending_form_instructions_or_duplicate_action() {
+    let mut c = intervention();
+    let d = c.current.as_mut().unwrap();
+    d.status = "resolved".into();
+    d.resolution=Some(serde_json::from_value(json!({"text":"yes","selected_option_id":null,"actor":"operator","origin":"human_local_trust","policy_digest":"p","recorded_at":"2026-11-07T10:00:00Z"})).unwrap());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|f| c.draw(f)).unwrap();
+    let screen = crate::workspace_tests::text(terminal.backend().buffer());
+    assert!(!screen.contains("Action needed"));
+    assert!(!screen.contains("Required details"));
+    assert!(!screen.contains("Choose an option"));
+    assert!(!screen.contains("Confirm the action"));
+    assert!(screen.contains("Close"));
 }

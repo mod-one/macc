@@ -23,7 +23,7 @@ impl Center {
         let height = area
             .height
             .saturating_sub(if area.height > 12 { 2 } else { 0 })
-            .min(34);
+            .min(24);
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -35,6 +35,12 @@ impl Center {
             "More actions"
         } else if self.feedback {
             "Project direction"
+        } else if self
+            .current
+            .as_ref()
+            .is_some_and(|d| d.status != "pending_human")
+        {
+            "Recorded decision"
         } else if self
             .current
             .as_ref()
@@ -146,31 +152,32 @@ impl Center {
             }
         } else {
             if let Some(d) = &self.current {
-                summary.push_str(&format!("{}\n\n", d.request.question));
-                if let Some(action) = &d.request.intervention {
-                    summary.push_str(&format!(
-                        "Do this: {}\n\nResult to return: {}\n",
-                        action.action, action.expected_result
-                    ));
-                } else {
-                    summary.push_str(&format!("Recommendation: {}\n", d.request.recommendation));
-                }
-                let required = fields.iter().filter(|f| required(f)).collect::<Vec<_>>();
-                let completed = required
-                    .iter()
-                    .filter(|f| {
-                        draft
-                            .fields
-                            .get(&f.id)
-                            .is_some_and(|v| !v.trim().is_empty())
-                    })
-                    .count();
+                let pending = d.status == "pending_human";
                 summary.push_str(&format!(
-                    "\nTask {} · {} · Required details {completed}/{}\n",
-                    d.request.task_id,
-                    d.status,
-                    required.len()
+                    "{}\n",
+                    if self.expanded {
+                        d.request.question.clone()
+                    } else {
+                        compact_question(&d.request.question)
+                    }
                 ));
+                if self.expanded {
+                    if let Some(action) = &d.request.intervention {
+                        if action.action.trim() != d.request.question.trim() {
+                            summary.push_str(&format!("\nAction: {}\n", action.action));
+                        }
+                        summary
+                            .push_str(&format!("Result to return: {}\n", action.expected_result));
+                    }
+                    summary.push_str(&format!("\nTask {} · {}\n", d.request.task_id, d.status));
+                } else if pending {
+                    if let Some(action) = &d.request.intervention {
+                        summary.push_str(&format!(
+                            "\nResult: {}\n",
+                            compact_question(&action.expected_result)
+                        ));
+                    }
+                }
                 if let Some(operation) = &d.request.operation_spec {
                     summary.push_str(&format!(
                         "\nExact external operation requested:\n{}\n",
@@ -229,8 +236,6 @@ impl Center {
                             r.actor, r.origin, r.text
                         ));
                     }
-                } else if let Some(r) = &d.resolution {
-                    summary.push_str(&format!("\nRecorded response: {}\n", r.text));
                 }
             } else {
                 summary
@@ -271,13 +276,15 @@ impl Center {
                             editing = true;
                         } else {
                             editor = format!(
-                                "{}\n←/→ or Space to choose; Tab continues",
+                                "{}\n←/→ choose · Enter continues",
                                 field
                                     .choices
                                     .iter()
-                                    .map(|choice| format!(
-                                        "{} {choice}",
-                                        if *choice == value { "●" } else { "○" }
+                                    .enumerate()
+                                    .map(|(i, choice)| format!(
+                                        "{} {} {choice}",
+                                        if *choice == value { "●" } else { "○" },
+                                        i + 1
                                     ))
                                     .collect::<Vec<_>>()
                                     .join("   ")
@@ -286,7 +293,7 @@ impl Center {
                     }
                 }
                 Control::Option => {
-                    caption = "Choose an option · ↑/↓ selects · Tab continues".into();
+                    caption = "↑/↓ choose · Enter continues · 0: your own answer".into();
                     editor = "".into();
                     if let Some(d) = &self.current {
                         let labels = std::iter::once("Custom answer".to_owned())
@@ -310,74 +317,42 @@ impl Center {
                             .enumerate()
                             .skip(start)
                             .map(|(i, label)| {
-                                format!("{} {label}", if i == draft.option { "●" } else { "○" })
+                                format!(
+                                    "{} {i}. {label}",
+                                    if i == draft.option { "●" } else { "○" }
+                                )
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
                     }
                 }
                 _ => {
-                    caption = if self.submitting {
-                        "Recording response…"
-                    } else {
-                        "Review response · nothing is sent until Enter on Send"
-                    }
-                    .into();
-                    editor = format!(
-                        "Outcome: {:?}\n{}",
-                        draft.outcome,
-                        if draft.text.is_empty() {
-                            draft
-                                .fields
-                                .get("result")
-                                .map(String::as_str)
-                                .unwrap_or("Choose an option or complete the requested fields.")
-                        } else {
-                            &draft.text
-                        }
-                    );
-                }
-            }
-            if self
-                .current
-                .as_ref()
-                .is_some_and(|d| d.request.kind == "intervention")
-                && draft.outcome == dm::AnswerOutcome::Answer
-            {
-                summary.push_str("\nConfirm the action and supply the actual result. Do not paste credentials.\n");
-            }
-        }
-        if !self.quick_menu && !self.actions.open && !self.reviewing_patch && inner.height >= 18 {
-            if let Control::Field(i) = focus {
-                if let Some(field) = fields.get(i) {
-                    summary = format!(
-                        "{}{}\n\n{summary}",
-                        if required(field) {
-                            "Required detail: "
-                        } else {
-                            "Detail: "
-                        },
-                        field.label
-                    );
-                }
-            }
-        }
-        if !self.actions.open
-            && !self.quick_menu
-            && !self.reviewing_patch
-            && !self.expanded
-            && inner.height < 18
-        {
-            if let Some(d) = &self.current {
-                summary = format!(
-                    "{}\n{}",
-                    d.request.question,
-                    d.request
-                        .intervention
+                    if self
+                        .current
                         .as_ref()
-                        .map(|a| a.action.as_str())
-                        .unwrap_or(d.request.recommendation.as_str())
-                );
+                        .is_some_and(|d| d.status != "pending_human")
+                    {
+                        caption = "Recorded response".into();
+                        editor = self
+                            .current
+                            .as_ref()
+                            .and_then(|d| d.resolution.as_ref())
+                            .map(|r| r.text.clone())
+                            .unwrap_or_else(|| "Nothing to answer.".into());
+                    } else {
+                        caption = if self.submitting {
+                            "Sending…"
+                        } else {
+                            "Enter: Send and close · Shift+Tab: change response"
+                        }
+                        .into();
+                        editor = self
+                            .current
+                            .as_ref()
+                            .map(|d| response_text(&d.request, &draft))
+                            .unwrap_or_else(|| draft.text.clone());
+                    }
+                }
             }
         }
         let summary = Paragraph::new(summary).wrap(Wrap { trim: false });
@@ -463,7 +438,18 @@ impl Center {
         let mut buttons = Vec::new();
         for (control, label) in [
             (Control::Send, "Send"),
-            (Control::Later, "Later"),
+            (
+                Control::Later,
+                if self
+                    .current
+                    .as_ref()
+                    .is_some_and(|d| d.status != "pending_human")
+                {
+                    "Close"
+                } else {
+                    "Later"
+                },
+            ),
             (
                 Control::Details,
                 if self.expanded {
@@ -517,9 +503,13 @@ impl Center {
         } else {
             vec![
                 Line::from(buttons),
-                Line::from(
-                    "Tab / Shift+Tab: move   ↑↓: choose   Enter: edit / activate   Esc: later",
-                ),
+                Line::from(if focus == Control::Send {
+                    "Enter: SEND AND CLOSE · Shift+Tab: edit · Esc: later"
+                } else if matches!(focus, Control::Option | Control::Field(_)) {
+                    "↑↓ / numbers: choose · Enter: next · Tab: next field · Esc: later"
+                } else {
+                    "Tab: Send / next field · Enter: newline / button · Esc: later"
+                }),
                 Line::from("PgUp/PgDn: scroll details · your draft is kept"),
             ]
         };
