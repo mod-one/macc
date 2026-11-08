@@ -512,6 +512,9 @@ impl Store {
         policy: &Policy,
     ) -> crate::Result<ContextReceipt> {
         let context = self.read_context(plan, attempt, phase)?;
+        let raw_has_ack = output
+            .lines()
+            .any(|l| l.trim_start().starts_with("MACC_DECISION_ACK:"));
         let projected_output = crate::coordinator::result_protocol::projection(output);
         let output = projected_output.as_str();
         let raw: String = sql(self.db.query_row(
@@ -529,7 +532,18 @@ impl Store {
         receipt.compliance.clear();
         receipt.reviewed_commit = None;
         let mut verification_error = if !receipt.acknowledged {
-            Some("Missing exact MACC_DECISION_ACK; model acknowledgement is required, and is not proof of compliance".to_owned())
+            let projected_acks: Vec<_> = projected_output
+                .lines()
+                .filter_map(|l| l.strip_prefix("MACC_DECISION_ACK:"))
+                .collect();
+            let reason = if !projected_acks.is_empty() {
+                "DM_ACK_MISMATCH"
+            } else if raw_has_ack {
+                "DM_ACK_EXCLUDED"
+            } else {
+                "DM_ACK_ABSENT"
+            };
+            Some(format!("Missing exact MACC_DECISION_ACK ({reason}); model acknowledgement is required, and is not proof of compliance"))
         } else {
             None
         };

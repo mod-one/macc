@@ -465,8 +465,8 @@ pub fn diagnose_unschedulable_tasks(
                 id: task.id.clone(),
                 reason: blocked_task_reason(task),
                 branch: task.branch().map(ToString::to_string),
-                blocked_root: true,
-                depends_on_blocked: false,
+                blocked_root: task.task_runtime.last_error_code.as_deref() != Some("E905"),
+                depends_on_blocked: task.task_runtime.last_error_code.as_deref() == Some("E905"),
             });
         }
     }
@@ -1550,6 +1550,16 @@ mod tests {
             !out[0].contains("DEP-1"),
             "satisfied deps must not be listed"
         );
+    }
+
+    #[test]
+    fn dependency_blocks_are_affected_tasks_not_additional_roots() {
+        let registry=TaskRegistry::from_value(&json!({"tasks":[{"id":"ROOT","state":"blocked","task_runtime":{"last_error_code":"E103"}},{"id":"CHILD","state":"blocked","dependencies":["ROOT"],"task_runtime":{"last_error_code":"E905"}}]})).unwrap();
+        let diagnosed = diagnose_unschedulable_tasks(&registry, &parked_cfg(1));
+        assert_eq!(diagnosed.iter().filter(|d| d.blocked_root).count(), 1);
+        let child = diagnosed.iter().find(|d| d.id == "CHILD").unwrap();
+        assert!(child.depends_on_blocked);
+        assert!(!child.blocked_root);
     }
 
     #[test]

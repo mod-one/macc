@@ -16,7 +16,9 @@ test:
 	cd adapters && cargo test --workspace --locked
 
 # Add runner regression scripts for other tools to this target.
+test-tool-runner: export MACC_PROTOCOL_CLI := $(CURDIR)/target/debug/macc
 test-tool-runner:
+	cargo build -p macc-cli --locked
 	bash automat/tests/test_usage_projection.sh
 	bash automat/tests/test_prompt_literals.sh
 	bash automat/tests/test_completion_evidence.sh

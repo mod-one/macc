@@ -3,7 +3,7 @@ use super::fsm::{
     should_auto_retry_error_code, BlockOutcome, CompletionErrorDetails, CoordinatorConfigResolved,
     JobCompletionInput, RetryOutcome,
 };
-use crate::coordinator::error_normalizer::{CanonicalClass, ToolError};
+use crate::coordinator::error_normalizer::ToolError;
 use crate::coordinator::model::Task;
 use crate::coordinator::rate_limit::{
     compute_backoff_delay, E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
@@ -108,7 +108,10 @@ pub(super) fn resolve_retry_strategy(
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
-    let availability_failure = error_details.code == E602_QUOTA_EXHAUSTED;
+    let availability_failure = matches!(
+        error_details.code.as_str(),
+        E601_RATE_LIMITED | E602_QUOTA_EXHAUSTED
+    );
     if let Some(completion_kind) = classification
         .completion_kind
         .filter(|_| !availability_failure)
@@ -120,7 +123,10 @@ pub(super) fn resolve_retry_strategy(
         }
     }
 
-    if classification.completion_success && !availability_failure {
+    if (classification.completion_success
+        || classification.completion_kind.is_some_and(|k| k.is_error()))
+        && !availability_failure
+    {
         let completion_kind = classification
             .completion_kind
             .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
@@ -160,65 +166,6 @@ pub(super) fn resolve_retry_strategy(
             detail: input.status_text.clone(),
             completion_kind,
         };
-    }
-
-    if let Some(ni) = input
-        .normalizer_input
-        .as_ref()
-        .filter(|_| !availability_failure)
-    {
-        let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
-            || ni.stdout.contains("already_satisfied");
-        let transient_error = tool_error
-            .as_ref()
-            .map(|te| {
-                matches!(
-                    te.canonical_class,
-                    CanonicalClass::Overloaded | CanonicalClass::RateLimit
-                )
-            })
-            .unwrap_or(false);
-        if stdout_says_done && transient_error {
-            return RetryStrategy::Merge {
-                detail: "exit-code override: stdout indicates completion despite transient error"
-                    .to_string(),
-                completion_kind: PerformerCompletionKind::AlreadySatisfied,
-                tool_error,
-            };
-        }
-
-        let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
-            || ni
-                .stdout
-                .contains("MACC_TASK_RESULT: error_without_changes");
-        if stdout_says_error {
-            let completion_kind = if ni.stdout.contains("error_with_changes") {
-                PerformerCompletionKind::ErrorWithChanges
-            } else {
-                PerformerCompletionKind::ErrorWithoutChanges
-            };
-            let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
-                && classification.has_commits
-                && is_healthy_worktree;
-            if retry_budget_exhausted(task, input) {
-                return RetryStrategy::Block {
-                    reason: input.status_text.clone(),
-                    outcome: BlockOutcome::RetryBudgetExhausted {
-                        completion_kind,
-                        tool_error: Box::new(tool_error),
-                        attempts: task.task_runtime.retries_count(),
-                    },
-                };
-            }
-            return RetryStrategy::Retry {
-                same_worktree,
-                reason: input.status_text.clone(),
-                outcome: RetryOutcome::ToolReportedError {
-                    completion_kind,
-                    tool_error,
-                },
-            };
-        }
     }
 
     if error_details.code == E601_RATE_LIMITED {

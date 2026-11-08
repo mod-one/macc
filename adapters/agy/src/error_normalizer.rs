@@ -19,7 +19,7 @@ fn patterns() -> &'static Vec<Pattern> {
     static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         vec![
-            Pattern { regex: Regex::new(r"(?i)(individual\s+quota\s+reached|MACC_TOOL_LIMIT:\s*quota_exhausted)").unwrap(), class: CanonicalClass::QuotaExhausted },
+            Pattern { regex: Regex::new(r"(?i)(individual\s+quota\s+reached)").unwrap(), class: CanonicalClass::QuotaExhausted },
             Pattern {
                 regex: Regex::new(
                     r"(?i)(MODEL_CAPACITY_EXHAUSTED|[Nn]o\s+capacity\s+available\s+for\s+model)",

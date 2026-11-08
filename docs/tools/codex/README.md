@@ -39,8 +39,10 @@ The coordinator retains responsibility for retry decisions.
 The adapter preserves diagnostics and releases its session lease when it exits.
 Task-result markers remain authoritative for task outcomes. A CLI exit status of
 zero does not make `MACC_TASK_RESULT: error_without_changes` a successful task.
-Quota diagnostics continue to produce `MACC_TOOL_LIMIT: quota_exhausted` even
-when Codex returns zero.
+Provider-owned quota diagnostics produce a native E602 outcome even when
+Codex returns zero. Quoted tool output and assistant examples cannot create
+a throttle. All runners use `macc runner-output` for protocol interpretation;
+there is no shell regex or historical-log fallback.
 
 `Custom tool call output is missing` is a Codex diagnostic about a missing tool
 result. The supplied log does not establish why it went missing. These changes

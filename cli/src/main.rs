@@ -94,6 +94,21 @@ enum Commands {
         #[command(subcommand)]
         command: commands::o2::O2Command,
     },
+    /// Inspect current runner output through the native protocol and adapter layer
+    RunnerOutput {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        tool: String,
+        #[arg(long, default_value_t = 1, allow_hyphen_values = true)]
+        exit_code: i32,
+        #[arg(long, requires_all = ["task_id", "source"])]
+        project_root: Option<std::path::PathBuf>,
+        #[arg(long, requires_all = ["project_root", "source"])]
+        task_id: Option<String>,
+        #[arg(long, requires_all = ["project_root", "task_id"])]
+        source: Option<String>,
+    },
     /// Inspect and migrate canonical provider-neutral session ownership
     SessionStore {
         /// Output raw machine JSON
@@ -1531,6 +1546,21 @@ fn run_with_engine_provider(
         std::env::current_exe().map_err(|e| MaccError::Validation(e.to_string()))?,
     );
     match &cli.command {
+        Some(Commands::RunnerOutput {
+            file,
+            tool,
+            exit_code,
+            project_root,
+            task_id,
+            source,
+        }) => commands::runner_output::run(
+            file,
+            tool,
+            *exit_code,
+            project_root.as_deref(),
+            task_id.as_deref(),
+            source.as_deref(),
+        ),
         Some(Commands::Decisions { command }) => commands::decisions::run(&app, command),
         Some(Commands::Hooks { command }) => {
             commands::hooks::Hooks(app.clone(), command.clone()).run()

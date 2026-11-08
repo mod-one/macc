@@ -900,47 +900,22 @@ has_committable_changes() {
 }
 
 detect_success_result_kind() {
-  local output_file="$1"
-  local explicit=""
-  explicit="$(extract_task_result_marker "$output_file")"
-  if [[ -n "$explicit" ]]; then
-    printf '%s' "$explicit"
-    return 0
-  fi
-  if has_committable_changes; then
-    printf '%s' "success_with_changes"
-  else
-    printf '%s' "success_without_changes"
+  extract_task_result_marker "$1"
+}
+
+
+# Adapter-normalized provider records only; never scan command/source transcripts.
+classify_provider_failure() {
+  local inspection
+  inspection="$(runner_output_inspection "$1" "${2:-1}")" || { set_last_error E103 output_protocol "Native runner-output inspection failed";return;}
+  PROVIDER_OUTPUT="$(jq -r '.provider_output' <<<"$inspection")"
+  local code
+  code="$(jq -r '.error.error_code // empty' <<<"$inspection")"
+  if [[ -n "$code" ]]; then
+    set_last_error "$code" provider "$(jq -r '.error.raw_message' <<<"$inspection")"
   fi
 }
 
-# RL-PERFORMER-009: classify E601/E602 from combined runner output.
-# Sets LAST_ERROR_CODE, LAST_ERROR_ORIGIN, LAST_ERROR_MESSAGE.
-# E602 is checked first (higher specificity — quota patterns are more specific).
-detect_rate_limit() {
-  local output_file="$1"
-  [[ -f "$output_file" ]] || return 0
-  # E602: hard quota exhaustion — do NOT retry
-  if grep -qiE \
-      'individual[[:space:]]+quota[[:space:]]+reached|macc_tool_limit:.*quota_exhausted|quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+(usage[[:space:]]+|session[[:space:]]+)?limit|billing[[:space:]]+quota' "$output_file"; then
-    LAST_ERROR_CODE="E602"
-    LAST_ERROR_ORIGIN="runner"
-    LAST_ERROR_MESSAGE="quota exhausted; $(grep -iE 'try again at|resets |retry_hint|retry.after' "$output_file" | tail -n 1 || true)"
-    return 0
-  fi
-  # E601: transient rate-limit / 429
-  if grep -qiE \
-      '429|resource_exhausted|model_capacity_exhausted|no[[:space:]]+capacity[[:space:]]+available|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded' "$output_file"; then
-    LAST_ERROR_CODE="E601"
-    LAST_ERROR_ORIGIN="runner"
-    LAST_ERROR_MESSAGE="rate limited"
-    local retry_after
-    retry_after="$(grep -iE 'retry.after:[[:space:]]*[0-9]+' "$output_file" 2>/dev/null \
-        | grep -oE '[0-9]+' | tail -n1)"
-    [[ -n "$retry_after" ]] && LAST_ERROR_MESSAGE="rate limited; retry-after=${retry_after}s"
-    return 0
-  fi
-}
 
 run_tool() {
   local prompt_file="$1"
@@ -1018,6 +993,11 @@ run_tool() {
     local result_kind=""
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
+    if [[ -z "$result_kind" ]]; then
+      set_last_error E103 output_protocol "Missing explicit MACC_TASK_RESULT; exit status and Git changes cannot prove delivery"
+      result_kind=error_without_changes
+      printf 'MACC_TASK_RESULT_EXP: %s\nMACC_TASK_RESULT: error_without_changes\n' "$LAST_ERROR_MESSAGE" >> "$output_capture"
+    fi
     if [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]]; then
       # The tool emitted an explicit error or precondition result marker
       # This is a failure or an intentional terminal block, not a successful
@@ -1152,7 +1132,8 @@ run_tool() {
     fi
   else
     # RL-PERFORMER-009: classify rate-limit signals before falling back to E101.
-    detect_rate_limit "$output_capture"
+    PROVIDER_OUTPUT=""
+    classify_provider_failure "$output_capture" "$status"
     if [[ -z "$LAST_ERROR_CODE" || "$LAST_ERROR_CODE" == "E101" ]]; then
       set_last_error "E101" "runner" "runner exited non-zero"
     fi
@@ -1183,7 +1164,9 @@ run_tool() {
       --arg origin "$LAST_ERROR_ORIGIN" \
       --arg message "$LAST_ERROR_MESSAGE" \
       --arg result_exp "$result_exp" \
+      --arg provider_output "$PROVIDER_OUTPUT" \
       '({
+        provider_output:$provider_output,
         attempt:($attempt|tonumber?),
         exit_status:($status|tonumber?)
       }

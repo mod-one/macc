@@ -53,13 +53,17 @@ pub fn classify_completion_error(
             .any(|p| !p.trim().is_empty());
     let tool_error: Option<ToolError> = if !input.success && !reported_preconditions {
         input.normalizer_input.as_ref().and_then(|ni| {
+            let stderr = crate::coordinator::result_protocol::provider_output(&ni.stderr);
+            let stdout = crate::coordinator::result_protocol::provider_output(&ni.stdout);
+            if stderr.is_empty() && stdout.is_empty() {
+                return None;
+            }
             normalizer.and_then(|n| {
-                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
-                    .map(|mut te| {
-                        te.attempt = input.attempt as u32;
-                        te.operation = "performer_run".to_string();
-                        te
-                    })
+                n.normalize(ni.exit_code, &stderr, &stdout).map(|mut te| {
+                    te.attempt = input.attempt as u32;
+                    te.operation = "performer_run".into();
+                    te
+                })
             })
         })
     } else {
@@ -88,19 +92,12 @@ pub fn classify_completion_error(
     // Resolve authority last, after normalization is complete.
     let completion_resolution =
         resolve_completion_authority(input.completion_kind, has_commits, input.success);
-    let ipc_phase_done_override = completion_resolution.authority == CompletionAuthority::IpcSignal
-        && completion_resolution.completion_kind
-            == Some(PerformerCompletionKind::SuccessWithChanges);
-    let completion_success = if ipc_phase_done_override {
-        true
+    let completion_success = if input.completion_kind.is_some() {
+        completion_resolution.success
     } else {
         input.success
     };
-    let completion_kind = if ipc_phase_done_override {
-        Some(PerformerCompletionKind::SuccessWithChanges)
-    } else {
-        input.completion_kind
-    };
+    let completion_kind = input.completion_kind;
 
     ErrorClassification {
         canonical_class,
@@ -238,7 +235,7 @@ mod tests {
             normalizer_input: Some(NormalizerInput {
                 exit_code: 1,
                 stderr: String::new(),
-                stdout: "s does not serve without a page; usage limit mentioned in prose".into(),
+                stdout: "ERROR: provider usage limit reached".into(),
             }),
         }
     }
@@ -272,6 +269,8 @@ mod tests {
         let input = failed_input(None);
         let result = classify_completion_error(&input, Some(&QuotaFromLog), false);
         assert_eq!(result.error_code, "E602");
-        assert!(result.error_message.starts_with("s does not serve"));
+        assert!(result
+            .error_message
+            .starts_with("ERROR: provider usage limit"));
     }
 }

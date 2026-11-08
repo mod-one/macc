@@ -204,7 +204,7 @@ print(json.dumps({{'type':'result','session_id':sid,'benchmark_context_seen':'##
                                       '--archive-root', str(root / 'archive')])
             report = json.loads((root / 'result/report.json').read_text())
             failures = [Path(entry['log']).read_text() for entry in json.loads((root / 'result/commands.json').read_text()) if entry['status'] != 'ok']
-            self.assertEqual(exit_code, 0, '\n'.join(failures) or report)
+            self.assertEqual(exit_code, 0, json.dumps(report, indent=2) + '\n' + '\n'.join(failures))
             self.assertEqual(len(report['arms']), 2)
             self.assertTrue(all(arm['session_behavior_verified'] for arm in report['arms']))
             self.assertTrue(report['pairs'][0]['eligible'], report)

@@ -16,7 +16,9 @@ def prepare(invoke, config, case, enabled):
     policy = json.loads(invoke('o2', 'status'))['policy']
     if policy['context_engine']['output_reduction'] is not enabled:
         raise RuntimeError('Output policy differs from the assigned treatment')
-    if any(policy[key]['enabled'] for key in ['memory', 'context_engine', 'code_intelligence', 'adaptive_compaction']):
+    if not policy['context_engine']['enabled']:
+        raise RuntimeError('The output-reduction parent feature must be enabled in both arms')
+    if any(policy[key]['enabled'] for key in ['memory', 'code_intelligence', 'adaptive_compaction']):
         raise RuntimeError('Other O2 treatments must remain disabled')
     normalized = json.loads(json.dumps(config))
     normalized['context_engine']['output_reduction'] = False

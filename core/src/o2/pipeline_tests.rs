@@ -105,14 +105,14 @@ fn execution_uses_adapter_transform_and_keeps_machine_protocol_opaque() {
         .run_skill(
             &paths,
             &skill(
-                "printf '%s\\n' 'MACC_TOOL_LIMIT: cooldown' 'MACC_TASK_RESULT: precondition_unmet'",
+                "printf '%s\\n' 'MACC_RUNNER_ERROR: E602' 'MACC_TASK_RESULT: precondition_unmet'",
             ),
             &request(root, Some("future-fixture")),
         )
         .unwrap();
     assert_eq!(
         result.stdout,
-        "MACC_TOOL_LIMIT: cooldown\nMACC_TASK_RESULT: precondition_unmet\n"
+        "MACC_RUNNER_ERROR: E602\nMACC_TASK_RESULT: precondition_unmet\n"
     );
     assert!(result.summary.is_none());
     let result = engine

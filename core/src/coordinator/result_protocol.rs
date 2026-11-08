@@ -1,4 +1,7 @@
-//! Terminal output hygiene shared by completion attribution and legacy readers.
+//! Provider-neutral projection of assistant protocol and native runner summaries.
+mod provider;
+pub use provider::provider_output;
+
 pub fn valid_explanation(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
@@ -15,60 +18,93 @@ pub fn valid_explanation(value: &str) -> bool {
         .iter()
         .any(|p| value.to_ascii_lowercase().contains(p))
 }
-/// Exclude instruction echoes, quoted examples and command transcripts. Native
-/// runner summaries remain eligible; they are not provider compliance evidence.
-pub fn projection(raw: &str) -> String {
-    let (mut prompt, mut fence, mut transcript) = (false, false, false);
-    let mut out = String::new();
-    for line in raw.lines() {
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Channel {
+    #[default]
+    Provider,
+    Assistant,
+    Transcript,
+}
+#[derive(Default)]
+struct State {
+    prompt: bool,
+    channel: Channel,
+    fence: Option<(char, usize)>,
+}
+impl State {
+    fn line(&mut self, line: &str) -> bool {
         if line.starts_with("MACC_PROMPT_BEGIN:") {
-            prompt = true;
-
-            continue;
+            self.prompt = true;
+            self.fence = None;
+            return false;
         }
         if line.starts_with("MACC_PROMPT_END:") {
-            prompt = false;
-            continue;
+            self.prompt = false;
+            self.channel = Channel::Provider;
+            self.fence = None;
+            return false;
         }
-        if prompt {
-            continue;
+        if self.prompt {
+            return false;
         }
-        if line.trim_start().starts_with("```") {
-            fence = !fence;
-            continue;
+        // Channel boundaries must be handled before Markdown. Tool output is
+        // excluded without touching the assistant's Markdown state.
+        let channel = match line {
+            "exec" | "tool" | "user" | "system" | "developer" => Some(Channel::Transcript),
+            "codex" | "assistant" | "final" => Some(Channel::Assistant), // macc:allow-tool-name: emitted transcript role token, never adapter routing.
+            _ => None,
+        };
+        if let Some(channel) =
+            channel.filter(|_| self.channel == Channel::Transcript || self.fence.is_none())
+        {
+            self.channel = channel;
+            self.fence = None;
+            return false;
         }
-        if fence {
-            continue;
+        if self.channel == Channel::Transcript {
+            return false;
         }
-        match line {
-            "exec" | "tool" | "user" | "system" | "developer" => {
-                transcript = true;
-                continue;
+        let trimmed = line.trim_start();
+        if let Some(ch) = trimmed.chars().next().filter(|c| matches!(c, '`' | '~')) {
+            let len = trimmed.chars().take_while(|c| *c == ch).count();
+            if len >= 3 {
+                match self.fence {
+                    None => self.fence = Some((ch, len)),
+                    Some((kind, size))
+                        if kind == ch && len >= size && trimmed[len..].trim().is_empty() =>
+                    {
+                        self.fence = None
+                    }
+                    _ => {}
+                }
+                return false;
             }
-            "codex" | "assistant" | "final" => {
-                transcript = false;
-                continue;
-            }
-            _ => {}
         }
-        if transcript {
+        self.fence.is_none() && !line.trim_start().starts_with('>')
+    }
+}
+/// Prompt echoes, tool transcripts and fenced examples cannot provide protocol.
+pub fn projection(raw: &str) -> String {
+    let mut state = State::default();
+    let mut out = String::new();
+    for line in raw.lines() {
+        if !state.line(line) {
             continue;
         }
         let trimmed = line.trim();
-        if trimmed.starts_with("MACC_TASK_") || trimmed.starts_with("- Explanation:") {
-            if !valid_explanation(trimmed) {
-                continue;
-            }
-            if line.starts_with(char::is_whitespace) {
-                continue;
-            }
+        if (trimmed.starts_with("MACC_")
+            || trimmed.starts_with("REVIEW_VERDICT:")
+            || trimmed.starts_with("- Explanation:"))
+            && (!valid_explanation(trimmed) || line.starts_with(char::is_whitespace))
+        {
+            continue;
         }
         out.push_str(line);
         out.push('\n');
     }
     out
 }
-/// A completion cannot borrow an explanation from an earlier prose/transcript block.
+/// A terminal result cannot borrow an explanation from an older result block.
 pub fn completion_projection(raw: &str) -> String {
     let current = raw
         .rfind("MACC_PROMPT_BEGIN:")
@@ -78,24 +114,24 @@ pub fn completion_projection(raw: &str) -> String {
     let mut fields = Vec::new();
     let mut boundary = false;
     for line in projected.lines() {
-        let is_field = line.starts_with("MACC_TASK_")
-            || line.starts_with("- Result kind:")
-            || line.starts_with("- Explanation:")
-            || line.starts_with("- Unmet precondition:");
-        if is_field {
+        if line.starts_with("MACC_TASK_")
+            || ["- Result kind:", "- Explanation:", "- Unmet precondition:"]
+                .iter()
+                .any(|p| line.starts_with(p))
+        {
             if boundary {
                 fields.clear();
                 boundary = false;
             }
-            fields.push(line)
+            fields.push(line);
         } else if !fields.is_empty() {
-            boundary = true
+            boundary = true;
         }
     }
     let markers: Vec<_> = fields
         .iter()
         .enumerate()
-        .filter_map(|(i, line)| line.starts_with("MACC_TASK_RESULT:").then_some(i))
+        .filter_map(|(i, l)| l.starts_with("MACC_TASK_RESULT:").then_some(i))
         .collect();
     if markers.len() > 1 {
         fields.drain(..=markers[markers.len() - 2]);
@@ -103,47 +139,4 @@ pub fn completion_projection(raw: &str) -> String {
     fields.join("\n")
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn echoed_instruction_is_not_a_result() {
-        let s="MACC_PROMPT_BEGIN: instructions-only\nMACC_TASK_RESULT_EXP: prior work unsalvageable: <reason>\nMACC_TASK_RESULT: error_without_changes\nMACC_PROMPT_END: instructions-only\ncodex\nMACC_TASK_RESULT: success_with_changes\n";
-        let p = projection(s);
-        assert!(!p.contains("unsalvageable"));
-        assert!(!p.contains("error_without_changes"));
-        assert!(p.contains("success_with_changes"));
-        assert!(!valid_explanation("prior work unsalvageable: <reason>"));
-    }
-    #[test]
-    fn older_attempt_is_not_a_fallback_for_a_new_invocation() {
-        assert!(!completion_projection("MACC_TASK_RESULT: error_without_changes\nMACC_PROMPT_BEGIN: x\nold instructions\nMACC_PROMPT_END: x\nno result").contains("error_without_changes"));
-    }
-    #[test]
-    fn shell_and_native_terminal_projection_agree_on_transcripts() {
-        use std::process::Command;
-        let cases = [
-            "MACC_TASK_RESULT_EXP: old reason\nMACC_TASK_RESULT: error_without_changes\nMACC_TASK_RESULT: success_with_changes\n",
-            "MACC_PROMPT_BEGIN: x\nMACC_TASK_RESULT_EXP: prior work unsalvageable: <reason>\nMACC_TASK_RESULT: error_without_changes\nMACC_PROMPT_END: x\ncodex\nMACC_TASK_RESULT: success_with_changes\n",
-            "MACC_TASK_RESULT: error_without_changes\nMACC_TASK_RESULT_EXP: old reason\n\nAnother invocation completed.\nMACC_TASK_RESULT: success_with_changes\n",
-            "```text\nMACC_TASK_RESULT: error_without_changes\n```\nMACC_TASK_RESULT_EXP: valid evidence\nMACC_TASK_RESULT: already_satisfied\n",
-        ];
-        let tmp = tempfile::tempdir().unwrap();
-        let file = tmp.path().join("output.txt");
-        for raw in cases {
-            std::fs::write(&file, raw).unwrap();
-            let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../automat/result_protocol.sh");
-            let o = Command::new("bash")
-                .args(["-c", r#"source "$1"; terminal_result_lines "$2""#, "test"])
-                .arg(helper)
-                .arg(&file)
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-            assert_eq!(
-                String::from_utf8_lossy(&o.stdout).trim(),
-                completion_projection(raw).trim()
-            );
-        }
-    }
-}
+mod tests;

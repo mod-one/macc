@@ -42,7 +42,7 @@ cat > "$WORK/bin/codex" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "${ARGV_LOG:?}"
 echo "session id: 01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1"
-echo "MACC_TASK_RESULT: success"
+echo "MACC_TASK_RESULT: success_with_changes"
 STUB
 chmod +x "$WORK/bin/codex"; export PATH="$WORK/bin:$PATH"
 
@@ -79,7 +79,8 @@ TOML
 cp "$WORK/repo/.codex/config.toml" "$WORK/expected.toml"
 rm -f "$WORK/repo/.macc/state/tool-sessions.json"
 L="$WORK/b.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto run "$L" --attempt 1 --max-attempts 1
-pair "--model" "gpt-5.5" "$L" && pass "tier model applied" || fail "tier model; argv: $(argv "$L")"
+tier_model="$(jq -r '.model_tiers.heavy.model' "$WORK/repo/.macc/tool.json")"
+pair "--model" "$tier_model" "$L" && pass "tier model applied" || fail "tier model; argv: $(argv "$L")"
 pair "-c" 'model_reasoning_effort="high"' "$L" \
   && pass "tier effort applied on the command line" || fail "tier effort; argv: $(argv "$L")"
 grep -qF 'model_reasoning_effort="medium"' "$L" && fail "stale configured effort still present" || pass "no stale effort left"

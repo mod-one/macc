@@ -573,3 +573,57 @@ retry, gate revision, quota reset and transient retry triggers are recorded in
 `.macc/log/supervisor/<incident>-attempt-N/trigger.json`, including the changed
 context keys and revision digests when evidence changes. Independent compliance
 failures remain separate from unanswered requests and may need external access.
+
+## Runner output authority and phase evidence
+
+Runner protocol interpretation lives in Rust. `macc runner-output --file <path>
+--tool <adapter-id> --exit-code <code>` exposes the same projection and registered
+adapter normalization to the shell transports. Prompt echoes, command transcripts,
+quoted/fenced examples and assistant discussion cannot supply provider errors.
+A fence inside excluded command output cannot suppress the next assistant ACK,
+compliance object or review verdict. Actual provider error records keep their
+adapter's error class, reset hint and model/quota scope.
+
+Shell invocations also pass `--project-root`, `--task-id` and `--source` together
+when an invocation source exists. A matching native wait receipt overrides
+terminal/provider interpretation even if output stops inside an excluded tool
+transcript. An unrelated source cannot supply this outcome. This read-only
+inspection returns `native_wait` separately and never supplies assistant ACKs.
+
+A native terminal failure or precondition survives a nonzero process exit and
+retained commits. A retained commit alone never proves success. There is no
+legacy log-tail completion fallback, compatibility environment switch, alternate
+old runner-directory discovery, old result aliases, shell quota-regex copy or
+stdout-success override. Native invocation-scoped receipts remain mandatory.
+Current configured external runners remain supported through ToolSpec.
+
+Each review/fix/test invocation archives stdout, stderr, projected output and
+`outcome.json` under `.macc/log/performer/<task>/phases/<phase>-<source>/` before
+validation. Evidence includes artifact hashes, context digest, eligible ACKs,
+exit code and validation error. Review logs are aggregated even on early
+validation failure. ACK diagnostics distinguish absent, excluded and mismatched
+ACKs (`DM_ACK_ABSENT`, `DM_ACK_EXCLUDED`, `DM_ACK_MISMATCH`), stale context and
+failed independent compliance. A valid review ending in CHANGES_REQUESTED enters
+its existing correction/review flow; an acknowledged context does not accept a
+feature or authorize a merge.
+
+After a runtime change or explicit `macc supervisor start --daemon --retry`, an
+E103 output-protocol failure in a retained review can use one bounded native
+restart recovery (`MACC-REVIEW-PROTOCOL-REFRESH`). Repair and automatic restart
+must both be enabled. It checks current review context readiness and reuses the
+retained worktree/phase through the existing recovery contract. It issues a fresh
+review, never rewrites an old acknowledgement/compliance receipt, and does not
+bypass E903 prerequisites. An unchanged runtime without an explicit retry cannot
+trigger this recovery. Runtime-change evidence is retained in `trigger.json`.
+
+The native unblock operation restores these retained protocol reviews to
+`reviewing`, rather than dispatching development again. Reconciliation preserves
+the exact worker commit when the reference is already in its ancestry; actual
+prerequisite changes still use the existing protected reconciliation. Dependency
+summaries group E905 fallout under its root without counting blocked descendants
+as pending work or interrupting independent tasks waiting for tool availability.
+
+During SQLite runner shutdown, the provider process group is terminated before
+the EXIT trap waits for the heartbeat that signaled it. The native wait receipt
+is already durable, and session finalization follows provider termination. This
+prevents a nested shell wait from leaving the provider alive on a human gate.

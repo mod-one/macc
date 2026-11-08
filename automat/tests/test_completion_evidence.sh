@@ -3,6 +3,8 @@
 set -euo pipefail
 AUTOMAT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$AUTOMAT/completion_evidence.sh"
+source "$AUTOMAT/result_protocol.sh"
+export MACC_PROTOCOL_CLI="${MACC_PROTOCOL_CLI:-$AUTOMAT/../target/debug/macc}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"

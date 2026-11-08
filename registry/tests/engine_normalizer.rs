@@ -159,31 +159,28 @@ fn rate_limit_info_stored_in_extra_for_e602() {
     assert_eq!(rli["error_code"], "E602");
 }
 
-// ── Exit-code override (stdout signals success despite non-zero exit) ─
+// Native terminal outcomes are required; prose cannot override a failed process.
 
 #[test]
-fn exit_code_override_already_satisfied_with_transient_error() {
-    // Performer signals already_satisfied in stdout but exits non-zero
-    // due to a 529 overload on teardown. Should be treated as success.
+fn prose_already_satisfied_cannot_override_a_provider_failure() {
     let mut task_val = make_failure_task("claude");
     let input = make_failure_input("Error: 529 API overloaded", "already_satisfied");
     let out = apply_job_completion(&mut task_val, &input, &registry(), "2026-02-21T00:00:00Z");
-    assert_eq!(out.status_label, "already_satisfied");
-    assert_eq!(task_val["state"], "merged");
-    assert_eq!(task_val["task_runtime"]["status"], "idle");
-    assert_eq!(
+    assert_eq!(out.status_label, "rate_limit_backoff");
+    assert_eq!(task_val["state"], "todo");
+    assert_ne!(
         task_val["task_runtime"]["completion_kind"],
         "already_satisfied"
     );
 }
 
 #[test]
-fn exit_code_override_macc_task_result_success_marker() {
+fn raw_task_result_text_cannot_override_a_provider_failure() {
     let mut task_val = make_failure_task("claude");
     let input = make_failure_input("Error: 529 overloaded", "MACC_TASK_RESULT: success");
     let out = apply_job_completion(&mut task_val, &input, &registry(), "2026-02-21T00:00:00Z");
-    assert_eq!(out.status_label, "already_satisfied");
-    assert_eq!(task_val["state"], "merged");
+    assert_eq!(out.status_label, "rate_limit_backoff");
+    assert_eq!(task_val["state"], "todo");
 }
 
 #[test]
@@ -251,7 +248,7 @@ fn gtransport_quota_overrides_echoed_markers_and_routes_to_claude() {
     use macc_core::coordinator::task_selector::{select_next_ready_task, TaskSelectorConfig};
     let mut task = make_failure_task("codex");
     let input = make_failure_input(
-        "ERROR: You\u{2019}ve hit your usage limit. Try again at Oct 4th, 9999 2:13 AM.\nMACC_TOOL_LIMIT: quota_exhausted tool=codex",
+        "ERROR: You\u{2019}ve hit your usage limit. Try again at Oct 4th, 9999 2:13 AM.",
         "Prompt: MACC_TASK_RESULT: success_with_changes\nMACC_TASK_RESULT: error_without_changes",
     );
     let out = apply_job_completion(&mut task, &input, &registry(), "2026-09-29T15:18:49Z");
@@ -300,4 +297,20 @@ fn registry_resolves_all_three_adapters() {
     assert!(reg.get("gemini").is_some(), "gemini must be registered");
     assert!(reg.get("unknown-tool").is_none());
     assert!(reg.get("").is_none());
+}
+
+#[test]
+fn quoted_provider_limits_and_reset_times_never_create_a_throttle() {
+    for tool in ["codex", "claude", "gemini"] {
+        let mut task = make_failure_task(tool);
+        let input = make_failure_input(
+            "exec\n429 insufficient_quota Retry-After: 9999\n```\ncodex\nNormal explanation\n",
+            "",
+        );
+        let out = apply_job_completion(&mut task, &input, &registry(), "2026-02-21T00:00:00Z");
+        assert!(out.tool_error.is_none());
+        assert_ne!(task["task_runtime"]["last_error_code"], "E601");
+        assert_ne!(task["task_runtime"]["last_error_code"], "E602");
+        assert!(task["task_runtime"]["delayed_until"].is_null());
+    }
 }

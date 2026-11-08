@@ -149,7 +149,7 @@ pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32)
             .filter(|k| pending.context.get(*k) != context.get(*k))
             .cloned()
             .collect();
-        let trigger = json!({"reason":if pending.context.is_null(){"initial_or_explicit_retry"}else{"evidence_changed"},"previous_revision":macc_core::coordinator::decisions::digest(&pending.context),"next_revision":macc_core::coordinator::decisions::digest(&context),"changed_fields":changed_fields,"at":now});
+        let trigger = json!({"reason":if pending.context.is_null(){"initial_or_explicit_retry"}else{"evidence_changed"},"previous_revision":macc_core::coordinator::decisions::digest(&pending.context),"next_revision":macc_core::coordinator::decisions::digest(&context),"changed_fields":changed_fields,"runtime_updated":pending.context.get("runtime_build").is_some_and(|old|old!=&context["runtime_build"]),"previous_runtime":pending.context.get("runtime_build"),"next_runtime":context.get("runtime_build"),"at":now});
         tracing::info!(%trigger,"Supervisor diagnosis invalidation");
         let sequence = pending.sequence;
         *pending = Pending {

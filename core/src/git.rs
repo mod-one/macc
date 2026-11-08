@@ -4,7 +4,7 @@ use std::process::{ExitStatus, Output};
 
 mod housekeeping;
 mod supervisor_prune;
-pub use housekeeping::fetch_housekeeping;
+pub use housekeeping::{fetch_housekeeping, fetch_housekeeping_sync};
 pub use supervisor_prune::{prune_merged_supervisor_branch, prune_merged_supervisor_branches};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,14 +309,6 @@ git_command!(
     (),
     ["checkout", "--detach"],
     "run git checkout --detach"
-);
-
-git_command!(
-    fetch,
-    fetch_async,
-    (remote: &str),
-    ["fetch", remote],
-    "run git fetch"
 );
 
 pub fn git_remote_exists(repo_or_worktree: &Path, remote: &str) -> Result<bool> {

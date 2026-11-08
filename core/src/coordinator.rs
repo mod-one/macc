@@ -22,12 +22,14 @@ pub mod managed_command_registry;
 pub mod model;
 pub mod model_routing;
 pub mod phase_diagnostics;
+mod phase_evidence;
 pub mod prd_auditor;
 pub mod precondition_scope;
 pub mod preflight;
 pub mod rate_limit;
 pub mod repair_handoff;
 pub mod result_protocol;
+pub mod runner_output;
 pub mod runtime;
 pub mod session_identity;
 pub mod session_manager;
@@ -280,14 +282,10 @@ impl FromStr for PerformerCompletionKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "success_with_changes" => Ok(PerformerCompletionKind::SuccessWithChanges),
             "success_without_changes" => Ok(PerformerCompletionKind::SuccessWithoutChanges),
-            "already_satisfied" | "already_done" | "noop_success" => {
-                Ok(PerformerCompletionKind::AlreadySatisfied)
-            }
+            "already_satisfied" => Ok(PerformerCompletionKind::AlreadySatisfied),
             "error_with_changes" => Ok(PerformerCompletionKind::ErrorWithChanges),
-            "error_without_changes" | "error" | "failed" => {
-                Ok(PerformerCompletionKind::ErrorWithoutChanges)
-            }
-            "precondition_unmet" | "blocked" => Ok(PerformerCompletionKind::PreconditionUnmet),
+            "error_without_changes" => Ok(PerformerCompletionKind::ErrorWithoutChanges),
+            "precondition_unmet" => Ok(PerformerCompletionKind::PreconditionUnmet),
             other => Err(format!("unknown performer completion kind: {}", other)),
         }
     }
@@ -296,7 +294,6 @@ impl FromStr for PerformerCompletionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionAuthority {
     IpcSignal,
-    ExitCodeHeuristic,
     Fallback,
 }
 
@@ -307,41 +304,27 @@ pub struct CompletionAuthorityResolution {
     pub completion_kind: Option<PerformerCompletionKind>,
 }
 
-/// Resolve completion classification precedence between IPC terminal signals
-/// and process-exit heuristics.
-///
-/// Priority-inversion contract:
-/// - If IPC emitted a successful `phase_result` **and** the worktree has at
-///   least one commit ahead of base, IPC is authoritative and the completion
-///   is treated as successful, regardless of exit code.
-/// - Otherwise, exit-code heuristics decide whether completion can be trusted.
+/// Native terminal outcomes remain authoritative. A failed process without a
+/// native outcome cannot infer delivery from a log or retained commit.
 pub fn resolve_completion_authority(
     ipc_completion_kind: Option<PerformerCompletionKind>,
     has_commits_ahead_of_base: bool,
     exit_code_success: bool,
 ) -> CompletionAuthorityResolution {
-    if has_commits_ahead_of_base {
-        if let Some(kind) = ipc_completion_kind {
-            return CompletionAuthorityResolution {
-                authority: CompletionAuthority::IpcSignal,
-                success: true,
-                completion_kind: Some(kind),
-            };
-        }
-    }
-
-    if exit_code_success {
+    let Some(kind) = ipc_completion_kind else {
         return CompletionAuthorityResolution {
-            authority: CompletionAuthority::ExitCodeHeuristic,
-            success: ipc_completion_kind.is_some(),
-            completion_kind: ipc_completion_kind,
+            authority: CompletionAuthority::Fallback,
+            success: false,
+            completion_kind: None,
         };
-    }
-
+    };
     CompletionAuthorityResolution {
-        authority: CompletionAuthority::Fallback,
-        success: false,
-        completion_kind: None,
+        authority: CompletionAuthority::IpcSignal,
+        success: !kind.is_error()
+            && (exit_code_success
+                || kind == PerformerCompletionKind::SuccessWithChanges
+                    && has_commits_ahead_of_base),
+        completion_kind: Some(kind),
     }
 }
 
@@ -1091,10 +1074,9 @@ mod tests {
             .unwrap();
         assert_eq!(kind, PerformerCompletionKind::AlreadySatisfied);
         assert_eq!(kind.as_str(), "already_satisfied");
-        assert_eq!(
-            "noop_success".parse::<PerformerCompletionKind>().unwrap(),
-            PerformerCompletionKind::AlreadySatisfied
-        );
+        for legacy in ["noop_success", "already_done", "error", "failed", "blocked"] {
+            assert!(legacy.parse::<PerformerCompletionKind>().is_err());
+        }
     }
 
     #[test]
@@ -1126,104 +1108,37 @@ mod tests {
     }
 
     #[test]
-    fn resolve_completion_authority_prefers_ipc_when_commits_are_ahead() {
-        let resolved = resolve_completion_authority(
-            Some(PerformerCompletionKind::SuccessWithChanges),
-            true,
-            false,
-        );
-        assert_eq!(resolved.authority, CompletionAuthority::IpcSignal);
-        assert!(resolved.success);
-        assert_eq!(
-            resolved.completion_kind,
-            Some(PerformerCompletionKind::SuccessWithChanges)
-        );
-    }
-
-    #[test]
-    fn resolve_completion_authority_ipc_without_commits_uses_exit_heuristic() {
-        let resolved = resolve_completion_authority(
-            Some(PerformerCompletionKind::SuccessWithChanges),
-            false,
-            true,
-        );
-        assert_eq!(resolved.authority, CompletionAuthority::ExitCodeHeuristic);
-        assert!(resolved.success);
-        assert_eq!(
-            resolved.completion_kind,
-            Some(PerformerCompletionKind::SuccessWithChanges)
-        );
-    }
-
-    #[test]
-    fn resolve_completion_authority_no_ipc_exit_success_uses_exit_heuristic() {
-        let resolved = resolve_completion_authority(None, false, true);
-        assert_eq!(resolved.authority, CompletionAuthority::ExitCodeHeuristic);
-        assert!(!resolved.success);
-        assert!(resolved.completion_kind.is_none());
-    }
-
-    #[test]
-    fn resolve_completion_authority_no_ipc_exit_failure_falls_back() {
-        let resolved = resolve_completion_authority(None, false, false);
-        assert_eq!(resolved.authority, CompletionAuthority::Fallback);
-        assert!(!resolved.success);
-        assert!(resolved.completion_kind.is_none());
-    }
-
-    #[test]
-    fn resolve_completion_authority_matrix_covers_all_input_combinations() {
-        let combos = [
-            (None, false, false, CompletionAuthority::Fallback, false),
-            (
-                None,
-                false,
-                true,
-                CompletionAuthority::ExitCodeHeuristic,
-                false,
-            ),
-            (None, true, false, CompletionAuthority::Fallback, false),
-            (
-                None,
-                true,
-                true,
-                CompletionAuthority::ExitCodeHeuristic,
-                false,
-            ),
-            (
-                Some(PerformerCompletionKind::AlreadySatisfied),
-                false,
-                false,
-                CompletionAuthority::Fallback,
-                false,
-            ),
-            (
-                Some(PerformerCompletionKind::AlreadySatisfied),
-                false,
-                true,
-                CompletionAuthority::ExitCodeHeuristic,
-                true,
-            ),
-            (
-                Some(PerformerCompletionKind::AlreadySatisfied),
-                true,
-                false,
-                CompletionAuthority::IpcSignal,
-                true,
-            ),
-            (
-                Some(PerformerCompletionKind::AlreadySatisfied),
-                true,
-                true,
-                CompletionAuthority::IpcSignal,
-                true,
-            ),
-        ];
-
-        for (ipc, commits_ahead, exit_ok, expected_authority, expected_success) in combos {
-            let resolved = resolve_completion_authority(ipc, commits_ahead, exit_ok);
-            assert_eq!(resolved.authority, expected_authority);
-            assert_eq!(resolved.success, expected_success);
+    fn completion_authority_preserves_every_native_outcome_for_all_exit_and_commit_states() {
+        for kind in [
+            PerformerCompletionKind::SuccessWithChanges,
+            PerformerCompletionKind::SuccessWithoutChanges,
+            PerformerCompletionKind::AlreadySatisfied,
+            PerformerCompletionKind::ErrorWithChanges,
+            PerformerCompletionKind::ErrorWithoutChanges,
+            PerformerCompletionKind::PreconditionUnmet,
+        ] {
+            for commits in [false, true] {
+                for exited_ok in [false, true] {
+                    let resolved = resolve_completion_authority(Some(kind), commits, exited_ok);
+                    assert_eq!(resolved.authority, CompletionAuthority::IpcSignal);
+                    assert_eq!(resolved.completion_kind, Some(kind));
+                    assert_eq!(
+                        resolved.success,
+                        !kind.is_error()
+                            && (exited_ok
+                                || kind == PerformerCompletionKind::SuccessWithChanges && commits),
+                        "{kind:?} {commits} {exited_ok}"
+                    );
+                }
+            }
+        }
+        for commits in [false, true] {
+            for exited_ok in [false, true] {
+                let resolved = resolve_completion_authority(None, commits, exited_ok);
+                assert!(!resolved.success);
+                assert!(resolved.completion_kind.is_none());
+                assert_eq!(resolved.authority, CompletionAuthority::Fallback);
+            }
         }
     }
 

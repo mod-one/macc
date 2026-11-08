@@ -90,6 +90,7 @@ pub struct CoordinatorJobEvent {
     pub timed_out: bool,
     pub completion_kind: Option<PerformerCompletionKind>,
     pub completion_details_source: Option<String>,
+    pub normalizer_input: Option<crate::coordinator::engine::NormalizerInput>,
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
@@ -1128,14 +1129,6 @@ pub fn resolve_phase_runner(
     if explicit.exists() {
         return Ok(Some(explicit));
     }
-    let legacy = worktree_path
-        .join(".macc")
-        .join("automation")
-        .join("runners")
-        .join(format!("{}.performer.sh", tool));
-    if legacy.exists() {
-        return Ok(Some(legacy));
-    }
     let tool_json_path = worktree_path.join(".macc").join("tool.json");
     if !tool_json_path.exists() {
         return Ok(None);
@@ -1342,28 +1335,8 @@ pub fn spawn_performer_job(
             }
         };
         let reported_success = success;
-        let (completion_details, mut completion_details_source) = if reported_success {
-            if let Some(details) =
-                read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
-            {
-                (Some(details), Some("sqlite".to_string()))
-            } else if compat_phase_result_log_fallback_enabled() {
-                (
-                    read_completion_details_from_worktree_log(&worktree_path_owned, &task_id_owned),
-                    Some("log-fallback".to_string()),
-                )
-            } else {
-                (None, None)
-            }
-        } else {
-            if let Some(details) =
-                read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
-            {
-                (Some(details), Some("sqlite".to_string()))
-            } else {
-                (None, None)
-            }
-        };
+        let completion_details=read_last_completion_details(&repo_root_owned,&task_id_owned,&event_source_owned);
+        let mut completion_details_source=completion_details.as_ref().map(|_|"sqlite".to_string());
         let completion_details = match crate::session_store::decision_wait::waiting_for_invocation(
             &repo_root_owned, &task_id_owned, &event_source_owned,
         ) {
@@ -1375,6 +1348,7 @@ pub fn spawn_performer_job(
                     result_explanation: Some(wait.reason.clone()),
                     gate_verdict: None,
                     unmet_preconditions: vec![wait.reason.clone()],
+                    normalizer_input: None,
                 })
             }
             Ok(None) => completion_details,
@@ -1429,6 +1403,7 @@ pub fn spawn_performer_job(
             timed_out,
             completion_kind: completion_resolution.completion_kind,
             completion_details_source,
+            normalizer_input: completion_details.as_ref().and_then(|d|d.normalizer_input.clone()),
             error_code,
             error_origin,
             error_message,
@@ -1461,21 +1436,7 @@ struct CompletionDetails {
     result_explanation: Option<String>,
     gate_verdict: Option<crate::coordinator::model::GateVerdict>,
     unmet_preconditions: Vec<String>,
-}
-
-const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
-    "COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK";
-
-fn compat_phase_result_log_fallback_enabled() -> bool {
-    std::env::var(COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK)
-        .ok()
-        .map(|raw| {
-            matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    normalizer_input: Option<crate::coordinator::engine::NormalizerInput>,
 }
 
 fn read_last_error_details(
@@ -1532,6 +1493,20 @@ fn read_last_completion_details_once(
             result_explanation: event.payload_result_exp(),
             gate_verdict: event.payload_gate_verdict(),
             unmet_preconditions: event.payload_unmet_preconditions(),
+            normalizer_input: event
+                .payload
+                .get("provider_output")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(|v| crate::coordinator::engine::NormalizerInput {
+                    exit_code: event
+                        .payload
+                        .get("exit_status")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1) as i32,
+                    stderr: v.to_string(),
+                    stdout: String::new(),
+                }),
         });
         std::ops::ControlFlow::Break(())
     });
@@ -1555,131 +1530,6 @@ fn read_last_completion_details_once(
         );
     }
     None
-}
-
-fn read_completion_details_from_worktree_log(
-    worktree_path: &Path,
-    task_id: &str,
-) -> Option<CompletionDetails> {
-    let log_path = performer_task_log_path(worktree_path, task_id);
-    let raw = std::fs::read_to_string(log_path).ok()?;
-    let raw = super::result_protocol::completion_projection(&raw);
-    let mut result_kind = None;
-    let mut message = None;
-    let mut result_explanation = None;
-    let mut gate_verdict = None;
-    // Collected in reverse file order, restored below.
-    let mut unmet_preconditions: Vec<String> = Vec::new();
-    for line in raw.lines().rev() {
-        let trimmed = line.trim();
-        if let Some(item) = trimmed
-            .strip_prefix("MACC_TASK_PRECONDITION:")
-            .or_else(|| trimmed.strip_prefix("- Unmet precondition:"))
-        {
-            let item = item.trim();
-            // `<condition>` is the placeholder from the prompt contract; a
-            // tool that echoes its prompt must not turn it into a condition.
-            if !item.is_empty() && !item.starts_with('<') {
-                unmet_preconditions.push(item.to_string());
-            }
-            continue;
-        }
-        if result_explanation.is_none() {
-            if let Some(exp) = trimmed.strip_prefix("- Explanation:") {
-                result_explanation = Some(exp.trim().to_string());
-                continue;
-            }
-            if let Some(exp) = trimmed.strip_prefix("MACC_TASK_RESULT_EXP:") {
-                result_explanation = Some(exp.trim().to_string());
-                continue;
-            }
-        }
-        if result_kind.is_none() {
-            if let Some(raw_kind) = trimmed.strip_prefix("- Result kind:") {
-                result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
-                continue;
-            }
-            if let Some(raw_kind) = trimmed.strip_prefix("MACC_TASK_RESULT:") {
-                result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
-                continue;
-            }
-        }
-        if gate_verdict.is_none() {
-            if let Some(raw_verdict) = trimmed.strip_prefix("MACC_TASK_GATE_VERDICT:") {
-                gate_verdict = raw_verdict.trim().parse().ok();
-                continue;
-            }
-        }
-        if message.is_none()
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('-')
-            && !trimmed.starts_with("MACC_TASK_RESULT")
-        {
-            message = Some(trimmed.to_string());
-        }
-    }
-    unmet_preconditions.reverse();
-    // Order-preserving global de-duplication: a tool that repeats a condition
-    // (e.g. once in prose, once as a marker) must not list it twice.
-    let mut seen = std::collections::HashSet::new();
-    unmet_preconditions.retain(|item| seen.insert(item.clone()));
-    result_kind.map(|kind| CompletionDetails {
-        result_kind: Some(kind),
-        message,
-        result_explanation,
-        gate_verdict,
-        unmet_preconditions,
-    })
-}
-
-fn performer_task_log_path(worktree_path: &Path, task_id: &str) -> PathBuf {
-    let safe: String = task_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-        .collect();
-    let file = if safe.is_empty() {
-        "task".to_string()
-    } else {
-        safe
-    };
-    worktree_path
-        .join(".macc/log/performer")
-        .join(format!("{}.md", file))
-}
-
-/// Read the tail of the performer task log for use as normalizer input.
-/// Returns up to `max_bytes` from the end of the log file.
-pub fn read_performer_log_tail(
-    worktree_path: &Path,
-    task_id: &str,
-    max_bytes: usize,
-) -> Option<String> {
-    let log_path = performer_task_log_path(worktree_path, task_id);
-    // Older shell runners translated echo's trailing newline into a dash.
-    let legacy_path = log_path.with_file_name(format!("{}-.md", log_path.file_stem()?.to_str()?));
-    let raw = std::fs::read_to_string(&log_path)
-        .or_else(|_| std::fs::read_to_string(legacy_path))
-        .ok()?;
-    if raw.is_empty() {
-        return None;
-    }
-    if raw.len() <= max_bytes {
-        Some(raw)
-    } else {
-        let mut start = raw.len() - max_bytes;
-        while !raw.is_char_boundary(start) {
-            start += 1;
-        }
-        // Start at the next full line: a cut through the middle of a line
-        // would hand the normalizer (and any message built from it) a
-        // fragment such as "s does not serve without a page".
-        let tail = &raw[start..];
-        let tail = match tail.find('\n') {
-            Some(newline) if newline + 1 < tail.len() => &tail[newline + 1..],
-            _ => tail,
-        };
-        Some(tail.to_string())
-    }
 }
 
 fn read_last_error_details_from_sqlite(
@@ -2414,90 +2264,5 @@ pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
 }
 
 #[cfg(test)]
-mod precondition_log_fallback_tests {
-    use super::{performer_task_log_path, read_completion_details_from_worktree_log};
-    use crate::coordinator::PerformerCompletionKind;
-
-    #[test]
-    fn quota_log_tail_supports_legacy_names_and_utf8_boundaries() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = performer_task_log_path(dir.path(), "SEC-API-004");
-        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        let legacy = log.with_file_name("SEC-API-004-.md");
-        std::fs::write(
-            &legacy,
-            "ERROR: You\u{2019}ve hit your usage limit. MACC_TOOL_LIMIT: quota_exhausted",
-        )
-        .unwrap();
-        let tail = super::read_performer_log_tail(dir.path(), "SEC-API-004", 8192).unwrap();
-        assert!(tail.contains("quota_exhausted"));
-        std::fs::write(&log, "\u{20ac}\u{20ac}").unwrap();
-        assert_eq!(
-            super::read_performer_log_tail(dir.path(), "SEC-API-004", 4).unwrap(),
-            "\u{20ac}"
-        );
-    }
-
-    #[test]
-    fn log_tail_starts_at_a_full_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = performer_task_log_path(dir.path(), "WEB-UI-005");
-        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        std::fs::write(
-            &log,
-            "The BFF route does not serve without a page.\nMACC_TASK_RESULT: precondition_unmet\n",
-        )
-        .unwrap();
-        // 45 bytes cut into the first line: the partial line is dropped.
-        let tail = super::read_performer_log_tail(dir.path(), "WEB-UI-005", 45).unwrap();
-        assert_eq!(tail, "MACC_TASK_RESULT: precondition_unmet\n");
-    }
-
-    #[test]
-    fn worktree_log_fallback_collects_preconditions_in_order_without_duplicates() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let log = performer_task_log_path(dir.path(), "SEC-API-003");
-        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        std::fs::write(
-            &log,
-            "  With precondition_unmet, ALSO print one \"MACC_TASK_PRECONDITION: <condition>\" line.\ncodex\nMACC_TASK_PRECONDITION: <condition>\nMACC_TASK_PRECONDITION: first condition\r\nMACC_TASK_PRECONDITION:   second condition  \nMACC_TASK_PRECONDITION: first condition\nMACC_TASK_RESULT_EXP: summary line\nMACC_TASK_RESULT: precondition_unmet\n- Result kind: precondition_unmet\n- Unmet precondition: third condition\n",
-        )
-        .unwrap();
-
-        let details = read_completion_details_from_worktree_log(dir.path(), "SEC-API-003")
-            .expect("details parsed");
-        assert_eq!(
-            details.result_kind,
-            Some(PerformerCompletionKind::PreconditionUnmet)
-        );
-        assert_eq!(details.result_explanation.as_deref(), Some("summary line"));
-        assert_eq!(
-            details.unmet_preconditions,
-            vec![
-                "first condition".to_string(),
-                "second condition".to_string(),
-                "third condition".to_string()
-            ],
-            "emission order kept, whitespace and CR trimmed, exact duplicates dropped"
-        );
-    }
-
-    #[test]
-    fn worktree_log_fallback_without_precondition_lines_yields_empty_list() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let log = performer_task_log_path(dir.path(), "T-1");
-        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        std::fs::write(
-            &log,
-            "MACC_TASK_RESULT_EXP: why\nMACC_TASK_RESULT: precondition_unmet\n",
-        )
-        .unwrap();
-        let details =
-            read_completion_details_from_worktree_log(dir.path(), "T-1").expect("details");
-        assert!(details.unmet_preconditions.is_empty());
-    }
-}
-
-#[cfg(test)]
-#[path = "runtime_result_tests.rs"]
-mod runtime_result_tests;
+#[path = "runtime_outcome_tests.rs"]
+mod runtime_outcome_tests;

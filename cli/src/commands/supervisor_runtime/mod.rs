@@ -11,6 +11,7 @@ mod repair;
 mod repair_changes;
 mod report;
 mod restart_observation;
+mod review_protocol_recovery;
 mod shutdown;
 mod task_requeue;
 mod workspace;

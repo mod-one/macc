@@ -1244,24 +1244,8 @@ pub async fn monitor_active_jobs_native(
                     repo_root,
                     &BTreeMap::new(),
                 )?;
-                // On failure, read the performer task log from the worktree
-                // and feed it to the per-adapter error normalizer.  This
-                // populates normalizer_input so that the canonical error
-                // classification pipeline actually runs in production.
-                let normalizer_input = if !evt.success {
-                    crate::coordinator::runtime::read_performer_log_tail(
-                        &job.worktree_path,
-                        &evt.task_id,
-                        8192,
-                    )
-                    .map(|log_content| coordinator_engine::NormalizerInput {
-                        exit_code: 1,
-                        stderr: log_content.clone(),
-                        stdout: log_content,
-                    })
-                } else {
-                    None
-                };
+                // Only invocation-scoped native provider evidence may be normalized.
+                let normalizer_input = evt.normalizer_input.clone();
                 let completion = coordinator_engine::apply_job_completion_in_registry(
                     &mut registry,
                     &evt.task_id,

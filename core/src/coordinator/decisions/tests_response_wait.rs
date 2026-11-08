@@ -321,3 +321,40 @@ fn an_answer_before_the_next_heartbeat_records_a_native_context_refresh() {
     assert!(receipt.decision.is_none());
     assert!(receipt.reason.starts_with("DM_STALE:"));
 }
+
+#[test]
+fn review_receipt_accepts_real_ack_after_tool_fence_but_rejects_echo_and_wrong_digest() {
+    let (tmp, mut store, plan, _, p) = fixture();
+    for (attempt, answer, expected) in [
+        ("real", "real", None),
+        ("quoted", "quoted", Some("DM_ACK_EXCLUDED")),
+        ("wrong", "wrong", Some("DM_ACK_MISMATCH")),
+        ("absent", "absent", Some("DM_ACK_ABSENT")),
+    ] {
+        let (context, _) = store
+            .issue(&plan, "A", attempt, "review", tmp.path(), &p)
+            .unwrap();
+        store
+            .issued(&plan.id, attempt, "review", &context.render(), &p)
+            .unwrap();
+        let ack = format!("MACC_DECISION_ACK: {}", context.context_digest);
+        let output=match answer {
+            "real"=>format!("exec\nspec excerpt\n```\ncodex\n{ack}\nMACC_DECISION_COMPLIANCE: {{}}\nREVIEW_VERDICT: CHANGES_REQUESTED\n"),
+            "quoted"=>format!("assistant\n```text\n{ack}\n```\n"),
+            "wrong"=>"assistant\nMACC_DECISION_ACK: wrong\n".into(),
+            _=>"assistant\nReview has no acknowledgement\n".into(),
+        };
+        let result = store.complete(&plan.id, attempt, "review", &output, &p);
+        if let Some(expected) = expected {
+            assert!(result.unwrap_err().to_string().contains(expected));
+        } else {
+            let receipt = result.unwrap();
+            assert!(receipt.acknowledged);
+            assert_eq!(receipt.completion_status, "accepted");
+            assert_eq!(
+                crate::coordinator::runtime::parse_review_verdict(&output),
+                Some(crate::coordinator::engine::ReviewVerdict::ChangesRequested)
+            );
+        }
+    }
+}

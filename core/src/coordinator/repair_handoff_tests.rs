@@ -49,6 +49,52 @@ fn fixture() -> (tempfile::TempDir, Task) {
 }
 
 #[test]
+fn protocol_unblock_resumes_review_on_the_retained_branch_without_restarting_dev() {
+    let (tmp, mut task) = fixture();
+    let root = tmp.path();
+    let worker = std::path::PathBuf::from(task.worktree_path().unwrap());
+    git(
+        &worker,
+        &["commit", "--allow-empty", "-qm", "retained implementation"],
+    )
+    .unwrap();
+    let head = git(&worker, &["rev-parse", "HEAD"]).unwrap();
+    task.task_runtime.current_phase = Some("review".into());
+    task.task_runtime.set_last_error_details(
+        "E103",
+        "output_protocol",
+        "Missing exact MACC_DECISION_ACK",
+    );
+    let paths = ProjectPaths::from_root(root);
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = CoordinatorSnapshot::empty();
+    snapshot.registry.tasks.push(task);
+    db.save_snapshot(&snapshot).unwrap();
+    let cfg = crate::config::CoordinatorConfig {
+        reference_branch: Some("main".into()),
+        ..Default::default()
+    };
+    crate::service::coordinator_workflow::coordinator_unblock_task(
+        &paths,
+        Some(&cfg),
+        &Default::default(),
+        "ROOT",
+        "Runtime projection repaired; rerun review",
+    )
+    .unwrap();
+    let registry = db.load_snapshot().unwrap().registry;
+    let task = registry.find_task("ROOT").unwrap();
+    assert_eq!(task.state, "reviewing");
+    assert_eq!(task.task_runtime.current_phase.as_deref(), Some("review"));
+    assert!(task.task_runtime.last_error_code.is_none());
+    assert_eq!(
+        git(&worker, &["branch", "--show-current"]).unwrap(),
+        "ai/fake/worker-01"
+    );
+    assert_eq!(git(&worker, &["rev-parse", "HEAD"]).unwrap(), head);
+}
+
+#[test]
 fn dirty_worker_unblock_survives_real_startup_sweep_and_is_dispatchable_with_zero_retry_budget() {
     let (tmp, mut task) = fixture();
     let root = tmp.path();

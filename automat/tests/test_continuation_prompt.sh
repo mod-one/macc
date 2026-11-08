@@ -14,6 +14,7 @@
 set -uo pipefail
 
 PERFORMER="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/performer.sh"
+export MACC_PROTOCOL_CLI="${MACC_PROTOCOL_CLI:-$(dirname "$PERFORMER")/../target/debug/macc}"
 failures=0
 
 pass() { printf '  ok   %s\n' "$1"; }
@@ -54,6 +55,7 @@ run_harness() {
       performer_log_dir='$wt/.macc/log/performer'
       task_log_path() { echo \"\${performer_log_dir}/\$1.md\"; }
       log_task_line() { :; }
+      source '$(dirname "$PERFORMER")/result_protocol.sh'
       $(extract_fns)
       $snippet
     " )

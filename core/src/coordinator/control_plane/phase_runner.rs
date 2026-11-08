@@ -515,16 +515,29 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     out.status,
                 ),
             );
+            let mut evidence = crate::coordinator::phase_evidence::PhaseEvidence::capture(
+                self.repo_root,
+                task_id,
+                mode,
+                &decision_attempt,
+                &event_source,
+                &out,
+                decision_context
+                    .as_ref()
+                    .map(|(c, _)| c.context_digest.as_str()),
+            )?;
             if let Some(wait) = crate::session_store::decision_wait::waiting_for_invocation(
                 self.repo_root,
                 task_id,
                 &event_source,
             )? {
+                evidence.settle("waiting_decision", Some(&wait.reason))?;
                 return Ok(Err(format!("E903: {}", wait.reason)));
             }
             if let Some(reason) =
                 crate::session_store::checkpoints::precondition_reason(&combined_output)
             {
+                evidence.settle("precondition_unmet", Some(&reason))?;
                 return Ok(Err(reason));
             }
             if out.status.success() {
@@ -538,6 +551,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         &combined_output,
                         &policy,
                     ) {
+                        evidence.settle("validation_failed", Some(&error.to_string()))?;
                         if error.to_string().contains("DM_COMPLIANCE:") {
                             let diagnostic = store.diagnostic_delivery(
                                 context,
@@ -562,6 +576,17 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         return Ok(Err(error.to_string()));
                     }
                 }
+                evidence.settle(
+                    if mode == "review"
+                        && coordinator_runtime::parse_review_verdict(&combined_output)
+                            == Some(coordinator_engine::ReviewVerdict::ChangesRequested)
+                    {
+                        "changes_requested"
+                    } else {
+                        "validated"
+                    },
+                    None,
+                )?;
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits
                 // are managed by performer.sh. Fix phases may leave
@@ -649,6 +674,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 );
                 return Ok(Ok(combined_output));
             }
+            evidence.settle("process_failed", Some(&out.status.to_string()))?;
             last_reason = format!(
                 "phase '{}' failed for task {} on attempt {}/{}: status={} stdout=\"{}\" stderr=\"{}\"",
                 mode,

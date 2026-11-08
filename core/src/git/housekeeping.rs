@@ -13,6 +13,26 @@ pub async fn fetch_housekeeping(worktree: &Path, remote: &str) -> Result<bool> {
             action: "optional git fetch".into(),
             source,
         })?;
+    report(worktree, remote, &output);
+    Ok(output.status.success())
+}
+
+/// Synchronous counterpart for worktree reuse; the same warning classification.
+pub fn fetch_housekeeping_sync(worktree: &Path, remote: &str) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .current_dir(worktree)
+        .args(["fetch", remote])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|source| MaccError::Io {
+            path: worktree.display().to_string(),
+            action: "optional git fetch".into(),
+            source,
+        })?;
+    report(worktree, remote, &output);
+    Ok(output.status.success())
+}
+fn report(worktree: &Path, remote: &str, output: &std::process::Output) {
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         let class = if detail.contains("Username")
@@ -27,5 +47,4 @@ pub async fn fetch_housekeeping(worktree: &Path, remote: &str) -> Result<bool> {
         };
         tracing::warn!(operation="optional_fetch",remote,path=%worktree.display(),class,exit=?output.status.code(),cause=%detail.trim(),"Optional remote refresh failed; local delivery remains available");
     }
-    Ok(output.status.success())
 }

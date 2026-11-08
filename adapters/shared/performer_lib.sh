@@ -511,71 +511,17 @@ run_default_call() {
   fi
 }
 
-# RL-PERFORMER-009: override exit code to 0 when the task reported a result
-# via the MACC_TASK_RESULT marker, regardless of transient runner errors.
-override_rc_for_success_marker() {
-  local rc="$1"
-  [[ "$rc" -eq 0 ]] && { echo 0; return; }
-  if declare -F terminal_result_lines >/dev/null && terminal_result_lines "$output_capture" | grep -qE '^MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes|precondition_unmet)' \
-      2>/dev/null; then
-    echo 0
-  else
-    echo "$rc"
-  fi
-}
-
-# RL-PERFORMER-010: Detect tool-reported quota/session-limit errors that the
-# tool emits as human-readable text, regardless of its process exit status.
-#
-# When detected:
-#   - Prints a structured MACC_TOOL_LIMIT line to stderr so the coordinator
-#     log and the per-adapter error normalizer can classify it as E602
-#     (QuotaExhausted / not retryable).
-#   - Returns exit code 1 so the runtime sees a failure and invokes the
-#     normalizer (normalizer_input is only populated on !success).
-#   - Optionally extracts and emits a retry-after hint from the message.
-#
-# Patterns covered:
-#   Codex:  "ERROR: You've hit your usage limit. ... try again at <DATE>"
-#   Claude: "You've hit your session limit · resets <TIME>"
+# A marker cannot turn a nonzero provider process into a successful invocation.
+# Native terminal receipts, rather than shell exit rewriting, decide delivery.
 provider_unavailable() {
-  grep -qiE 'you.ve hit your (usage|session) limit|individual[ _]+quota[ _]+reached|quota[ _]+exceeded|insufficient[ _]quota|rate[ _]+limit|too many requests|(^|[^0-9])(429|529)([^0-9]|$)|authentication failed|invalid api key|not authenticated' "$1" 2>/dev/null
+  local inspection
+  inspection="$(runner_output_inspection "$1")" || return 0
+  jq -e '.provider_failure' <<<"$inspection" >/dev/null
 }
-
-detect_tool_limit_exit() {
-  local rc="$1"
-  [[ -f "$output_capture" ]] || { echo "$rc"; return; }
-
-  # Match the usage/session limit phrases both tools emit.
-  if ! grep -qiE \
-      "(individual quota reached|you.ve hit your (usage|session) limit|hit your usage limit|your usage limit)" \
-      "$output_capture" 2>/dev/null; then
-    echo "$rc"
-    return
-  fi
-
-  # Try to extract an absolute "try again at <DATE>" hint (codex format).
-  # Also handle "resets <TIME>" form (claude format). Emit as a raw string for
-  # the normalizer / log — converting to epoch here would require locale-aware
-  # date parsing which is fragile across distros.
-  local retry_hint=""
-  retry_hint="$(grep -oiE \
-      "(try again at ([A-Za-z]+ [0-9]+[a-z]*, [0-9]+ )?[0-9]+:[0-9]+[[:space:]]*[AaPp][Mm]([^.]*)?|resets in ([0-9]+[dhms])+|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
-      "$output_capture" 2>/dev/null | head -1 || true)"
-
-  # Emit a structured notification that appears in the performer log and is
-  # picked up as the tail text by the normalizer path.
-  {
-    echo ""
-    echo "MACC_TOOL_LIMIT: quota_exhausted tool=${tool_id}${retry_hint:+ retry_hint=\"${retry_hint}\"}"
-    echo "The tool '${tool_id}' has exhausted its usage quota (exit ${rc}); pending work is retained."
-    echo "This is treated as an error (E602) so the coordinator can handle it correctly."
-    if [[ -n "$retry_hint" ]]; then
-      echo "Retry hint from tool: ${retry_hint}"
-    fi
-  } >&2
-
-  echo 1
+provider_exit_code() {
+  local rc="$1" inspection
+  inspection="$(runner_output_inspection "$output_capture" "$rc")" || { echo 1; return; }
+  if [[ "$rc" == 0 ]] && jq -e '.provider_failure' <<<"$inspection" >/dev/null; then echo 1; else echo "$rc"; fi
 }
 
 if [[ "$session_backend" == sqlite && -n "$task_id" ]]; then
@@ -658,23 +604,11 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       release_session_lock
     fi
   fi
-  # Apply success-marker override first, then quota detection.
-  #
-  # ORDER MATTERS:
-  # 1. override_rc_for_success_marker: may flip a non-zero rc back to 0 if
-  #    the tool printed a MACC_TASK_RESULT marker (e.g. task completed before
-  #    a transient error).
-  # 2. detect_tool_limit_exit: ALWAYS runs last so a quota/session-limit error
-  #    in the output overrides even a success marker.  This prevents session
-  #    contamination: resumed sessions may contain MACC_TASK_RESULT markers
-  #    from earlier interactions, which must not suppress a quota failure.
-  rc="$(override_rc_for_success_marker "$rc")"
-  rc="$(detect_tool_limit_exit "$rc")"
+  rc="$(provider_exit_code "$rc")"
   exit "$rc"
 else
   rc=0
   run_default_call || rc=$?
-  rc="$(override_rc_for_success_marker "$rc")"
-  rc="$(detect_tool_limit_exit "$rc")"
+  rc="$(provider_exit_code "$rc")"
   exit "$rc"
 fi

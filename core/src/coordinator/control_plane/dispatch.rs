@@ -170,73 +170,9 @@ fn build_task_selector_config(
     }
 }
 
-/// Explain why no `todo` task could be dispatched, for the "no progress" abort.
-///
-/// Builds the *same* selector config dispatch uses, so the reasons reported are
-/// the reasons that actually applied. Where a task still holds a branch, the
-/// count of unmerged commits on it is appended -- that is the number an operator
-/// needs to decide between recovering the work and discarding it.
-pub fn diagnose_stall_native(
-    repo_root: &Path,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    state: &CoordinatorRunState,
-) -> crate::coordinator::engine::StallDiagnosis {
-    let cfg = CoordinatorConfigResolved::resolve(coordinator);
-    let Ok(registry_value) =
-        crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())
-    else {
-        return crate::coordinator::engine::StallDiagnosis::default();
-    };
-    let Ok(registry) = crate::coordinator::model::TaskRegistry::from_value(&registry_value) else {
-        return crate::coordinator::engine::StallDiagnosis::default();
-    };
-    let selector_cfg = build_task_selector_config(
-        repo_root,
-        &registry_value,
-        canonical,
-        env_cfg,
-        &cfg,
-        coordinator,
-        state,
-    );
-    let base_branch = selector_cfg.default_base_branch.clone();
-
-    let todo_count = registry
-        .tasks
-        .iter()
-        .filter(|task| task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo))
-        .count();
-    let diagnosed =
-        crate::coordinator::task_selector::diagnose_unschedulable_tasks(&registry, &selector_cfg);
-    let terminal_dependents = diagnosed
-        .iter()
-        .filter(|task| task.depends_on_blocked)
-        .count();
-    let has_blocked_root = diagnosed.iter().any(|task| task.blocked_root);
-    let lines = diagnosed
-        .into_iter()
-        .map(|stuck| {
-            let mut line = format!("{} ({})", stuck.id, stuck.reason);
-            if let Some(branch) = stuck.branch {
-                let commits = crate::git::commits_between(repo_root, &base_branch, &branch)
-                    .map(|c| c.len())
-                    .unwrap_or(0);
-                line.push_str(&format!(
-                    "; branch {} holds {} unmerged commit(s)",
-                    branch, commits
-                ));
-            }
-            line
-        })
-        .collect();
-    crate::coordinator::engine::StallDiagnosis {
-        lines,
-        terminal_blocked: has_blocked_root
-            && (todo_count == 0 || terminal_dependents == todo_count),
-    }
-}
+#[path = "stall_diagnostics.rs"]
+mod stall_diagnostics;
+pub use stall_diagnostics::diagnose_stall_native;
 
 /// A cooldown is a planned wait only if removing it would make a task dispatchable.
 pub fn waiting_for_tools_native(

@@ -13,6 +13,7 @@
 set -uo pipefail
 
 PERFORMER="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/performer.sh"
+export MACC_PROTOCOL_CLI="${MACC_PROTOCOL_CLI:-$(dirname "$PERFORMER")/../target/debug/macc}"
 failures=0
 pass() { printf '  ok   %s\n' "$1"; }
 fail() { printf '  FAIL %s\n     %s\n' "$1" "${2:-}"; failures=$((failures + 1)); }
@@ -23,7 +24,8 @@ extract_fns() {
     -e '/^task_preconditions_json()/,/^}/p' \
     "$PERFORMER"
 }
-run_harness() { bash -c "$(extract_fns)
+run_harness() { bash -c "source '$(dirname "$PERFORMER")/result_protocol.sh'
+$(extract_fns)
 $1"; }
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT

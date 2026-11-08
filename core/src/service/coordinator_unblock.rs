@@ -100,7 +100,12 @@ pub(crate) fn apply(
                 tracking_id: block.tracking_id.clone(),
             });
     }
-    task.set_workflow_state(WorkflowState::Todo);
+    let next_state = if crate::coordinator::phase_diagnostics::retained_review_protocol(task) {
+        WorkflowState::Reviewing
+    } else {
+        WorkflowState::Todo
+    };
+    task.set_workflow_state(next_state);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Idle);
     runtime.pid = None;
@@ -141,7 +146,7 @@ pub(crate) fn apply(
         "task_unblocked",
         task_id,
         "dispatch",
-        "todo",
+        next_state.as_str(),
         &detail,
         "info",
     )?;

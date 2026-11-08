@@ -124,6 +124,23 @@ pub fn reconcile(root: &Path, task: &Task, reference: &str) -> Result<String> {
     if head == target {
         return Ok(target);
     }
+    // A runtime-only repair has no new reference content to integrate. Keep
+    // the exact implementation commit and any pending index/worktree edits.
+    let reference_present = crate::git::run_git_output_mapped(
+        path,
+        &["merge-base", "--is-ancestor", &target, &head],
+        "inspect retained reference ancestry",
+    )?;
+    match reference_present.status.code() {
+        Some(0) => return Ok(head),
+        Some(1) => {}
+        _ => {
+            return Err(MaccError::Validation(format!(
+                "Cannot inspect retained reference ancestry; work preserved at {backup}: {}",
+                String::from_utf8_lossy(&reference_present.stderr)
+            )))
+        }
+    }
     let merged = merge_tree(path, &snapshot, &target, &backup)?;
     // Preserve committed worker history independently of its unfinished edits.
     let base_tree = merge_tree(path, &head, &target, &backup)?;

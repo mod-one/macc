@@ -34,6 +34,7 @@ pub mod process;
 pub mod quickstart;
 pub mod restore;
 pub mod run;
+pub mod runner_output;
 pub mod save;
 pub mod session_store;
 pub mod settings;

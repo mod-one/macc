@@ -1,43 +1,23 @@
 #!/usr/bin/env bash
-# Test the production functions without invoking any AI tool.
+# Native adapter classification only; no AI invocation or shell regex copy.
 set -euo pipefail
-performer="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/performer.sh"
-eval "$(sed -n '/^detect_rate_limit()/,/^}/p; /^task_log_path()/,/^}/p' "$performer")"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export MACC_PROTOCOL_CLI="${MACC_PROTOCOL_CLI:-$root/target/debug/macc}"
+source "$root/automat/result_protocol.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-performer_log_dir="$tmp"
-[[ "$(task_log_path SEC-API-004)" == "$tmp/SEC-API-004.md" ]]
-for message in \
-  'error: Individual quota reached. Resets in 64h18m47s.' \
-  'ERROR: You’ve hit your usage limit. Try again at Oct 4th, 2026 2:13 AM.' \
-  'MACC_TOOL_LIMIT: quota_exhausted tool=codex' \
-  "You've hit your session limit"; do
+for tool_id in codex claude agy; do
+  case "$tool_id" in
+    codex) message="ERROR: You've hit your usage limit. Try again at 10:30 PM." ;;
+    claude) message="You've hit your session limit · resets 10:10pm (UTC)" ;;
+    agy) message='error: Individual quota reached. Resets in 64h18m47s.' ;;
+  esac
   printf '%s\n' "$message" > "$tmp/output"
-  # grep -q over a pipe with pipefail used to lose matches on large output.
-  for ((i=0; i<3000; i++)); do printf '%s\n' 'large unrelated output'; done >> "$tmp/output"
-  LAST_ERROR_CODE=''
-  detect_rate_limit "$tmp/output"
-  [[ "$LAST_ERROR_CODE" == E602 ]]
+  inspection="$(runner_output_inspection "$tmp/output")"
+  [[ "$(jq -r '.error.error_code' <<<"$inspection")" == E602 ]]
+  printf 'exec\ncommand output\n```\n%s\ncodex\nMACC_TASK_RESULT: success_without_changes\n' "$message" > "$tmp/output"
+  inspection="$(runner_output_inspection "$tmp/output")"
+  [[ "$(jq -r '.provider_failure' <<<"$inspection")" == false ]]
+  [[ "$(jq -r '.terminal_output' <<<"$inspection")" == 'MACC_TASK_RESULT: success_without_changes' ]]
 done
-printf '%s\n' '429 too many requests retry-after: 60' > "$tmp/output"
-LAST_ERROR_CODE=''
-detect_rate_limit "$tmp/output"
-[[ "$LAST_ERROR_CODE" == E601 ]]
-printf '%s\n' 'permission denied' > "$tmp/output"
-LAST_ERROR_CODE=''
-detect_rate_limit "$tmp/output"
-[[ -z "$LAST_ERROR_CODE" ]]
-printf '%s\n' "You've hit your session limit · resets 10:10pm (UTC)" > "$tmp/output"
-LAST_ERROR_CODE=''
-detect_rate_limit "$tmp/output"
-[[ "$LAST_ERROR_CODE" == E602 && "$LAST_ERROR_MESSAGE" == *'resets 10:10pm (UTC)'* ]]
-# Exercise the actual shared adapter exit override without starting a tool.
-shared="$(dirname "$performer")/../adapters/shared/performer_lib.sh"
-eval "$(sed -n '/^detect_tool_limit_exit()/,/^}/p' "$shared")"
-output_capture="$tmp/output"
-tool_id=agy
-printf '%s\n' 'error: Individual quota reached. Resets in 64h18m47s.' > "$output_capture"
-[[ "$(detect_tool_limit_exit 0 2> "$tmp/limit")" == 1 ]]
-grep -q 'MACC_TOOL_LIMIT: quota_exhausted' "$tmp/limit"
-grep -q 'Resets in 64h18m47s' "$tmp/limit"
-printf '%s\n' 'Quota classification and log path tests passed.'
+printf '%s\n' 'Native quota attribution and quoted-output exclusion passed.'

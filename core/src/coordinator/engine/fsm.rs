@@ -1250,7 +1250,7 @@ fn apply_job_completion_typed(
     );
     debug_assert!(
         classification.completion_authority != CompletionAuthority::IpcSignal
-            || classification.has_commits
+            || input.completion_kind.is_some()
     );
     let config = CoordinatorConfigResolved::from_input(input);
     let strategy = resolve_retry_strategy(
@@ -3459,14 +3459,14 @@ mod tests {
     }
 
     #[test]
-    fn classify_completion_error_exit_error_without_commits_falls_back() {
+    fn classify_completion_error_failed_exit_preserves_native_kind_without_claiming_success() {
         let input =
             make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));
         let classified = classify_completion_error(&input, None, false);
 
         assert_eq!(
             classified.completion_authority,
-            CompletionAuthority::Fallback
+            CompletionAuthority::IpcSignal
         );
         assert!(!classified.completion_success);
         assert_eq!(
@@ -3516,7 +3516,7 @@ mod tests {
         let mut input = make_classification_input(false, None);
         input.normalizer_input = Some(NormalizerInput {
             exit_code: 1,
-            stderr: "quota exhausted".to_string(),
+            stderr: "ERROR: quota exhausted".to_string(),
             stdout: String::new(),
         });
         let normalizer = StubNormalizer {
@@ -5037,7 +5037,7 @@ mod tests {
     }
 
     #[test]
-    fn error_with_changes_stdout_marker_preserves_healthy_worktree() {
+    fn error_with_changes_native_result_preserves_healthy_worktree() {
         let repo = make_repo_with_commit_ahead("main");
         let mut task_val = json!({
             "id": "SES5",
@@ -5059,7 +5059,7 @@ mod tests {
                 phase_timeout_seconds: 300,
                 elapsed_seconds: 5,
                 status_text: "performer failed".to_string(),
-                completion_kind: None,
+                completion_kind: Some(PerformerCompletionKind::ErrorWithChanges),
                 error_code: None,
                 error_origin: None,
                 error_message: None,
@@ -5087,7 +5087,7 @@ mod tests {
     }
 
     #[test]
-    fn error_without_changes_stdout_marker_respects_the_retry_budget() {
+    fn native_error_without_changes_respects_the_retry_budget() {
         let mut task_val = json!({
             "id": "BUDGET-STDOUT-NO-CHANGES",
             "state": "claimed",
@@ -5097,7 +5097,7 @@ mod tests {
         });
         let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges);
         input.success = false;
-        input.completion_kind = None;
+        input.completion_kind = Some(PerformerCompletionKind::ErrorWithoutChanges);
         input.normalizer_input = Some(NormalizerInput {
             exit_code: 1,
             stderr: String::new(),

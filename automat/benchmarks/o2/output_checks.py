@@ -32,7 +32,7 @@ def main(argv=None):
     cli = [str(args.macc.resolve()), '--cwd', str(output)]
     try:
         commands.run(cli + ['init', '--fresh', '--no-restore-prompt'], output)
-        (output / '.macc/macc.yaml').write_text(json.dumps({'tools': {'enabled': [], 'config': {}}, 'settings': {'offline': True}, 'context_engine': {'enabled': False, 'output_reduction': True, 'pull_limit_tokens': 2000, 'max_output_bytes': 65536}}))
+        (output / '.macc/macc.yaml').write_text(json.dumps({'tools': {'enabled': [], 'config': {}}, 'settings': {'offline': True}, 'context_engine': {'enabled': True, 'output_reduction': True, 'pull_limit_tokens': 2000, 'max_output_bytes': 65536}}))
         for name, (raw, required) in SAMPLES.items():
             response = json.loads(commands.run(cli + ['o2', 'reduce', 'log' if name == 'utf8-budget' else name], output, input_text=raw))
             summary = response['summary']

@@ -20,7 +20,9 @@ stop_sqlite_heartbeat() {
   fi
 }
 cleanup_sqlite_session() {
-  stop_sqlite_heartbeat
+  # TERM may interrupt the shell's provider wait. Stop that provider before
+  # nesting another wait in the EXIT trap (notably the signaling heartbeat).
+  # Keep the lease monitor until the provider has stopped, then finalize it.
   if [[ -n "$provider_pid" ]] && kill -0 "$provider_pid" 2>/dev/null; then
     if [[ "$provider_group" == true ]]; then
       kill -TERM -- "-$provider_pid" 2>/dev/null || true
@@ -37,6 +39,7 @@ cleanup_sqlite_session() {
   fi
   if [[ -n "$provider_tee_pid" ]]; then kill "$provider_tee_pid" 2>/dev/null || true; wait "$provider_tee_pid" 2>/dev/null || true; fi
   if [[ -n "$provider_capture_dir" ]]; then rm -f "$provider_capture_dir/output"; rmdir "$provider_capture_dir" 2>/dev/null || true; fi
+  stop_sqlite_heartbeat
   if [[ -n "$sqlite_lease_key" ]]; then
     finish_usage interrupted
     finish_checkpoint interrupted false || true
@@ -134,8 +137,7 @@ MACC_TASK_RESULT: precondition_unmet
     fi
   fi
   local invocation_rc="$rc"
-  rc="$(override_rc_for_success_marker "$rc")"
-  rc="$(detect_tool_limit_exit "$rc")"
+  rc="$(provider_exit_code "$rc")"
   local acknowledged=true result=success
   if [[ "$checkpoint_enabled" == true && "$sid_is_new" == 1 ]] && ! checkpoint_acknowledged; then
     acknowledged=false
@@ -145,7 +147,9 @@ MACC_TASK_RESULT: precondition_unmet
     fi
   fi
   if [[ "$rc" != 0 ]]; then result=failure; fi
-  if grep -qiE "(individual quota reached|hit your (usage|session) limit|MACC_TOOL_LIMIT:)" "$output_capture"; then result=quota; fi
+  local provider_inspection
+  provider_inspection="$(runner_output_inspection "$output_capture" "$rc")" || return 1
+  if [[ "$(jq -r '.error.error_code // empty' <<<"$provider_inspection")" == E602 ]]; then result=quota; fi
   if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$output_capture"; then result=precondition_unmet; fi
   finish_usage "$result"
   # The shared review protocol is provider-neutral. This records an observation,

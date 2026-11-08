@@ -454,29 +454,22 @@ fn prepare_reused_worktree_base(
     if !crate::git::clean_fd(worktree_path)? {
         return Ok((false, false));
     }
-    // Try checking base_branch out directly. If that fails -- normally because
-    // the operator has it checked out in the primary worktree -- detach HEAD
-    // instead; the `reset --hard <base_branch>` below moves the worktree onto
-    // the base commit after the fetch.
-    //
-    // Never force the branch in with `checkout -B`: that overrides git's
-    // "already used by worktree" guard and leaves one branch live in two
-    // worktrees, where a commit in either silently moves the other's HEAD.
-    if !crate::git::checkout(worktree_path, base_branch, false)?
-        && !crate::git::checkout_detach(worktree_path)?
-    {
+    // Detach directly. Probing a checkout of the operator's reference branch
+    // emits a misleading fatal error and must never claim that branch here.
+    let detached = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["checkout", "--detach"],
+        "detach reused worktree",
+    )?;
+    if !detached.status.success() {
+        tracing::error!(path=%worktree_path.display(),cause=%String::from_utf8_lossy(&detached.stderr),"Could not detach reused worktree");
         return Ok((false, false));
     }
     // Fetch is best-effort: a network failure should not permanently block
     // worktree reuse.  This mirrors the behaviour of prepare_clean_worktree
     // which only hard-fails on fetch when fail_on_fetch_error is set.
-    if crate::git::git_remote_exists(worktree_path, "origin")?
-        && !crate::git::fetch(worktree_path, "origin")?
-    {
-        tracing::warn!(
-            "prepare_reused_worktree_base: fetch failed for {}, continuing",
-            worktree_path.display()
-        );
+    if crate::git::git_remote_exists(worktree_path, "origin")? {
+        crate::git::fetch_housekeeping_sync(worktree_path, "origin")?;
     }
     if !crate::git::reset_hard(worktree_path, base_branch)? {
         return Ok((false, false));

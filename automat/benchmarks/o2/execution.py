@@ -70,7 +70,9 @@ def exercise(commands, macc, output, tool, settings, case, arm, timeout, tier, t
         if feature == 'native-navigation':
             config['code_intelligence'].update(enabled=True, native_map_enabled=arm == 'indexed')
         if feature == 'output-reduction':
-            config['context_engine'].update(output_reduction=arm == 'reduced', pull_limit_tokens=2000, max_output_bytes=65536)
+            # Keep the required parent feature constant in both arms; only
+            # output reduction is the treatment. No memory corpus is enabled.
+            config['context_engine'].update(enabled=True, output_reduction=arm == 'reduced', pull_limit_tokens=2000, max_output_bytes=65536)
         if feature in provider_navigation.PROVIDERS:
             provider_navigation.configure(config, feature, arm == 'provider')
         (root / '.macc/macc.yaml').write_text(json.dumps(config, indent=2))

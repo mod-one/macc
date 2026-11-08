@@ -40,7 +40,7 @@ fn patterns() -> &'static Vec<Pattern> {
             // ── Non-retryable (check first) ────────────────────────
             // Quota / usage cap — must precede generic 429
             Pattern {
-                regex: Regex::new(r"(?i)(hit your (?:(?:usage|session) )?limit|usage limit|usage cap|out of extra usage|MACC_TOOL_LIMIT:\s*quota_exhausted|resets \d{1,2}(?::\d{2})?\s*[ap]m)")
+                regex: Regex::new(r"(?i)(hit your (?:(?:usage|session) )?limit|usage limit|usage cap|out of extra usage|resets \d{1,2}(?::\d{2})?\s*[ap]m)")
                     .unwrap(),
                 class: CanonicalClass::QuotaExhausted,
             },
@@ -124,8 +124,8 @@ fn resets_time_regex() -> &'static Regex {
 }
 
 /// Regex for the absolute-timestamp "try again at <Month> <Day>, <Year> <HH>:<MM> [AP]M"
-/// or short "try again at <HH>:<MM> [AP]M" form, which `detect_tool_limit_exit()`
-/// may embed in the MACC_TOOL_LIMIT line when the underlying tool emits this format.
+/// or short "try again at <HH>:<MM> [AP]M" form, which
+/// appears in native provider error evidence when the underlying tool emits it.
 fn try_again_at_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -394,7 +394,7 @@ impl ErrorNormalizer for ClaudeErrorNormalizer {
         //   1. Standard "retry-after: N" header (seconds)
         //   2. "resets Xam/pm (UTC)" — human-readable daily reset
         //   3. "try again at <Month> <Day>, <Year> <HH>:<MM> [AP]M" — absolute
-        //      timestamp embedded by detect_tool_limit_exit() in MACC_TOOL_LIMIT
+        //      timestamp returned in the provider quota message
         let retry_after_seconds = retry_after_regex()
             .captures(&combined)
             .and_then(|caps| caps.get(1))
@@ -539,7 +539,7 @@ mod tests {
     fn quota_marker_and_session_limit_without_reset_are_recognized() {
         for message in [
             "You've hit your session limit",
-            "MACC_TOOL_LIMIT: quota_exhausted tool=claude",
+            "You've hit your session limit",
             "You're out of extra usage",
         ] {
             let err = norm(1, message, "").unwrap();

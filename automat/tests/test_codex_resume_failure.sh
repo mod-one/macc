@@ -42,6 +42,7 @@ esac
 STUB
 chmod +x "$WORK/bin/codex"
 export PATH="$WORK/bin:$PATH"
+export MACC_PROTOCOL_CLI="${MACC_PROTOCOL_CLI:-$REPO_ROOT/target/debug/macc}"
 
 source "$REPO_ROOT/automat/tests/session_fixture.sh"
 
@@ -66,7 +67,7 @@ for attempt in 1 2; do
     fi
     case "$scenario" in
       transport) grep -q 'connection closed' "$log" ;;
-      quota) grep -q 'MACC_TOOL_LIMIT: quota_exhausted' "$log" ;;
+      quota) grep -q 'hit your usage limit' "$log" ;;
       completed) grep -q 'MACC_TASK_RESULT: success_without_changes' "$log" ;;
       task_error) grep -q 'MACC_TASK_RESULT: error_without_changes' "$log" ;;
     esac

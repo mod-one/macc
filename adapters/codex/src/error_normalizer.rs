@@ -51,7 +51,7 @@ fn patterns() -> &'static Vec<Pattern> {
             // Quota exhaustion — must precede generic 429/RateLimitError
             Pattern {
                 regex: Regex::new(
-                    r"(?i)(MACC_TOOL_LIMIT:\s*quota_exhausted|insufficient_quota|budget.exceeded|exceeded.your.current.quota|plan.limit|usage.limit)",
+                    r"(?i)(insufficient_quota|budget.exceeded|exceeded.your.current.quota|plan.limit|usage.limit)",
                 )
                 .unwrap(),
                 class: CanonicalClass::QuotaExhausted,
@@ -722,7 +722,7 @@ mod tests {
     }
 
     /// The exact format codex emits when a quota limit is hit at exit-0.
-    /// After `detect_tool_limit_exit()` forces exit 1, the normalizer receives
+    /// After native provider inspection reports failure, the normalizer receives
     /// this text and must classify it as QuotaExhausted with a retry_after hint.
     #[test]
     fn quota_exhausted_codex_cli_format_with_retry_hint() {
@@ -732,7 +732,7 @@ mod tests {
             (https://chatgpt.com/explore/pro), visit \
             https://chatgpt.com/codex/settings/usage to purchase more credits \
             or try again at May 25th, 9999 3:20 AM.\n\
-            \nMACC_TOOL_LIMIT: quota_exhausted tool=codex \
+            \nERROR: You have reached your usage limit. \
             retry_hint=\"try again at May 25th, 9999 3:20 AM\"\n\
             The tool 'codex' has exhausted its usage quota and exited 0 \
             without doing any work.";
