@@ -4,8 +4,20 @@ use crate::Result;
 use std::{collections::BTreeMap, path::Path};
 
 pub(super) fn ready(root: &Path, registry: &mut serde_json::Value, task_id: &str) -> Result<bool> {
-    let Some(budget) = decisions::context_budget(root, task_id, "dev")? else {
-        return Ok(true);
+    if let Some(pending) = decisions::pending_for_task(root, task_id)? {
+        return park(root, registry, task_id, pending);
+    }
+    let budget = match decisions::context_budget(root, task_id, "dev") {
+        Ok(Some(budget)) => budget,
+        Ok(None) => return Ok(true),
+        Err(error) if error.to_string().contains("DM_PENDING:") => {
+            // A request may arrive between the first check and budget preview.
+            if let Some(pending) = decisions::pending_for_task(root, task_id)? {
+                return park(root, registry, task_id, pending);
+            }
+            return Ok(false); // Already answered: retry with fresh context next cycle.
+        }
+        Err(error) => return Err(error),
     };
     tracing::info!(
         task_id,
@@ -23,7 +35,11 @@ pub(super) fn ready(root: &Path, registry: &mut serde_json::Value, task_id: &str
     let task = typed
         .find_task_mut(task_id)
         .ok_or_else(|| decisions::error("Preflight task disappeared"))?;
-    if task.task_runtime.pid.is_some() {
+    if task
+        .task_runtime
+        .pid
+        .is_some_and(crate::coordinator::helpers::is_pid_running)
+    {
         return Err(decisions::error("Preflight cannot replace an active task"));
     }
     task.set_workflow_state(WorkflowState::Blocked);
@@ -55,6 +71,43 @@ pub(super) fn ready(root: &Path, registry: &mut serde_json::Value, task_id: &str
         &detail,
         "warning",
     )?;
+    Ok(false)
+}
+
+fn park(
+    root: &Path,
+    registry: &mut serde_json::Value,
+    task_id: &str,
+    pending: decisions::PendingDecision,
+) -> Result<bool> {
+    let mut typed = TaskRegistry::from_value(registry)?;
+    if let Some(task) = typed.find_task_mut(task_id) {
+        if task
+            .task_runtime
+            .pid
+            .is_some_and(crate::coordinator::helpers::is_pid_running)
+        {
+            return Ok(false);
+        }
+        task.set_workflow_state(WorkflowState::Blocked);
+        task.task_runtime.pid = None;
+        pending.apply(task.ensure_runtime());
+        *registry = typed.to_value()?;
+        crate::coordinator::state::coordinator_state_registry_save(
+            root,
+            &BTreeMap::new(),
+            registry,
+        )?;
+        crate::coordinator::helpers::append_coordinator_event_with_severity(
+            root,
+            "decision_wait",
+            task_id,
+            "dev",
+            "waiting",
+            &pending.reason(),
+            "info",
+        )?;
+    }
     Ok(false)
 }
 

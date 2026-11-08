@@ -8,6 +8,7 @@ pub(crate) use db::{
 };
 pub(crate) use leases::verify as verify_lease;
 pub(crate) use migration::stopped as require_stopped;
+pub mod decision_wait;
 pub(crate) mod fingerprint;
 mod leases;
 mod migration;

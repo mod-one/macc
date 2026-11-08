@@ -141,14 +141,17 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
         if let Some(decision) = pending {
             task.task_runtime
                 .extra
+                .insert("decision_wait_status".into(), json!(decision.status));
+            task.task_runtime
+                .extra
                 .insert("decision_wait".into(), json!(decision.id));
             if !active {
                 task.set_workflow_state(WorkflowState::Blocked);
                 task.task_runtime.set_last_error_details(
-                    "DM_PENDING",
+                    "E903",
                     "decisions",
                     format!(
-                        "Decision {} is {}: {}. {}",
+                        "DM_PENDING: Decision {} is {}: {}. {}",
                         decision.id,decision.status, decision.request.question,decision.investigation.as_ref().map(|r|r.diagnosis.as_str()).unwrap_or("Inspect the recorded answer and outstanding graph effects; no consent is inferred")
                     ),
                 );
@@ -173,6 +176,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             task.task_runtime.clear_last_error_details();
             task.task_runtime.last_error = None;
             task.task_runtime.extra.remove("decision_wait");
+            task.task_runtime.extra.remove("decision_wait_status");
         }
         if p.human_question_min_risk != Consultation::NeverAsk {
             task.task_runtime.extra.remove("delegated_gate_resolution");

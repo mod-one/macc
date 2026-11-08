@@ -2132,10 +2132,17 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         dispatched: usize,
     ) -> Result<CoordinatorCounts> {
         self.last_cycle_progressed = advance.progressed || dispatched > 0;
-        let snapshot = crate::coordinator::state::coordinator_state_snapshot(
+        let mut snapshot = crate::coordinator::state::coordinator_state_snapshot(
             self.repo_root,
             &std::collections::BTreeMap::new(),
         )?;
+        if crate::coordinator::decisions::refresh_waits(self.repo_root, &mut snapshot.registry)? {
+            crate::coordinator::state::coordinator_state_registry_save(
+                self.repo_root,
+                &std::collections::BTreeMap::new(),
+                &snapshot.registry.to_value()?,
+            )?;
+        }
         let (total, todo, active, blocked, merged) = snapshot.registry.counts();
         let counts = CoordinatorCounts {
             total,

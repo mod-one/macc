@@ -98,7 +98,38 @@ pub(super) async fn launch_performer(
     .await;
     let (current_exe, epoch, phase_timeout_seconds, routing_env) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => return Err(super::failure::record(repo_root, claim, error, logger)?),
+        Err(error) => {
+            if let Some(wait) =
+                crate::coordinator::decisions::pending_for_task(repo_root, &claim.task_id)?
+                    .filter(|_| error.to_string().contains("DM_PENDING:"))
+            {
+                let value = crate::coordinator::state::coordinator_state_registry_load(
+                    repo_root,
+                    &BTreeMap::new(),
+                )?;
+                let mut registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+                if let Some(task) = registry.find_task_mut(&claim.task_id) {
+                    if task.task_runtime.claim_id.as_deref() != Some(&claim.claim_id)
+                        || task.workflow_state() != Some(crate::coordinator::WorkflowState::Claimed)
+                        || task.task_runtime.pid.is_some()
+                    {
+                        return Err(error);
+                    }
+                    task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+                    task.task_runtime.pid = None;
+                    wait.apply(&mut task.task_runtime);
+                }
+                let mut value = registry.to_value()?;
+                crate::coordinator::helpers::recompute_resource_locks_from_tasks(&mut value);
+                crate::coordinator::state::coordinator_state_registry_save(
+                    repo_root,
+                    &BTreeMap::new(),
+                    &value,
+                )?;
+                return Ok(None);
+            }
+            return Err(super::failure::record(repo_root, claim, error, logger)?);
+        }
     };
 
     let pid = coordinator_runtime::spawn_performer_job(

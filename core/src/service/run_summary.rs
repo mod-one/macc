@@ -265,6 +265,9 @@ fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&s
                 task.id
             );
         }
+        if task.task_runtime.last_error_origin.as_deref() == Some("decisions") {
+            return format!("Open Decisions for {}: inspect the exact decision named in the cause, its selected response and failed independent check. Supply evidence, or propose an explicit governed revision/deferral. Then retry the retained phase; a generic unblock or unchanged restart cannot establish compliance.",task.id);
+        }
         if code == Some("E903") || !task.task_runtime.unmet_preconditions.is_empty() {
             return format!(
                 "Satisfy the recorded precondition(s) (this is not a tool failure; retrying unchanged will stop again), then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"`.",

@@ -126,6 +126,11 @@ pub(super) fn validate_initial_request(
             ));
         }
     }
+    if r.kind != "intervention" && r.options.iter().any(|o| o.intervention_response.is_some()) {
+        return Err(error(
+            "Typed intervention options require kind intervention",
+        ));
+    }
     if r.kind == "intervention" {
         let action = r.intervention.as_ref().ok_or_else(|| {
             error("Intervention requires action, inaccessible_reason and expected_result")

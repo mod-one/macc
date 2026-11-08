@@ -71,3 +71,29 @@ mod tests {
         assert!(diagnosis(&incident).is_none());
     }
 }
+
+/// Resolve known native waits without a tool call, inferred consent or a repair.
+pub(super) fn pending_diagnosis(
+    root: &std::path::Path,
+    incident: &Incident,
+) -> macc_core::Result<Option<Diagnosis>> {
+    let tasks: Vec<_> = incident
+        .tasks
+        .iter()
+        .filter(|t| incident::repair_candidate(t))
+        .collect();
+    if tasks.is_empty() {
+        return Ok(None);
+    }
+    let mut prerequisites = vec![];
+    let mut ids = vec![];
+    for task in tasks {
+        let Some(wait) = macc_core::coordinator::decisions::pending_for_task(root, &task.id)?
+        else {
+            return Ok(None);
+        };
+        prerequisites.push(format!("{} v{} ({}): {}. Open Decisions; answer or revise this exact request. Retained task work is preserved.",wait.id,wait.version,wait.status,wait.question));
+        ids.push(task.id.clone());
+    }
+    Ok(Some(Diagnosis{summary:"DM_PENDING: native human decision required; source repair and unchanged retries cannot answer it.".into(),repairable:false,requires_human:true,restart_only:false,task_ids:ids,external_prerequisites:prerequisites,retry_at:None,unavailable_tool:None,related_task_ids:vec![],macc_findings:vec![],macc_repair_required:false}))
+}

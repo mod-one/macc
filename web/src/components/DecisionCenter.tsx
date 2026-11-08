@@ -1,3 +1,4 @@
+import {DecisionDeliveryStatus} from './DecisionDeliveryStatus';
 import React from 'react';
 import {DecisionGovernance,ReuseDirection} from './DecisionGovernance';
 import {validApprovalConditions} from './DecisionEvidence';
@@ -133,7 +134,7 @@ export function DecisionCenter() {
             {current.status==='blocked_external'&&<p role="status">An indispensable external capability is unavailable. Full autonomy does not fabricate an action or a result; only dependent work is blocked.</p>}
             {current.status==='awaiting_effects'&&<p role="status">Your answer is durably saved. Affected implementation waits while the coordinator prepares and validates its task-plan changes. Other tasks can continue.</p>}
             <details className="rounded-lg border border-[var(--border)] p-3"><summary className="cursor-pointer text-sm">Revise, withdraw or manage this request</summary><div className="mt-3"><DecisionLifecycleControls key={keyOf(current)} decision={current} busy={busy} run={runIntent} onError={setError}/></div></details>
-            <details><summary>Delivery, acknowledgement and independent compliance</summary><div className="overflow-auto"><table className="w-full text-left text-xs"><thead><tr><th>Task / phase</th><th>Current context</th><th>Delivered</th><th>ACK</th><th>Review evidence</th></tr></thead><tbody>{snapshot.delivery?.filter(r=>r.decisions.some(d=>d.id===current.id)).map(r=><tr key={r.task+':'+r.phase}><td>{r.task} / {r.phase}</td><td>{r.current?'Current':'Refresh required'}</td><td>{r.delivered?'Yes':'Pending'}</td><td>{r.acknowledged?'Received':'Pending'}</td><td>{r.compliance?.[current.id]?.status??'Not independently checked'} {r.compliance?.[current.id]?.evidence}</td></tr>)}</tbody></table></div></details>
+            <DecisionDeliveryStatus current={current} snapshot={snapshot}/>
             <details><summary>What agents received</summary><button type="button" onClick={async () => { try { setContexts(JSON.stringify(await getTaskDecisionContexts(current.request.task_id), null, 2)); } catch(e) {setError(String(e));} }}>Load task contexts and receipts</button><pre className="max-h-60 overflow-auto whitespace-pre-wrap text-xs">{contexts}</pre></details>
             <details><summary>Decision and context history</summary><pre className="max-h-60 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(snapshot.events.filter(e => JSON.stringify(e.payload).includes(current.id)), null, 2)}</pre></details>
           </section>}

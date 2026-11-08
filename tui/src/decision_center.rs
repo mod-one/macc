@@ -3,6 +3,7 @@ mod actions;
 #[cfg(test)]
 mod form_tests;
 mod interaction;
+mod response_form;
 mod view;
 use crossterm::event::KeyCode;
 use macc_core::{
@@ -47,6 +48,7 @@ pub struct Center {
     deferred: BTreeSet<String>,
     scroll: u16,
     message: String,
+    notice_success: bool,
     feedback: bool,
     show_help: bool,
     submitting: bool,
@@ -153,6 +155,7 @@ impl Center {
                 let sent_answer = self.answer_in_flight.take();
                 match result {
                     Ok(value) => {
+                        self.notice_success = self.submitting;
                         if let Some(contexts) = value.get("inspected_contexts") {
                             self.inspected_contexts = Some(contexts.clone());
                         }
@@ -184,7 +187,10 @@ impl Center {
                                 && sent_answer.as_ref().is_some_and(|(id, version)| {
                                     self.list().iter().any(|d| {
                                         d.id == *id
-                                            && d.version == *version
+                                            && d.version > *version
+                                            && d.resolution.as_ref().is_some_and(|r| {
+                                                r.answered_version == Some(*version)
+                                            })
                                             && d.status != "pending_human"
                                             && d.resolution.is_some()
                                     })
@@ -194,11 +200,14 @@ impl Center {
                                 self.quick_menu = false;
                                 self.actions.open = false;
                                 self.auto_after = Some(Instant::now() + Duration::from_secs(1));
-                                self.message = "Response sent.".into();
+                                self.message = "Response recorded. Delivery and verification are tracked separately.".into();
                             }
                         }
                     }
-                    Err(error) => self.message = error,
+                    Err(error) => {
+                        self.notice_success = false;
+                        self.message = error;
+                    }
                 }
                 self.submitting = false;
             }
@@ -930,7 +939,8 @@ fn run_operator(
     }
     let result = store.apply_operator(&intent, proof.as_ref(), actor)?;
     let mut snapshot = dm::snapshot(root)?;
-    snapshot["operator_notice"]=json!("Action durably recorded; task-plan effects, context delivery and compliance remain separate");
+    snapshot["operator_notice"] =
+        json!("Response recorded. Waiting for performer delivery or the required next action.");
     if result.get("request").is_some() {
         snapshot["selected_decision_id"] = result["id"].clone();
     }
@@ -1078,7 +1088,21 @@ fn response_text(request: &dm::Request, draft: &Draft) -> String {
         return draft.text.clone();
     }
     if request.kind == "intervention" {
-        return draft.fields.get("result").cloned().unwrap_or_default();
+        let mode = dm::intervention_response(
+            request,
+            draft
+                .option
+                .checked_sub(1)
+                .and_then(|i| request.options.get(i))
+                .map(|o| o.id.as_str()),
+            &draft.fields,
+        )
+        .unwrap_or(dm::InterventionResponse::Completed);
+        return if mode == dm::InterventionResponse::Completed {
+            draft.fields.get("result").cloned().unwrap_or_default()
+        } else {
+            mode.label().into()
+        };
     }
     if let Some(option) = draft
         .option

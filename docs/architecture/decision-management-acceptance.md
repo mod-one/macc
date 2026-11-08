@@ -143,3 +143,16 @@ Question/intervention UX validation (2026-11-06): **164 TUI tests** and the full
 
 
 Simple response flow (2026-11-07): clients close only after an answer receipt and a matching, recorded request/version. Pending approval tickets and failed saves do not count as recorded answers. TUI numeric choices lead straight to Send; a declared yes/no field supplies its exact selected value as the response without demanding an additional written answer. Native intervention observations and independent signatures remain mandatory where applicable. History renders as recorded/read-only rather than showing an unfinished form. New coverage: TUI `numbered_choice_goes_straight_to_send_without_an_extra_note`, `a_single_typed_yes_no_field_is_the_answer_not_a_second_free_text_question`, `recorded_answer_closes_the_popup_but_failure_and_pending_approval_do_not`, and `recorded_history_does_not_show_pending_form_instructions_or_duplicate_action`; Web tests cover acknowledged closure, yes/no buttons, save failure and pending approval versus a concurrent resolution. The local browser fixture has `simple-choice` and `simple-boolean` variants for real-browser submission/closure checks with a mocked native receipt. The protocol and planner guidance specify short questions, up to four concise choices and script-first checks; display, formatting and validation add no model calls. No measured token-reduction percentage is asserted.
+
+### November 8 ask-user regression checks
+
+The native response/wait suite covers actual answer version increments, explicit
+fact/deferral semantics, unchanged completed-action requirements, rejection of
+contradictory modes, mandatory independent compliance, lease fencing, invocation
+isolation, retained worktree/phase and late answers. TUI regressions exercise
+choice-first navigation, contextual multiline help, exact-version auto-close and
+receipt presentation. Web tests cover equivalent conditional requirements.
+`cli/tests/support/decision_wait_runner.rs` stops a fake provider through the real
+heartbeat shell after a native human request; it verifies the durable scoped
+receipt without invoking a model. Supervisor cache tests assert that unrelated
+changes do not spend another diagnosis while a native gate is unanswered.

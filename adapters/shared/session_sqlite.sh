@@ -101,10 +101,19 @@ run_sqlite_session() {
       wait "$sleeper" || exit 0
       sleeper=""
       kill -0 "$owner" 2>/dev/null || exit 0
-      if ! printf '%s' "$sqlite_lease_key" | session_service heartbeat >/dev/null; then
+      local heartbeat
+      if ! heartbeat="$(printf '%s' "$sqlite_lease_key" | session_service heartbeat)"; then
         echo 'Error: session lease heartbeat failed; stopping runner' >&2
         kill -TERM "$owner" 2>/dev/null || true
         exit 1
+      fi
+      if [[ "$(jq -r '.status // empty' <<<"$heartbeat")" == waiting_decision ]]; then
+        printf 'MACC_TASK_PRECONDITION: %s
+MACC_TASK_RESULT_EXP: Decision context must be resolved or refreshed; existing work is retained.
+MACC_TASK_RESULT: precondition_unmet
+' "$(jq -r '.wait.reason' <<<"$heartbeat")"
+        kill -TERM "$owner" 2>/dev/null || true
+        exit 0
       fi
     done
   ) &

@@ -349,14 +349,23 @@ fn mutate(
     key: &LeaseKey,
     operation: impl FnOnce(&rusqlite::Connection) -> Result<()>,
 ) -> Result<()> {
+    with_verified_lease(root, key, |tx| {
+        verify_decision_pin(root, tx, &key.session_id, key.generation)?;
+        operation(tx)
+    })
+}
+pub(super) fn with_verified_lease<T>(
+    root: &Path,
+    key: &LeaseKey,
+    operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+) -> Result<T> {
     let _guard = lock(root)?;
     let (mut db, _) = db::active(root)?;
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     verify(&tx, key)?;
-    verify_decision_pin(root, &tx, &key.session_id, key.generation)?;
-    operation(&tx)?;
+    let result = operation(&tx)?;
     sql(tx.commit())?;
-    Ok(())
+    Ok(result)
 }
 pub fn recover(root: &Path) -> Result<usize> {
     let _guard = lock(root)?;
@@ -406,7 +415,7 @@ pub fn read_hint(root: &Path, identity: &Value) -> Result<Option<String>> {
         params![a.project_id,identity.to_string(),now()-(p.lifecycle.max_idle_hours*3600) as i64],|r|r.get(0)).optional())
 }
 
-fn verify_decision_pin(
+pub(super) fn verify_decision_pin(
     root: &Path,
     db: &rusqlite::Connection,
     id: &str,

@@ -278,7 +278,8 @@ fn recorded_answer_closes_the_popup_but_failure_and_pending_approval_do_not() {
         let mut fresh = c.current.clone().unwrap();
         if matches!(outcome, "resolved" | "approval_waiting") {
             fresh.status = "resolved".into();
-            fresh.resolution=Some(serde_json::from_value(json!({"text":"yes","selected_option_id":null,"actor":"operator","origin":"human_local_trust","policy_digest":"p","recorded_at":"2026-11-07T10:00:00Z"})).unwrap());
+            fresh.version = 2;
+            fresh.resolution=Some(serde_json::from_value(json!({"answered_version":1,"text":"yes","selected_option_id":null,"actor":"operator","origin":"human_local_trust","policy_digest":"p","recorded_at":"2026-11-07T10:00:00Z"})).unwrap());
         }
         let (tx, rx) = mpsc::channel();
         c.rx = Some(rx);
@@ -313,4 +314,89 @@ fn recorded_history_does_not_show_pending_form_instructions_or_duplicate_action(
     assert!(!screen.contains("Choose an option"));
     assert!(!screen.contains("Confirm the action"));
     assert!(screen.contains("Close"));
+}
+
+#[test]
+fn intervention_choices_precede_evidence_and_typed_deferral_needs_no_fake_result() {
+    let mut c = intervention();
+    c.current.as_mut().unwrap().request.options=serde_json::from_value(json!([
+        {"id":"provide","label":"Provide device access","intervention_response":"completed"},
+        {"id":"defer","label":"Keep observations unverified","intervention_response":"defer_observation"}
+    ])).unwrap();
+    c.snapshot.as_mut().unwrap()["decisions"] = json!([c.current.clone().unwrap()]);
+    c.focus = 0;
+    assert!(c.controls()[0] == Control::Option);
+    c.key_event(KeyCode::Char('2'));
+    assert!(c.controls()[c.focus] == Control::Send);
+    assert_eq!(
+        c.response_mode(),
+        dm::InterventionResponse::DeferObservation
+    );
+    assert!(!c.controls().iter().any(|c| matches!(c, Control::Field(_))));
+    focus(&mut c, Control::Send);
+    let Some(Action::Answer {
+        option,
+        fields,
+        text,
+        ..
+    }) = c.key_event(KeyCode::Enter)
+    else {
+        panic!("deferral must send without an invented action");
+    };
+    assert_eq!(option.as_deref(), Some("defer"));
+    assert!(!text.is_empty());
+    assert!(!fields.contains_key("performed"));
+    assert!(!fields.contains_key("result"));
+}
+#[test]
+fn explicit_mode_does_not_silently_relabel_a_legacy_provide_choice() {
+    let mut c = intervention();
+    c.current.as_mut().unwrap().request.options =
+        serde_json::from_value(json!([{"id":"provide","label":"Provide isolated access"}]))
+            .unwrap();
+    c.focus = 0;
+    c.key_event(KeyCode::Char('1'));
+    assert!(c.controls()[c.focus] == Control::Mode);
+    c.key_event(KeyCode::Char('3'));
+    assert_eq!(c.drafts["q@1"].option, 0);
+    assert_eq!(
+        c.drafts["q@1"].fields[dm::RESPONSE_MODE],
+        "defer_observation"
+    );
+    assert!(!c.controls().iter().any(|c| matches!(c, Control::Field(_))));
+}
+#[test]
+fn multiline_help_matches_the_actual_enter_key_and_delivery_requires_exact_version() {
+    let mut c = intervention();
+    assert!(c.keyboard_hint(Control::Field(0)).contains("New line"));
+    let d = c.current.as_mut().unwrap();
+    d.status = "resolved".into();
+    d.version = 2;
+    d.resolution=Some(serde_json::from_value(json!({"text":"Device connected","actor":"Human","origin":"operator","policy_digest":"p","recorded_at":"now","selected_option_id":null,"advisory":false,"answered_version":1})).unwrap());
+    c.snapshot.as_mut().unwrap()["delivery"] = json!([{"task":"A","phase":"review","current":false,"delivered":true,"acknowledged":true,"decisions":[{"id":"q","version":1}],"compliance":{"q":{"status":"pass"}}}]);
+    assert!(c.delivery_overview().contains("Delivery pending"));
+    c.snapshot.as_mut().unwrap()["delivery"][0]["decisions"][0]["version"] = json!(2);
+    assert!(c.delivery_overview().contains("context must be refreshed"));
+}
+
+#[test]
+fn polling_a_different_answer_version_cannot_close_the_submitted_form() {
+    for answered in [None, Some(2)] {
+        let mut c = super::tests::center("high");
+        let mut fresh = c.current.clone().unwrap();
+        fresh.status = "resolved".into();
+        fresh.version = 3;
+        fresh.resolution=Some(serde_json::from_value(json!({"answered_version":answered,"text":"yes","selected_option_id":null,"actor":"operator","origin":"human_local_trust","policy_digest":"p","recorded_at":"2026-11-08T10:00:00Z"})).unwrap());
+        let (tx, rx) = mpsc::channel();
+        c.rx = Some(rx);
+        c.last = Some(Instant::now());
+        c.submitting = true;
+        c.answer_in_flight = Some(("q".into(), 1));
+        tx.send(Ok(
+            json!({"policy":c.policy(),"decisions":[fresh],"selected_decision_id":"q"}),
+        ))
+        .unwrap();
+        c.tick(None, false);
+        assert!(c.open, "must correlate answered_version, not just status");
+    }
 }

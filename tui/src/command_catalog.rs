@@ -117,6 +117,7 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
     }
     if state.has_coordinator_pause_prompt() {
         return rows(vec![
+            ("d", "Inspect decision / failed check"),
             ("r", "Retry failed phase"),
             ("s", "Skip failed phase"),
             ("o", "Open logs"),

@@ -47,7 +47,7 @@ pub enum Action {
         id: String,
         #[arg(long)]
         version: u64,
-        #[arg(long)]
+        #[arg(long, default_value = "")]
         text: String,
         #[arg(long)]
         option: Option<String>,
@@ -57,6 +57,9 @@ pub enum Action {
         apply_patch: bool,
         #[arg(long)]
         fields_file: Option<PathBuf>,
+        /// Explicit intervention semantics; deferral never proves compliance.
+        #[arg(long, value_parser=["completed","confirm_fact","defer_observation","unable"])]
+        response_type: Option<String>,
         #[arg(long)]
         conditions_file: Option<PathBuf>,
         #[arg(long)]
@@ -958,6 +961,7 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             advisory,
             apply_patch,
             fields_file,
+            response_type,
             conditions_file,
             artifacts_file,
             effects,
@@ -967,11 +971,15 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             outcome,
         } => {
             let actor = operator(root)?;
-            let fields = if let Some(path) = fields_file {
-                read(path, p.max_request_bytes)?
-            } else {
-                Default::default()
-            };
+            let mut fields: std::collections::BTreeMap<String, String> =
+                if let Some(path) = fields_file {
+                    read(path, p.max_request_bytes)?
+                } else {
+                    Default::default()
+                };
+            if let Some(mode) = response_type {
+                fields.insert(dm::RESPONSE_MODE.into(), mode.clone());
+            }
             let outcome = serde_json::from_value(json!(outcome)).map_err(|_| {
                 dm::error("Outcome must be answer, reject, request_changes or investigate")
             })?;
@@ -985,6 +993,26 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                 .as_ref()
                 .map(|file| read(file, 262144))
                 .transpose()?;
+            let response_text = if text.trim().is_empty() {
+                let decision = store.decision(id)?;
+                decision
+                    .request
+                    .options
+                    .iter()
+                    .find(|o| Some(o.id.as_str()) == option.as_deref())
+                    .map(|o| o.label.clone())
+                    .or_else(|| {
+                        response_type
+                            .as_ref()
+                            .and_then(|m| {
+                                serde_json::from_value::<dm::InterventionResponse>(json!(m)).ok()
+                            })
+                            .map(|m| m.label().to_string())
+                    })
+                    .unwrap_or_default()
+            } else {
+                text.clone()
+            };
             let input = dm::AnswerInput {
                 conditions: conditions_file
                     .as_ref()
@@ -999,7 +1027,7 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
                 effects,
                 patch,
                 attestation,
-                text: text.clone(),
+                text: response_text,
                 option: option.clone(),
                 advisory: *advisory,
                 apply_patch: *apply_patch,

@@ -182,6 +182,9 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         Duration::ZERO,
                         "supervisor intervention",
                     )?;
+                    if retry_request.exists() {
+                        pending.trigger["reason"] = serde_json::json!("explicit_retry");
+                    }
                     pending.attempts += 1;
                     let prefix = format!("{}-attempt-", slug(&incident.id));
                     let previous = std::fs::read_dir(paths.root.join(".macc/log/supervisor"))
@@ -201,6 +204,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                     pending.sequence = pending.sequence.max(previous) + 1;
                     let attempt = pending.sequence;
                     let cached = pending.diagnosis.clone();
+                    let trigger = pending.trigger.clone();
                     ledger.attempts = attempt;
                     write_json(
                         &ledger_path,
@@ -214,6 +218,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         .root
                         .join(".macc/log/supervisor")
                         .join(format!("{}-attempt-{attempt}", slug(&incident.id)));
+                    write_json(&dir.join("trigger.json"), &trigger)?;
                     let mut report = Intervention {
                         log_dir: Some(dir.clone()),
                         incident,

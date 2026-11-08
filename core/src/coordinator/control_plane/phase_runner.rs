@@ -266,6 +266,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 mode, task_id
             )));
         }
+        if let Some(wait) =
+            crate::coordinator::decisions::pending_for_task(self.repo_root, task_id)?
+        {
+            return Ok(Err(format!("E903: {}", wait.reason())));
+        }
         let worktree = std::path::PathBuf::from(worktree_path);
         let review_head_before = if mode == "review" {
             Some(crate::git::head_commit(&worktree)?)
@@ -321,7 +326,8 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             Err(error)
                 if error
                     .to_string()
-                    .contains(crate::coordinator::decisions::CONTEXT_BUDGET_CODE) =>
+                    .contains(crate::coordinator::decisions::CONTEXT_BUDGET_CODE)
+                    || error.to_string().contains("DM_PENDING:") =>
             {
                 return Ok(Err(format!("E903: {error}")))
             }
@@ -474,6 +480,12 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             {
                 command.env(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV, ipc_addr);
             }
+            let event_source = command
+                .get_envs()
+                .find(|(k, _)| *k == "MACC_EVENT_SOURCE")
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let output = command.output();
             let Ok(out) = output else {
                 last_reason = format!(
@@ -503,6 +515,13 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     out.status,
                 ),
             );
+            if let Some(wait) = crate::session_store::decision_wait::waiting_for_invocation(
+                self.repo_root,
+                task_id,
+                &event_source,
+            )? {
+                return Ok(Err(format!("E903: {}", wait.reason)));
+            }
             if let Some(reason) =
                 crate::session_store::checkpoints::precondition_reason(&combined_output)
             {

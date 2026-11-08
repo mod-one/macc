@@ -55,6 +55,8 @@ pub struct Pending {
     pub next_check: Option<i64>,
     #[serde(default)]
     pub reset_rechecked: bool,
+    #[serde(default)]
+    pub trigger: Value,
 }
 
 pub fn context(
@@ -100,11 +102,25 @@ pub fn context(
         "source_diff":git(&paths.root,&["diff","HEAD","--binary"])?,
         "tools":canonical.tools,"supervisor":canonical.automation.supervisor,
         "prd_queue":canonical.automation.coordinator.as_ref().map(|c|json!({"files":c.prd_files,"entries":macc_core::prd_queue::validate(&paths.root,&c.prd_files).ok(),"progress":macc_core::prd_queue::load(&paths.root).ok()})),
-        "availability":availability,"decision_policy":canonical.automation.coordinator.as_ref().and_then(|c|c.decisions.as_ref()),"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?}),
+        "decision_gates":macc_core::coordinator::decisions::gate_revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?,"availability":availability,"decision_policy":canonical.automation.coordinator.as_ref().and_then(|c|c.decisions.as_ref()),"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?}),
     )
 }
 
 pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32) -> bool {
+    // A known human gate cannot be repaired by unrelated Git/runtime activity.
+    if pending.status == "waiting"
+        && pending
+            .diagnosis
+            .as_ref()
+            .is_some_and(|d| d.requires_human && d.summary.starts_with("DM_PENDING:"))
+        && pending
+            .context
+            .get("decision_gates")
+            .is_some_and(|v| v == &context["decision_gates"])
+        && pending.context["decision_policy"] == context["decision_policy"]
+    {
+        return false;
+    }
     if pending.context != context {
         // A settings-only change supplies missing checks or enables a phase;
         // it does not invalidate the source diagnosis or spend another AI call.
@@ -124,9 +140,21 @@ pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32)
         } else {
             None
         };
+        let changed_fields: std::collections::BTreeSet<_> = pending
+            .context
+            .as_object()
+            .into_iter()
+            .flat_map(|o| o.keys())
+            .chain(context.as_object().into_iter().flat_map(|o| o.keys()))
+            .filter(|k| pending.context.get(*k) != context.get(*k))
+            .cloned()
+            .collect();
+        let trigger = json!({"reason":if pending.context.is_null(){"initial_or_explicit_retry"}else{"evidence_changed"},"previous_revision":macc_core::coordinator::decisions::digest(&pending.context),"next_revision":macc_core::coordinator::decisions::digest(&context),"changed_fields":changed_fields,"at":now});
+        tracing::info!(%trigger,"Supervisor diagnosis invalidation");
         let sequence = pending.sequence;
         *pending = Pending {
             diagnosis,
+            trigger,
             context,
             sequence,
             ..Default::default()
@@ -134,6 +162,7 @@ pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32)
     }
     if pending.status == "waiting" {
         if pending.next_check.is_some_and(|time| now >= time) && !pending.reset_rechecked {
+            pending.trigger = json!({"reason":"quota_reset","at":now});
             pending.reset_rechecked = true;
             pending.next_check = None;
             pending.diagnosis = None;
@@ -142,6 +171,9 @@ pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32)
         } else {
             return false;
         }
+    }
+    if pending.status == "retrying" {
+        pending.trigger = json!({"reason":"transient_retry","at":now});
     }
     pending.attempts < max_attempts && pending.next_check.is_none_or(|time| now >= time)
 }
@@ -224,6 +256,12 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
         .is_some_and(|d| d.macc_repair_required)
     {
         format!("Fix and validate MACC in its source repository; install the corrected build, then run `{RETRY}`. Product findings: .macc/reports/macc-defects/. Application edits cannot repair the installed runner.")
+    } else if report
+        .diagnosis
+        .as_ref()
+        .is_some_and(|d| d.summary.starts_with("DM_PENDING:"))
+    {
+        "Open Decisions and answer or revise the exact native request listed in the reason. The supervisor waits for its revision; no application repair is needed. Then resume the retained task phase.".into()
     } else if report
         .diagnosis
         .as_ref()
@@ -442,5 +480,37 @@ pub fn restore_previous(
         diagnosis: Some(diagnosis),
         next_check,
         reset_rechecked: false,
+        trigger: json!({"reason":"restored_previous_report"}),
     })
+}
+
+#[cfg(test)]
+mod human_wait_tests {
+    use super::*;
+    #[test]
+    fn native_human_wait_ignores_unrelated_changes_and_logs_the_relevant_revision() {
+        let diagnosis=serde_json::from_value(json!({"summary":"DM_PENDING: waiting for exact answer","requires_human":true,"repairable":false})).unwrap();
+        let mut record = Pending {
+            context: json!({"head":"a","availability":false,"decision_gates":[{"id":"d","version":1,"status":"pending_human"}],"decision_policy":{}}),
+            diagnosis: Some(diagnosis),
+            status: "waiting".into(),
+            ..Default::default()
+        };
+        let mut context = record.context.clone();
+        context["head"] = json!("b");
+        context["availability"] = json!(true);
+        assert!(!ready(&mut record, context.clone(), 100, 3));
+        context["decision_gates"][0]["version"] = json!(2);
+        context["decision_gates"][0]["status"] = json!("resolved");
+        assert!(ready(&mut record, context, 101, 3));
+        assert_eq!(record.trigger["reason"], "evidence_changed");
+        assert!(record.trigger["changed_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("decision_gates")));
+        assert_ne!(
+            record.trigger["previous_revision"],
+            record.trigger["next_revision"]
+        );
+    }
 }

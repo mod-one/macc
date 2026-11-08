@@ -406,6 +406,7 @@ fn human_can_apply_recommended_graph_proposal_explicitly() {
     let (_tmp, mut store, plan, _, p) = fixture();
     let mut r = question("plan-change");
     r.options = vec![OptionChoice {
+        intervention_response: None,
         proposed_patch: None,
         requires_replan: false,
         id: "apply".into(),
@@ -917,6 +918,7 @@ fn free_text_and_rejection_never_implicitly_apply_proposed_patch() {
     let (_tmp, mut s, plan, _, p) = fixture();
     let mut r = question("custom-answer");
     r.options = vec![OptionChoice {
+        intervention_response: None,
         proposed_patch: None,
         requires_replan: false,
         id: "yes".into(),

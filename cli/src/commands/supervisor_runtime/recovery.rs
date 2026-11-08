@@ -38,6 +38,17 @@ pub(super) async fn intervene(
         )));
     }
     stop_orphan_jobs(&report.incident).await?;
+    if let Some(diagnosis) =
+        super::external_verification::pending_diagnosis(&paths.root, &report.incident)?
+    {
+        let detail = format!(
+            "{} {}",
+            diagnosis.summary,
+            diagnosis.external_prerequisites.join("; ")
+        );
+        report.diagnosis = Some(diagnosis);
+        return Err(MaccError::Validation(detail));
+    }
     if let Some(diagnosis) = super::external_verification::diagnosis(&report.incident) {
         report.detail = diagnosis.summary.clone();
         report.diagnosis = Some(diagnosis);

@@ -2,6 +2,9 @@
 #[cfg(unix)]
 #[path = "support/decision_adapter_matrix.rs"]
 mod decision_adapter_matrix;
+#[cfg(unix)]
+#[path = "support/decision_wait_runner.rs"]
+mod decision_wait_runner;
 #[path = "support/merge_repair_runner.rs"]
 mod merge_repair_runner;
 #[path = "support/o2_runner.rs"]

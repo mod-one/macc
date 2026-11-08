@@ -1342,7 +1342,7 @@ pub fn spawn_performer_job(
             }
         };
         let reported_success = success;
-        let (completion_details, completion_details_source) = if reported_success {
+        let (completion_details, mut completion_details_source) = if reported_success {
             if let Some(details) =
                 read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
             {
@@ -1362,6 +1362,25 @@ pub fn spawn_performer_job(
                 (Some(details), Some("sqlite".to_string()))
             } else {
                 (None, None)
+            }
+        };
+        let completion_details = match crate::session_store::decision_wait::waiting_for_invocation(
+            &repo_root_owned, &task_id_owned, &event_source_owned,
+        ) {
+            Ok(Some(wait)) => {
+                completion_details_source = Some("native_decision_wait".into());
+                Some(CompletionDetails {
+                    result_kind: Some(PerformerCompletionKind::PreconditionUnmet),
+                    message: Some(wait.reason.clone()),
+                    result_explanation: Some(wait.reason.clone()),
+                    gate_verdict: None,
+                    unmet_preconditions: vec![wait.reason.clone()],
+                })
+            }
+            Ok(None) => completion_details,
+            Err(error) => {
+                tracing::warn!(task=%task_id_owned,%error,"Cannot read native decision-wait receipt");
+                completion_details
             }
         };
         let ipc_completion_kind = completion_details

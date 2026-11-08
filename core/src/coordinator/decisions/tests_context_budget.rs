@@ -59,7 +59,7 @@ fn normal_four_prerequisite_context_fits_an_existing_32k_policy_without_losing_s
     let (context, _) = store
         .issue(&plan, "B", "normal", "dev", tmp.path(), &p)
         .unwrap();
-    assert_eq!(context.schema_version, 4);
+    assert_eq!(context.schema_version, 5);
     assert_eq!(context.dependency_contracts.len(), 4);
     assert!(
         serde_json::to_vec(&context.dependency_contracts)

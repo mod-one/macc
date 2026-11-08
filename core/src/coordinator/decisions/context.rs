@@ -291,7 +291,7 @@ impl Store {
             },
             graph_version: plan.graph_version,
             decision_epoch: plan.decision_epoch,
-            schema_version: 4,
+            schema_version: 5,
             plan_id: plan.id.clone(),
             task_id: task.into(),
             attempt_id: attempt.into(),

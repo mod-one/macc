@@ -218,10 +218,11 @@ impl Command for SessionStoreCommand {
                 store::bind(root, &r.key, &r.provider_session_id)?;
                 emit(serde_json::json!({"ok":true}))
             }
-            SessionStoreCommands::Heartbeat => {
-                store::heartbeat(root, &input()?)?;
-                emit(serde_json::json!({"ok":true}))
-            }
+            SessionStoreCommands::Heartbeat => emit(store::decision_wait::heartbeat_state(
+                root,
+                &input()?,
+                &std::env::var("MACC_EVENT_SOURCE").unwrap_or_default(),
+            )?),
             SessionStoreCommands::Release => {
                 let r: Release = input()?;
                 store::release(root, &r.key, r.clean)?;

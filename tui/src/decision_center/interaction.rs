@@ -5,6 +5,7 @@ use super::*;
 pub(super) enum Control {
     Note,
     Option,
+    Mode,
     Field(usize),
     Send,
     Later,
@@ -25,6 +26,8 @@ pub(super) const MORE: &[&str] = &[
     "Accept / clear the displayed task-plan patch",
     "Toggle advisory guidance",
     "Prepare independent approver challenge",
+    "Confirm a fact (operator statement)",
+    "Explicitly defer observation; keep it unverified",
 ];
 impl Center {
     pub(super) fn selected_patch(&self) -> Option<&dm::Patch> {
@@ -88,19 +91,34 @@ impl Center {
                     d.request.kind == "intervention" && draft.outcome == dm::AnswerOutcome::Answer;
                 let choice_fields = d.request.response_fields.iter().any(|f| {
                     !f.choices.is_empty()
-                        && (f.required || self.advanced_fields || draft.fields.contains_key(&f.id))
+                        && (self.field_required(f)
+                            || self.advanced_fields
+                            || draft.fields.contains_key(&f.id))
+                        && self.field_visible(f)
                 }) && !matches!(
                     d.request.kind.as_str(),
                     "intervention" | "approval" | "authorization"
                 );
-                if completed_intervention {
+                if !d.request.options.is_empty() {
+                    controls.push(Control::Option);
+                }
+                if d.request.kind == "intervention"
+                    && !d.request.options.is_empty()
+                    && (self.advanced_fields
+                        || draft
+                            .option
+                            .checked_sub(1)
+                            .and_then(|i| d.request.options.get(i))
+                            .is_none_or(|o| o.intervention_response.is_none()))
+                {
+                    controls.push(Control::Mode);
+                }
+                if completed_intervention && self.completed_intervention() {
                     for id in ["performed", "result"] {
                         if let Some(i) = fields.iter().position(|f| f.id == id) {
                             controls.push(Control::Field(i));
                         }
                     }
-                } else if !d.request.options.is_empty() {
-                    controls.push(Control::Option);
                 }
                 if !completed_intervention
                     && ((!choice_fields && d.request.options.is_empty())
@@ -110,15 +128,15 @@ impl Center {
                 {
                     controls.push(Control::Note);
                 }
-                if completed_intervention && !d.request.options.is_empty() {
-                    controls.push(Control::Option);
-                }
                 controls.extend(
                     fields
                         .iter()
                         .enumerate()
                         .filter(|(_, f)| {
-                            (f.required || self.advanced_fields || draft.fields.contains_key(&f.id))
+                            (self.field_required(f)
+                                || self.advanced_fields
+                                || draft.fields.contains_key(&f.id))
+                                && self.field_visible(f)
                                 && (self.advanced_fields || !f.id.starts_with("__condition_"))
                                 && !(d.request.kind == "intervention"
                                     && matches!(f.id.as_str(), "performed" | "result"))
@@ -140,7 +158,7 @@ impl Center {
         controls.extend([Control::Later, Control::Details, Control::More]);
         controls
     }
-    fn focus_control(&mut self, target: Control) {
+    pub(super) fn focus_control(&mut self, target: Control) {
         self.scroll = 0;
         self.focus = self
             .controls()
@@ -149,6 +167,7 @@ impl Center {
             .unwrap_or(0);
     }
     fn attempt_send(&mut self, challenge: bool) -> Option<Action> {
+        self.notice_success = false;
         if self.submitting {
             self.message =
                 "Please wait for the current operation to finish. Your draft is kept.".into();
@@ -202,8 +221,7 @@ impl Center {
                 .get(&field.id)
                 .map(String::as_str)
                 .unwrap_or("");
-            let required = field.id == "__attestation"
-                || field.required && draft.outcome == dm::AnswerOutcome::Answer;
+            let required = self.field_required(field);
             if required && value.trim().is_empty()
                 || !value.is_empty()
                     && !field.choices.is_empty()
@@ -219,6 +237,7 @@ impl Center {
         }
         if draft.outcome == dm::AnswerOutcome::Answer {
             if current.request.kind == "intervention"
+                && self.completed_intervention()
                 && (draft.fields.get("performed").map(String::as_str) != Some("yes")
                     || draft.advisory)
             {
@@ -243,6 +262,7 @@ impl Center {
         })
     }
     pub fn key_event(&mut self, key: KeyCode) -> Option<Action> {
+        self.notice_success = false;
         // Old function-key codes remain internal command IDs and compatible aliases;
         // every command has a visible, ordinary-key route through the form/menu.
         if matches!(key, KeyCode::F(_)) {
@@ -345,6 +365,14 @@ impl Center {
                             return self.legacy_key(KeyCode::F(3));
                         }
                         12 => return self.attempt_send(true),
+                        13 | 14 => {
+                            self.set_response_mode(if self.menu_index == 13 {
+                                dm::InterventionResponse::ConfirmFact
+                            } else {
+                                dm::InterventionResponse::DeferObservation
+                            });
+                            self.focus_control(Control::Send);
+                        }
                         _ => {}
                     }
                     self.save_drafts();
@@ -397,6 +425,37 @@ impl Center {
                 self.quick_menu = true;
                 self.menu_index = 0;
             }
+            Control::Mode => {
+                let modes = [
+                    dm::InterventionResponse::Completed,
+                    dm::InterventionResponse::ConfirmFact,
+                    dm::InterventionResponse::DeferObservation,
+                    dm::InterventionResponse::Unable,
+                ];
+                if let KeyCode::Char(c @ '1'..='4') = key {
+                    self.set_response_mode(modes[(c as u8 - b'1') as usize]);
+                    self.next_control(Control::Mode);
+                } else if key == KeyCode::Enter {
+                    self.next_control(Control::Mode);
+                } else if matches!(
+                    key,
+                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                ) {
+                    let index = modes
+                        .iter()
+                        .position(|m| *m == self.response_mode())
+                        .unwrap_or(0);
+                    self.set_response_mode(
+                        modes[(index
+                            + if matches!(key, KeyCode::Up | KeyCode::Left) {
+                                3
+                            } else {
+                                1
+                            })
+                            % 4],
+                    );
+                }
+            }
             Control::Option => {
                 if let KeyCode::Char(c @ '0'..='9') = key {
                     let choice = (c as u8 - b'0') as usize;
@@ -407,13 +466,22 @@ impl Center {
                     {
                         let d = self.current.as_ref().unwrap();
                         let draft = self.drafts.entry(Self::key(d)).or_default();
+                        draft.fields.remove(dm::RESPONSE_MODE);
+                        draft.fields.remove("performed");
+                        draft.fields.remove("result");
+                        draft.outcome = if choice
+                            .checked_sub(1)
+                            .and_then(|i| d.request.options.get(i))
+                            .is_some_and(|o| {
+                                o.intervention_response == Some(dm::InterventionResponse::Unable)
+                            }) {
+                            dm::AnswerOutcome::Reject
+                        } else {
+                            dm::AnswerOutcome::Answer
+                        };
                         draft.option = choice;
                         draft.apply_patch = false;
-                        self.focus_control(if choice == 0 {
-                            Control::Note
-                        } else {
-                            self.controls().get(1).copied().unwrap_or(Control::Send)
-                        });
+                        self.next_control(Control::Option);
                         self.save_drafts();
                         return None;
                     }
@@ -443,6 +511,7 @@ impl Center {
                     if let Some(d) = &self.current {
                         let count = d.request.options.len() + 1;
                         let draft = self.drafts.entry(Self::key(d)).or_default();
+                        draft.fields.remove(dm::RESPONSE_MODE);
                         draft.option = (draft.option
                             + if matches!(key, KeyCode::Left | KeyCode::Up) {
                                 count - 1
@@ -451,6 +520,19 @@ impl Center {
                             })
                             % count;
                         draft.apply_patch = false;
+                        draft.fields.remove("performed");
+                        draft.fields.remove("result");
+                        draft.outcome = if draft
+                            .option
+                            .checked_sub(1)
+                            .and_then(|i| d.request.options.get(i))
+                            .is_some_and(|o| {
+                                o.intervention_response == Some(dm::InterventionResponse::Unable)
+                            }) {
+                            dm::AnswerOutcome::Reject
+                        } else {
+                            dm::AnswerOutcome::Answer
+                        };
                     }
                 }
             }

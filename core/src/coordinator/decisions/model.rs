@@ -201,6 +201,8 @@ pub struct Impact {
 #[serde(deny_unknown_fields)]
 pub struct OptionChoice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention_response: Option<super::InterventionResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_patch: Option<Patch>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub requires_replan: bool,

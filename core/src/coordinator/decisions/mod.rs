@@ -20,7 +20,9 @@ pub use intake::validate_initial_requests;
 mod promotion;
 pub(crate) use promotion::{guard_prd_promotion, promotion_destination};
 mod interaction;
+mod response;
 pub use interaction::EvidencePermission;
+pub use response::{intervention_response, InterventionResponse, RESPONSE_MODE};
 mod lifecycle;
 mod model;
 pub use effects::effects_challenge;
@@ -34,6 +36,8 @@ pub use secure::broker_available;
 mod presentation;
 mod reconciliation;
 mod runtime;
+mod waiting;
+pub use waiting::{gate_revision, pending_for_task, refresh_waits, PendingDecision};
 mod secure;
 mod service;
 mod store;
@@ -64,3 +68,6 @@ pub(crate) mod tests_context_budget;
 
 #[cfg(test)]
 mod tests_diagnostic;
+
+#[cfg(test)]
+mod tests_response_wait;

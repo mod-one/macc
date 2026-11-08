@@ -505,3 +505,71 @@ strict separation between diagnostic completion, feature acceptance and release.
 
 See [Persistent project state](../PERSISTENT_PROJECT_STATE.md) for automatic legacy
 migration, shared worktree authority, clear retention, Git visibility and backups.
+
+## Explicit intervention responses and durable waiting
+
+New decision contexts use protocol v5. Historical v2/v3/v4 prompts and optional
+option fields retain their serialized representation for receipt verification.
+Use `clarification` when asking only to confirm a fact; reserve `intervention`
+for an unavailable human action with an observable result.
+
+Intervention options can declare `intervention_response`:
+
+- `completed`: requires `performed=yes`, the actual `result`, and requested facts.
+- `confirm_fact`: records an attributed statement, without claiming a physical
+  action. Other required facts still apply.
+- `defer_observation`: explicitly records that observations remain unverified;
+  no fake action/result is required. It cannot establish independent compliance,
+  waive mandatory PRD criteria, apply a graph patch, or authorize release.
+- `unable`: rejects assistance and leaves dependent work stopped.
+
+Existing options keep their original meaning and completed-action requirements.
+Clients never infer a deferral from a label or silently change a prior response.
+An explicit response-type change clears incompatible action claims and option
+selection. Secure approval still signs the exact submitted response.
+
+In the CLI, a selected option supplies its label when `--text` is omitted:
+
+```bash
+macc decisions answer <id> --version <version> --option <typed-option-id>
+macc decisions answer <id> --version <version> --response-type defer_observation
+macc decisions answer <id> --version <version> --response-type confirm_fact \
+  --text "Observed fact" --fields-file facts.json
+macc decisions answer <id> --version <version> --response-type unable --outcome reject
+```
+
+The TUI shows choices before evidence, current requirements and step progress.
+Typed deferrals go directly to Send; legacy choices expose an explicit response
+type. `Tab` continues from multiline text; `Enter` inserts a new line. A successful
+Send closes only when the same native decision has a newer version and its
+`resolution.answered_version` matches the submitted version. Escape hides the
+popup and preserves the draft; it does not answer, reject or cancel the request.
+Web shares the conditional response requirements and explicit type controls.
+
+A recorded response, delivered context, model acknowledgement and independent
+review compliance are separate states. TUI history and Web receipts display these
+separately; an old context cannot stand in for the answered decision version.
+For `E903` with decision origin, press `d` in the TUI pause dialog to open
+the relevant failed decision, or open Decisions in Web. Inspect the named selection and
+failed check, provide independently checked evidence or propose an authorized
+revision, then retry the retained phase. A generic unblock does not prove it.
+
+For SQLite sessions, heartbeat records a native `decision_wait` receipt under the
+current verified lease **before** stopping a provider for a newly pending gate.
+The receipt includes task, invocation event source, session generation and the
+native decision revision. If an answer arrives before that heartbeat, a native
+`DM_STALE` receipt instead requests fresh context for the retained phase.
+Development and phase monitors accept only a matching
+native receipt; raw/stale logs cannot authorize a wait or delivery. This is an
+`E903` precondition, never a quota or generic retry. The coordinator parks the
+scoped task, keeps its worktree/branch and phase, and resumes with a fresh context
+after resolution. Late-cycle requests are reconciled before termination checks.
+Real provider quota handling remains in each adapter.
+
+The supervisor recognizes unresolved native decisions without a paid diagnosis.
+It keeps that diagnosis while the relevant gate revisions and decision policy
+are unchanged, even if unrelated source or tool availability changes. Explicit
+retry, gate revision, quota reset and transient retry triggers are recorded in
+`.macc/log/supervisor/<incident>-attempt-N/trigger.json`, including the changed
+context keys and revision digests when evidence changes. Independent compliance
+failures remain separate from unanswered requests and may need external access.

@@ -67,10 +67,14 @@ pub fn classify_completion_error(
     };
 
     // Override caller-supplied error code/message with normalizer output.
-    let error_code = tool_error
-        .as_ref()
-        .map(|te| te.error_code.clone())
-        .unwrap_or(raw_error_code);
+    let error_code = if reported_preconditions {
+        "E903".to_string()
+    } else {
+        tool_error
+            .as_ref()
+            .map(|te| te.error_code.clone())
+            .unwrap_or(raw_error_code)
+    };
     // The structured report outranks normalized log text, which is only an
     // excerpt of the performer log.
     let error_message = structured_error_message(input)
@@ -101,7 +105,11 @@ pub fn classify_completion_error(
     ErrorClassification {
         canonical_class,
         error_code,
-        error_origin,
+        error_origin: if reported_preconditions {
+            "precondition".into()
+        } else {
+            error_origin
+        },
         error_message,
         completion_kind,
         completion_success,
@@ -161,7 +169,7 @@ mod tests {
             elapsed_seconds: 1,
             status_text: "precondition missing".into(),
             completion_kind: Some(PerformerCompletionKind::PreconditionUnmet),
-            error_code: Some("E903".into()),
+            error_code: Some("E601".into()),
             error_origin: Some("precondition".into()),
             error_message: Some("authorized schema migration needed".into()),
             result_explanation: Some("schema change required".into()),
@@ -173,7 +181,7 @@ mod tests {
             normalizer_input: Some(NormalizerInput {
                 exit_code: 1,
                 stderr: String::new(),
-                stdout: "diff --git: invalid_api_key permission_denied".into(),
+                stdout: "old quota exceeded; diff --git: invalid_api_key permission_denied".into(),
             }),
         };
         let result = classify_completion_error(&input, Some(&MustNotNormalize), false);

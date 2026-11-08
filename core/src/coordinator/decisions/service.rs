@@ -312,6 +312,16 @@ impl Store {
         ) {
             return Err(error("Unknown request kind/scope"));
         }
+        if request.kind != "intervention"
+            && request
+                .options
+                .iter()
+                .any(|o| o.intervention_response.is_some())
+        {
+            return Err(error(
+                "Typed intervention options require kind intervention",
+            ));
+        }
         self.verify_artifacts(&plan.id, &request.artifacts)?;
         if request.kind == "intervention" {
             let action=request.intervention.as_ref().ok_or_else(||error("An intervention must explain the unavailable capability, exact action and expected result"))?;
@@ -863,7 +873,7 @@ impl Store {
         self.triage(&self.plan(&pending.plan_id)?, &mut current_request, policy)?;
         for field in &current_request.response_fields {
             if input.outcome == AnswerOutcome::Answer
-                && field.required
+                && super::response::field_required(&current_request, input, field)?
                 && input
                     .fields
                     .get(&field.id)
@@ -908,17 +918,7 @@ impl Store {
         {
             return Err(error("Conditional approval requires a binding answer; apply its graph effects only after checked conditions pass"));
         }
-        if pending.request.kind == "intervention" && input.outcome == AnswerOutcome::Answer {
-            if advisory
-                || input.fields.get("performed").map(String::as_str) != Some("yes")
-                || input
-                    .fields
-                    .get("result")
-                    .is_none_or(|v| v.trim().is_empty())
-            {
-                return Err(error("Explicit confirmation performed=yes and the actual observed result are required; no physical action is inferred"));
-            }
-        }
+        super::response::validate_intervention(&pending.request, input)?;
         let selected_patch = input
             .patch
             .as_ref()

@@ -78,7 +78,11 @@ impl Center {
         if !self.message.is_empty() {
             frame.render_widget(
                 Paragraph::new(self.message.as_str())
-                    .style(Style::default().fg(Color::Yellow))
+                    .style(Style::default().fg(if self.notice_success {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }))
                     .wrap(Wrap { trim: false }),
                 parts[0],
             );
@@ -90,10 +94,7 @@ impl Center {
         };
         let draft = self.drafts.get(&key).cloned().unwrap_or_default();
         let fields = self.form_fields();
-        let required = |field: &dm::ResponseField| {
-            field.id == "__attestation"
-                || field.required && draft.outcome == dm::AnswerOutcome::Answer
-        };
+        let required = |field: &dm::ResponseField| self.field_required(field);
         let controls = self.controls();
         let focus = controls[self.focus % controls.len()];
         let mut summary = String::new();
@@ -173,7 +174,7 @@ impl Center {
                 } else if pending {
                     if let Some(action) = &d.request.intervention {
                         summary.push_str(&format!(
-                            "\nResult: {}\n",
+                            "\nExpected result: {}\n",
                             compact_question(&action.expected_result)
                         ));
                     }
@@ -241,7 +242,40 @@ impl Center {
                 summary
                     .push_str("No pending questions. More opens history and project directions.");
             }
+            if self
+                .current
+                .as_ref()
+                .is_some_and(|d| d.status == "pending_human")
+            {
+                summary.push_str(&self.response_overview());
+            }
+            summary.push_str(&self.delivery_overview());
             match focus {
+                Control::Mode => {
+                    caption = "Response type — choose explicitly".into();
+                    editor = [
+                        dm::InterventionResponse::Completed,
+                        dm::InterventionResponse::ConfirmFact,
+                        dm::InterventionResponse::DeferObservation,
+                        dm::InterventionResponse::Unable,
+                    ]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        format!(
+                            "{} {}. {}",
+                            if *m == self.response_mode() {
+                                "●"
+                            } else {
+                                "○"
+                            },
+                            i + 1,
+                            m.label()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                }
                 Control::Note => {
                     caption = if self.feedback {
                         "Your project direction"
@@ -353,6 +387,30 @@ impl Center {
                             .unwrap_or_else(|| draft.text.clone());
                     }
                 }
+            }
+        }
+        if !self.quick_menu
+            && !self.actions.open
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|d| d.status == "pending_human")
+        {
+            let steps = self.controls();
+            let editable = |c: &Control| {
+                matches!(
+                    c,
+                    Control::Option | Control::Mode | Control::Field(_) | Control::Note
+                )
+            };
+            if steps.get(self.focus).is_some_and(editable) {
+                let total = steps.iter().filter(|c| editable(c)).count();
+                let done = steps
+                    .iter()
+                    .take(self.focus + 1)
+                    .filter(|c| editable(c))
+                    .count();
+                caption = format!("Step {done}/{total} · {caption}");
             }
         }
         let summary = Paragraph::new(summary).wrap(Wrap { trim: false });
@@ -503,13 +561,7 @@ impl Center {
         } else {
             vec![
                 Line::from(buttons),
-                Line::from(if focus == Control::Send {
-                    "Enter: SEND AND CLOSE · Shift+Tab: edit · Esc: later"
-                } else if matches!(focus, Control::Option | Control::Field(_)) {
-                    "↑↓ / numbers: choose · Enter: next · Tab: next field · Esc: later"
-                } else {
-                    "Tab: Send / next field · Enter: newline / button · Esc: later"
-                }),
+                Line::from(self.keyboard_hint(focus)),
                 Line::from("PgUp/PgDn: scroll details · your draft is kept"),
             ]
         };

@@ -288,6 +288,15 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             KeyCode::Char('r') | KeyCode::Enter => state.retry_after_coordinator_pause(),
             KeyCode::Char('s') => state.skip_after_coordinator_pause(),
             KeyCode::Char('o') => state.open_logs_after_coordinator_pause(),
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                let task = state.coordinator_pause_task_id.clone().or_else(|| {
+                    state
+                        .coordinator_run_summary
+                        .as_ref()
+                        .and_then(|s| s.task_id.clone())
+                });
+                state.decision_center.show_for_task(task.as_deref());
+            }
             KeyCode::Char('u') => state.resume_signal_after_coordinator_pause(),
             KeyCode::Char('k') | KeyCode::Esc => state.stop_after_coordinator_pause(),
             KeyCode::Char('c') => state.resume_after_coordinator_pause(),
@@ -3866,7 +3875,7 @@ fn pause_overlay_content(
             body.push_str(&format!("\nNext: {}\n", action));
         }
         body.push_str(
-            "\n- Press 'o': open Logs screen\n- Press 'k' or Esc: close and keep the run stopped\n",
+            "\n- Press 'd': open Decisions and inspect the failed check\n- Press 'o': open Logs screen\n- Press 'k' or Esc: close and keep the run stopped\n",
         );
         body.push_str(&format!("\nCommand: {}\n", command_name));
         return (
