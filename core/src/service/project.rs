@@ -6,7 +6,7 @@ use crate::{MaccError, ProjectPaths, Result};
 
 pub fn ensure_initialized_paths(start_dir: &std::path::Path) -> Result<ProjectPaths> {
     if let Ok(paths) = crate::find_project_root(start_dir) {
-        crate::init(&paths, false)?;
+        crate::ensure_runtime_files(&paths)?;
         return Ok(paths);
     }
     // No existing MACC project found. Auto-create only when inside a git repository,

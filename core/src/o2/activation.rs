@@ -2,19 +2,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
-/// Persistent user history is not generated adapter output, even if an old
-/// managed-path manifest accidentally listed it.
-pub(crate) fn retained_state(relative: &str) -> bool {
-    matches!(
-        relative,
-        ".macc/memory.db"
-            | ".macc/memory.db-wal"
-            | ".macc/memory.db-shm"
-            | ".macc/state/tool-sessions.json"
-            | ".macc/state/tool-sessions.json.lock"
-    )
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Activation {
     pub config_revision: String,

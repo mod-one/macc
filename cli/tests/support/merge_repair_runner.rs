@@ -131,7 +131,7 @@ echo 'MACC_TASK_RESULT: success_without_changes'
         .iter()
         .any(|c| c.phase == "merge" && c.reason == "invocation_finished"));
     // A normal performer may not adopt the detached integration slot.
-    let slot = root.join(".git/macc/integration");
+    let slot = root.join(".macc/worktree/integration");
     assert!(slot.join(".macc/merge-repair.json").exists());
     let req = json!({"worktree":root,"source_worktree":root,"task_id":"A","base_revision":base,"feature_revision":feature});
     assert!(!cli(root, &["merge-repair-prepare"], Some(&req))

@@ -166,7 +166,7 @@ fn evidence_is_exact_retained_and_never_disclosed_without_explicit_operator_cons
     assert_ne!(released.context_digest, revoked.context_digest);
     let location = s.path.clone();
     drop(s);
-    std::fs::remove_dir_all(tmp.path().join(".macc")).unwrap();
+    crate::clear(&crate::ProjectPaths::from_root(tmp.path())).unwrap();
     let s = Store::open(tmp.path()).unwrap();
     assert_eq!(s.path, location);
     assert_eq!(s.artifact(&a.id).unwrap().data_hex, hex);

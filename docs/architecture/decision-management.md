@@ -110,7 +110,7 @@ CAS rejects competing graph versions; idempotency prevents duplicate commits. An
 
 ## Persistence and approvals
 
-The authority is `<git-common-dir>/macc/control.sqlite`; linked worktrees share the project identity, while plan/source/reference-branch identities isolate graphs, decisions and votes. Explicit `project` guidance also reaches future PRD plans on the same reference branch; task/path/requirement decisions do not leak into colliding task IDs in other plans. A shared controller lock prevents competing dispatch owners. `macc clear` retains this authority and reports that retention. No new branch/worktree deletion is introduced.
+The authority is `<primary-checkout>/.macc/persistent/control.sqlite`; linked worktrees share the project identity, while plan/source/reference-branch identities isolate graphs, decisions and votes. Explicit `project` guidance also reaches future PRD plans on the same reference branch; task/path/requirement decisions do not leak into colliding task IDs in other plans. A shared controller lock prevents competing dispatch owners. `macc clear` retains this authority and reports that retention. No new branch/worktree deletion is introduced.
 
 The journal is hash chained. Verification checks SQLite integrity, graph/decision/approval projections and acknowledged receipts against journal evidence. Hashes detect corruption; same-UID filesystem access is not an independent security boundary.
 
@@ -499,3 +499,9 @@ report in CLI, TUI and Web service responses.
 See [Diagnostic delivery and external verification](diagnostic-delivery.md) for
 review protocol v4, native report receipts, external-verification waiting and the
 strict separation between diagnostic completion, feature acceptance and release.
+
+
+### Shared persistent project layout
+
+See [Persistent project state](../PERSISTENT_PROJECT_STATE.md) for automatic legacy
+migration, shared worktree authority, clear retention, Git visibility and backups.

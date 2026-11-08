@@ -123,13 +123,15 @@ pub fn delete_branch(root: &Path, branch: Option<&str>, force: bool) -> Result<(
     crate::git::delete_local_branch(root, branch, force)
 }
 
-pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize> {
+pub fn removable_worktrees(root: &Path) -> Result<Vec<crate::WorktreeEntry>> {
     let entries = crate::list_worktrees(root)?;
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut removed = 0usize;
+    let primary = crate::persistent::primary_root(root).unwrap_or_else(|_| root_canon.clone());
+    let mut removable = Vec::new();
 
     for entry in entries {
         if entry.path == root_canon
+            || entry.path == primary
             || entry
                 .branch
                 .as_deref()
@@ -143,7 +145,6 @@ pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize>
             // Supervisor evidence and unintegrated repairs have their own safe lifecycle.
             continue;
         }
-        let branch = entry.branch.clone();
         let status = crate::git::run_git_output_mapped(
             &entry.path,
             &[
@@ -177,9 +178,18 @@ pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize>
         if !crate::git::merge_base_is_ancestor(root, head, "HEAD")? {
             continue;
         }
+        removable.push(entry);
+    }
+    Ok(removable)
+}
+
+pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize> {
+    let entries = removable_worktrees(root)?;
+    let mut removed = 0;
+    for entry in entries {
         crate::remove_worktree(root, &entry.path, false)?;
         if remove_branches {
-            delete_branch(root, branch.as_deref(), false)?;
+            delete_branch(root, entry.branch.as_deref(), false)?;
         }
         removed += 1;
     }

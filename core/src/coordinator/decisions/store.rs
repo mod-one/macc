@@ -40,23 +40,9 @@ impl Store {
         )
     }
     pub fn location(root: &Path) -> crate::Result<PathBuf> {
-        let out = crate::git::run_git_output_mapped(
-            root,
-            &["rev-parse", "--git-common-dir"],
-            "resolve decision authority",
-        )?;
-        if !out.status.success() {
-            return Err(error("Decision authority requires a Git repository"));
-        }
-        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-        let common = if path.is_absolute() {
-            path
-        } else {
-            root.join(path)
-        };
-        let common = common.canonicalize().map_err(|e| error(e.to_string()))?;
-        Ok(common.join("macc/control.sqlite"))
+        Ok(crate::persistent::prepare(root)?.join("control.sqlite"))
     }
+
     pub fn open(root: &Path) -> crate::Result<Self> {
         let path = Self::location(root)?;
         if std::fs::symlink_metadata(path.parent().unwrap())

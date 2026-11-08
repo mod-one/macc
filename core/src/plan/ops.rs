@@ -245,23 +245,10 @@ fn compute_gitignore_after(
         return None;
     }
 
-    let mut lines: Vec<String> = existing
+    let existing = existing
         .bytes
         .as_deref()
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .map(|content| content.lines().map(|line| line.to_string()).collect())
+        .and_then(|b| std::str::from_utf8(b).ok())
         .unwrap_or_default();
-
-    for pattern in patterns {
-        if !lines.iter().any(|line| line.trim() == pattern) {
-            lines.push(pattern.clone());
-        }
-    }
-
-    let mut output = lines.join("\n");
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
-    }
-
-    Some(output.into_bytes())
+    Some(crate::gitignore_policy::rewrite(existing, patterns).into_bytes())
 }

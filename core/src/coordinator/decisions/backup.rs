@@ -39,10 +39,10 @@ fn readonly(root: &Path, path: &Path) -> crate::Result<Store> {
     Ok(store)
 }
 pub fn capture_backup(root: &Path, directory: &Path) -> crate::Result<Option<ControlSnapshot>> {
-    let location = match Store::location(root) {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
+    if crate::git::git_common_dir(root).is_err() {
+        return Ok(None);
+    }
+    let location = Store::location(root)?;
     if !location.exists() {
         return Ok(None);
     }
@@ -202,10 +202,10 @@ impl Store {
     }
 }
 pub fn current_state_digest(root: &Path) -> crate::Result<Option<String>> {
-    let location = match Store::location(root) {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
+    if crate::git::git_common_dir(root).is_err() {
+        return Ok(None);
+    }
+    let location = Store::location(root)?;
     if !location.exists() {
         return Ok(None);
     }

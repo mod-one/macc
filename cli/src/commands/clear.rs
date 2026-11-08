@@ -42,7 +42,7 @@ impl Command for ClearCommand {
             crate::commands::gate_cli_mutation(&paths.root)?;
         }
 
-        let is_unsaved = macc_core::save::is_macc_state_unsaved(&paths)?;
+        let is_unsaved = !self.dry_run && macc_core::save::is_macc_state_unsaved(&paths)?;
 
         if is_unsaved && !self.no_save_prompt {
             if let Some(ref save_name) = self.save {

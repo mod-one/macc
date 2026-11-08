@@ -95,7 +95,7 @@ fn human_text_is_exact_scoped_and_survives_runtime_removal() {
         .answer(&d.id, d.version, "stale", None, "Other", false, &p)
         .is_err());
     drop(store);
-    std::fs::remove_dir_all(tmp.path().join(".macc")).unwrap();
+    crate::clear(&crate::ProjectPaths::from_root(tmp.path())).unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let ctx = store
         .context(&store.plan(&plan.id).unwrap(), "B", "new", "review", &p)

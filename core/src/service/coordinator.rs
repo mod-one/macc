@@ -371,6 +371,9 @@ fn coordinator_start_command_process_with_pid(
 ) -> Result<(CoordinatorProcessHandle, i32)> {
     let root = &paths.root;
     if command == "run" {
+        if crate::git::git_common_dir(root).is_ok() {
+            crate::persistent::prepare(root)?;
+        }
         // Reject static configuration/storage prerequisites before spawning;
         // the child still verifies live tools before publishing readiness.
         super::preparation::verify_enabled(root)?;

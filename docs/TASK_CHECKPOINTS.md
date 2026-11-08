@@ -165,7 +165,7 @@ promotion and native compaction capability probes remain later work packages.
 
 ## Integration merge repair
 
-The coordinator's private `<git-common-dir>/macc/integration` slot has a dedicated
+The coordinator's private `<primary-checkout>/.macc/worktree/integration` slot has a dedicated
 merge-repair contract. Before invoking its ordinary adapter runner, the merge hook
 calls `session-store merge-repair-prepare` with the source task worktree and pinned
 base/feature revisions, then explicitly selects role `merge_fix`, phase `merge`.

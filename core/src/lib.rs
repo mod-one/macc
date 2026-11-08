@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod catalog;
+pub mod clear_policy;
 pub mod commit_completion;
 pub mod commit_message;
 pub mod config;
@@ -11,8 +12,10 @@ pub mod domain;
 pub mod engine;
 pub mod fs_lock;
 pub mod git;
+pub mod gitignore_policy;
 pub mod hooks;
 pub mod o2;
+pub mod persistent;
 pub mod session_store;
 pub use config::migrate;
 pub mod mcp_json;
@@ -203,7 +206,7 @@ pub fn classify_path<P: AsRef<Path>>(path: P, paths: &ProjectPaths) -> ManagedPa
                 if sub == "catalog" {
                     return ManagedPathKind::PortableState;
                 }
-                if sub == "backups" {
+                if sub == "backups" || sub == "persistent" {
                     return ManagedPathKind::RuntimeState;
                 }
                 if sub == "tmp" {
@@ -482,6 +485,15 @@ fn record_managed_path(paths: &ProjectPaths, relative_path: &str) -> Result<()> 
 }
 
 pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
+    init_project_files(paths, force, true)
+}
+
+/// Runtime repair must not publish configuration or dirty a reference checkout.
+pub(crate) fn ensure_runtime_files(paths: &ProjectPaths) -> Result<()> {
+    init_project_files(paths, false, false)
+}
+
+fn init_project_files(paths: &ProjectPaths, force: bool, update_visibility: bool) -> Result<()> {
     println!(
         "Core: Initializing in {} (force: {})",
         paths.root.display(),
@@ -600,15 +612,17 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
         }
     }
 
-    let mut ignore_entries: Vec<String> = BASELINE_IGNORE_ENTRIES
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    ignore_entries.extend(collect_tool_gitignore_entries(paths, None));
-    let ignore_refs: Vec<&str> = ignore_entries.iter().map(|s| s.as_str()).collect();
-    let gitignore_status = ensure_gitignore_entries(paths, &ignore_refs, None)?;
-    if gitignore_status == plan::ActionStatus::Created {
-        created_paths.push(".gitignore".to_string());
+    if update_visibility {
+        let mut ignore_entries: Vec<String> = BASELINE_IGNORE_ENTRIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        ignore_entries.extend(collect_tool_gitignore_entries(paths, None));
+        let ignore_refs: Vec<&str> = ignore_entries.iter().map(|s| s.as_str()).collect();
+        let gitignore_status = ensure_gitignore_entries(paths, &ignore_refs, None)?;
+        if gitignore_status == plan::ActionStatus::Created {
+            created_paths.push(".gitignore".to_string());
+        }
     }
 
     for rel in created_paths {
@@ -1121,6 +1135,9 @@ pub fn apply_plan(
         None
     };
     service::preparation::validate_review(paths, plan.preparation.as_ref())?;
+    if git::git_common_dir(&paths.root).is_ok() {
+        persistent::prepare(&paths.root)?;
+    }
     if o2::activation::preview(&paths.root)? != plan.o2_activation {
         return Err(MaccError::Validation(
             "O2 prerequisites changed after preview; review macc apply again".into(),
@@ -1429,6 +1446,7 @@ fn context_file_names_from_config(value: &serde_json::Value) -> Vec<String> {
 }
 
 pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
+    clear_policy::require_stopped(&paths.root)?;
     let mut managed = load_managed_paths(paths)?;
 
     if let Some(rel) = relative_to_root(paths, &paths.managed_paths_state_path()) {
@@ -1450,7 +1468,7 @@ pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
     let mut report = ClearReport::default();
     let mut removed_paths: Vec<PathBuf> = Vec::new();
     for rel in entries {
-        if rel == ".macc/skills.lock.json" || o2::activation::retained_state(&rel) {
+        if clear_policy::retained(&rel) {
             report.skipped += 1;
             continue;
         }
@@ -1497,8 +1515,9 @@ pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
     });
 
     let mut report = ClearReport::default();
+    let mut removed = HashSet::new();
     for rel in entries {
-        if rel == ".macc/skills.lock.json" || o2::activation::retained_state(&rel) {
+        if clear_policy::retained(&rel) {
             report.skipped += 1;
             continue;
         }
@@ -1506,6 +1525,11 @@ pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
         if !full.exists() {
             continue;
         }
+        if !clear_policy::preview_removable(&full, &removed) {
+            report.skipped += 1;
+            continue;
+        }
+        removed.insert(full);
         report.removed += 1;
     }
 
@@ -1545,7 +1569,7 @@ fn cleanup_empty_parents(paths: &ProjectPaths, removed: &[PathBuf]) {
         }
     }
 }
-pub const BASELINE_IGNORE_ENTRIES: &[&str] = &[".macc/", "performer.sh", "worktree.prd.json"];
+pub const BASELINE_IGNORE_ENTRIES: &[&str] = gitignore_policy::BASELINE;
 
 fn collect_tool_gitignore_entries(
     paths: &ProjectPaths,
@@ -1594,17 +1618,9 @@ pub fn ensure_gitignore_entries(
         (false, String::new())
     };
 
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-    let mut changed = false;
-
-    for entry in entries {
-        if !lines.iter().any(|l| l.trim() == *entry) {
-            lines.push(entry.to_string());
-            changed = true;
-        }
-    }
-
-    if !changed {
+    let requested = entries.iter().map(|s| s.to_string()).collect();
+    let new_content = gitignore_policy::rewrite(&content, &requested);
+    if new_content == content {
         return Ok(plan::ActionStatus::Unchanged);
     }
 
@@ -1613,11 +1629,6 @@ pub fn ensure_gitignore_entries(
         if let Some(ts) = timestamp {
             create_timestamped_backup(paths, ts, ".gitignore")?;
         }
-    }
-
-    let mut new_content = lines.join("\n");
-    if !new_content.is_empty() && !new_content.ends_with('\n') {
-        new_content.push('\n');
     }
 
     let _ = write_if_changed(

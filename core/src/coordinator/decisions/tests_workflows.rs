@@ -839,7 +839,7 @@ fn process_crash_replays_committed_wal_outbox_and_clear_retains_decisions_and_so
         .contains("AFTER_CRASH"));
     let backup = tempfile::tempdir().unwrap();
     assert!(capture_backup(tmp.path(), backup.path()).unwrap().is_some());
-    std::fs::remove_dir_all(tmp.path().join(".macc")).unwrap();
+    crate::clear(&crate::ProjectPaths::from_root(tmp.path())).unwrap();
     std::fs::create_dir_all(tmp.path().join(".macc")).unwrap();
     std::fs::write(tmp.path().join(".macc/macc.yaml"), config).unwrap();
     drop(s);

@@ -12,11 +12,10 @@
 //! * a conflicted merge left `MERGE_HEAD` and conflict markers in the
 //!   operator's checkout.
 //!
-//! Merges now happen in a private worktree kept at `<git-common-dir>/macc/
-//! integration`, detached at the tip of the base branch. The git *common* dir
-//! is shared by every worktree and is never scanned by `git status`, so the
-//! integration checkout cannot dirty any working tree regardless of what the
-//! project's `.gitignore` says.
+//! Merges happen in the primary checkout's `.macc/worktree/integration`,
+//! detached at the reference branch tip. Shared authority/locks are under
+//! `.macc/persistent`; local Git exclusions protect technical state even
+//! before Apply writes the project visibility policy.
 //!
 //! # Publishing
 //!
@@ -50,11 +49,7 @@ use crate::{git, MaccError, Result};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Directory (under the git common dir) holding all integration scratch state.
-const INTEGRATION_DIR: &str = "macc";
-/// Worktree directory name within [`INTEGRATION_DIR`].
-const WORKTREE_NAME: &str = "integration";
-/// Lock file name within [`INTEGRATION_DIR`].
+/// Lock file name within the shared persistent directory.
 const LOCK_NAME: &str = "integration.lock";
 /// How long to wait for another process to finish integrating before giving up.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -98,8 +93,7 @@ impl IntegrationWorktree {
     /// in-progress merge) is discarded — the worktree is scratch space owned
     /// entirely by the coordinator.
     pub fn acquire(repo_root: &Path, base: &str) -> Result<Self> {
-        let common_dir = git::git_common_dir(repo_root)?;
-        let integration_dir = common_dir.join(INTEGRATION_DIR);
+        let integration_dir = crate::persistent::prepare(repo_root)?;
         std::fs::create_dir_all(&integration_dir).map_err(|e| MaccError::Io {
             path: integration_dir.to_string_lossy().into(),
             action: "create integration directory".into(),
@@ -112,7 +106,8 @@ impl IntegrationWorktree {
             LOCK_RETRY_DELAY,
             "integration worktree",
         )?;
-        let path = integration_dir.join(WORKTREE_NAME);
+        let path = crate::persistent::integration_path(repo_root)?;
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(crate::persistent::error)?;
 
         let base_sha = git::resolve_ref(repo_root, base).ok_or_else(|| MaccError::Git {
             operation: "resolve_base".into(),
@@ -124,13 +119,24 @@ impl IntegrationWorktree {
         let _ = git::worktree_prune(repo_root);
 
         if path.join(".git").exists() {
+            if git::git_common_dir(&path)?
+                .canonicalize()
+                .map_err(crate::persistent::error)?
+                != git::git_common_dir(repo_root)?
+                    .canonicalize()
+                    .map_err(crate::persistent::error)?
+            {
+                return Err(crate::persistent::error(
+                    "Integration slot belongs to another Git repository; no cleanup was performed",
+                ));
+            }
             // Reuse: discard whatever the previous merge left behind.
             let _ = git::merge_abort(&path);
             git::checkout_detach_force(&path, &base_sha)?;
             let _ = git::clean_untracked(&path);
         } else {
             if path.exists() {
-                std::fs::remove_dir_all(&path).map_err(|e| MaccError::Io {
+                std::fs::remove_dir(&path).map_err(|e| MaccError::Io {
                     path: path.to_string_lossy().into(),
                     action: "remove stale integration worktree directory".into(),
                     source: e,

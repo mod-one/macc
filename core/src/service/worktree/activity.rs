@@ -21,7 +21,10 @@ pub fn classify(
     if entry.path == root {
         return "project";
     }
-    if entry.path == root.join(".git/macc/integration") {
+    if entry.path.ends_with(".macc/worktree/integration")
+        && (entry.path == root.join(".macc/worktree/integration")
+            || crate::persistent::integration_path(root).is_ok_and(|p| p == entry.path))
+    {
         return "integration";
     }
     if entry.path.parent() == Some(root.join(".macc/worktree").as_path())
@@ -148,7 +151,7 @@ mod tests {
             classify(&reserved, root, false, &registry, |_| true),
             "supervisor"
         );
-        reserved.path = root.join(".git/macc/integration");
+        reserved.path = root.join(".macc/worktree/integration");
         assert_eq!(
             classify(&reserved, root, false, &registry, |_| true),
             "integration"

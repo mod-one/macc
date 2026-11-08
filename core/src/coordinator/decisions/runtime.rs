@@ -11,6 +11,9 @@ use std::{
 };
 
 pub fn controller_lock(root: &Path) -> Result<Option<crate::fs_lock::AdvisoryLock>> {
+    if crate::git::git_common_dir(root).is_ok() {
+        crate::persistent::prepare(root)?;
+    }
     if !policy(root)?.enabled {
         return Ok(None);
     }

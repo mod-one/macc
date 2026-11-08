@@ -24,7 +24,7 @@ fn conflicted() -> (tempfile::TempDir, MergeRepair, ContextRequest) {
     git(root, &["checkout", "main"]);
     std::fs::write(root.join("code.txt"), "main\n").unwrap();
     git(root, &["commit", "-am", "main"]);
-    let slot = root.join(".git/macc/integration");
+    let slot = root.join(".macc/worktree/integration");
     git(
         root,
         &[

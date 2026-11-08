@@ -22,11 +22,7 @@ fn revision(path: &Path, reference: &str) -> Result<String> {
     )
 }
 fn location(root: &Path, worktree: &Path) -> Result<PathBuf> {
-    let common = git_state::text(
-        root,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    let expected = Path::new(&common).join("macc/integration");
+    let expected = crate::persistent::integration_path(root)?;
     let actual = worktree.canonicalize().map_err(|e| error(e.to_string()))?;
     if actual != expected.canonicalize().map_err(|e| error(e.to_string()))? {
         return Err(error(
