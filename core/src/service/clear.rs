@@ -62,6 +62,9 @@ pub fn clear_project(
     if let Some(path) = &report.archive_path {
         ui.info(&format!("Recovery archive: {}", path.display()));
     }
+    for warning in &report.warnings {
+        ui.warn(warning);
+    }
     if !report.failures.is_empty() {
         return Err(MaccError::Validation(format!(
             "Clear incomplete; unresolved entries are retained for retry:\n{}",

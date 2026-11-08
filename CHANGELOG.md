@@ -8,6 +8,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Changed
+- Apply keeps the shared `.gitignore` block small and moves generated tool exclusions to a managed local Git `info/exclude` block. Proven directory ownership groups rules; existing user exclusions and skills are preserved. Clear prunes obsolete local rules while retaining exclusions needed by unfinished worktrees.
 - Supervisor tests follow the validation command list: empty disables tests, adding commands enables them, and manual activation without commands reports an actionable message. Legacy empty-command configurations no longer prevent repair; AI verification and other repair safeguards retain their settings.
 - Apply now uses a compact review/progress/result presentation, preserves complete logs, and offers verbose, quiet and clean JSON modes. Redirected input requires explicit initial `--yes` consent; preparation questions keep their own approval gates.
 - Partial native indexes and parse failures are visible across clients. The assistant can propose a reviewed budget increase/rebuild or retain partial coverage with warnings. The default native build budget is 15 seconds; explicit existing budgets are preserved.

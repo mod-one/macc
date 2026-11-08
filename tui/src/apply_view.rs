@@ -104,9 +104,20 @@ impl AppState {
             })
             .and_then(|r| r.live_output.as_deref())
             .unwrap_or(result);
+        let warnings = self
+            .apply_context
+            .as_ref()
+            .filter(|_| self.apply_feedback.is_none())
+            .map(|c| c.plan.warnings.join("\nWARN  "))
+            .unwrap_or_default();
+        let warnings = if warnings.is_empty() {
+            String::new()
+        } else {
+            format!("WARN  {warnings}\n\n")
+        };
         f.render_widget(
             Paragraph::new(format!(
-                "{}\n\nSelected path: {selected_path}",
+                "{warnings}{}\n\nSelected path: {selected_path}",
                 result.trim_start()
             ))
             .wrap(Wrap { trim: false })
@@ -151,6 +162,11 @@ impl AppState {
                 )
             })
             .unwrap_or_default();
+        if let Some(context) = context {
+            for warning in &context.plan.warnings {
+                text.push_str(&format!("WARN  {warning}\n\n"));
+            }
+        }
         if let Some(activation) = context.and_then(|c| c.plan.o2_activation.as_ref()) {
             text.push_str(&format!(
                 "O2: {}. Migration backups are retained under .macc/state.\n\n",

@@ -73,6 +73,34 @@ fn reviewed_lock_records_actual_sha_and_bytes_and_is_stable_on_reapply() {
 }
 
 #[test]
+fn preexisting_user_skill_is_never_overwritten_or_claimed_in_a_lock_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = ProjectPaths::from_root(dir.path());
+    let (unit, _) = fixture(dir.path(), "tool-a", &"a".repeat(40), "catalog version");
+    let roots = BTreeMap::from([("tool-a".into(), ".tool-a/skills".into())]);
+    let skill = dir.path().join(".tool-a/skills/fixture");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "user version").unwrap();
+    std::fs::write(unit.source_root_path.join("new.txt"), "must not be added").unwrap();
+    let plan = lifecycle::installation_plan(&paths, std::slice::from_ref(&unit), &roots).unwrap();
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|w| w.contains("MACC-SKILL-USER-OWNED")));
+    let report = lifecycle::apply_installation(&paths, &plan, &[unit], &roots).unwrap();
+    assert_eq!(report.warnings, plan.warnings);
+    assert_eq!(
+        std::fs::read_to_string(skill.join("SKILL.md")).unwrap(),
+        "user version"
+    );
+    assert!(!skill.join("new.txt").exists());
+    assert!(SkillsLockFile::load(&paths.skills_lock_path())
+        .unwrap()
+        .find("fixture", "tool-a")
+        .is_none());
+}
+
+#[test]
 fn structured_skill_assets_keep_exact_bytes_across_repeated_applies() {
     let dir = tempfile::tempdir().unwrap();
     let paths = ProjectPaths::from_root(dir.path());

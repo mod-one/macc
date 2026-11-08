@@ -28,6 +28,6 @@ tokio = { version = "1", features = ["process", "rt", "rt-multi-thread", "time",
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
+tempfile = "3.8"
 
 [dev-dependencies]
-tempfile = "3.8"

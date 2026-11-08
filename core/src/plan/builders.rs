@@ -92,6 +92,8 @@ pub fn plan_skill_install(
     // 2. Destination root for this skill (tool-agnostic convention)
     let config_dir = format!(".{}", tool);
     let dest_skill_root = PathBuf::from(config_dir).join("skills").join(skill_id);
+    plan.skill_roots
+        .insert(dest_skill_root.to_string_lossy().replace('\\', "/"));
 
     // 3. Expand directory -> WriteFile actions
     expand_directory_to_plan(plan, &skill_path, &dest_skill_root)?;

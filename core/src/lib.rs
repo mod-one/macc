@@ -15,6 +15,7 @@ pub mod fs_lock;
 pub mod git;
 pub mod gitignore_policy;
 pub mod hooks;
+mod local_exclusions;
 pub mod o2;
 pub mod persistent;
 pub mod project_hygiene;
@@ -154,6 +155,8 @@ mod apply_report;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ClearReport {
+    #[serde(default)]
+    pub warnings: Vec<String>,
     pub removed: usize,
     pub skipped: usize,
     pub archived: usize,
@@ -719,6 +722,7 @@ pub fn build_plan(
     for tool_id in &resolved.tools.enabled {
         if let Some(adapter) = registry.get(tool_id) {
             let tool_plan = adapter.plan(&ctx)?;
+            total_plan.skill_roots.extend(tool_plan.skill_roots);
             for action in tool_plan.actions {
                 total_plan.add_action(action);
             }
@@ -1140,6 +1144,7 @@ pub fn apply_plan(
     allow_user_scope: bool,
 ) -> Result<ApplyReport> {
     plan.normalize();
+    plan::skill_ownership::validate_review(paths, plan)?;
     let _skills_lock = skills_catalog::locking::guard(paths, plan)?;
     validate_plan(plan, allow_user_scope)?;
 
@@ -1169,6 +1174,7 @@ pub fn apply_plan(
         }
         let operations = plan::collect_plan_operations(paths, plan);
         let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
+        report.warnings.extend(plan.warnings.iter().cloned());
         report.warnings.extend(
             project_hygiene::findings(paths)
                 .into_iter()
@@ -1246,6 +1252,7 @@ where
     }
 
     project_ownership::read(paths)?;
+    let local_exclusions = local_exclusions::AfterWrites::new(paths)?;
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
     let total_ops = operations.len();
     let mut report = ApplyReport::new();
@@ -1384,6 +1391,8 @@ where
             }
         }
     }
+
+    report.warnings.extend(local_exclusions.finish()?);
 
     if backup_created {
         report.backup_dir = Some(paths.backups_dir.join(&timestamp));
@@ -1530,7 +1539,8 @@ pub fn ensure_gitignore_entries(
     };
 
     let requested = entries.iter().map(|s| s.to_string()).collect();
-    let requested = project_ownership::ignore_patterns(paths, &requested, &BTreeSet::new())?;
+    project_ownership::read(paths)?;
+    local_exclusions::reconcile(paths)?;
     let new_content = gitignore_policy::rewrite(&content, &requested);
     if new_content == content {
         return Ok(plan::ActionStatus::Unchanged);
@@ -2218,7 +2228,7 @@ mod tests {
         );
         assert_eq!(
             report.outcomes.get(".gitignore").unwrap(),
-            &plan::ActionStatus::Updated
+            &plan::ActionStatus::Unchanged
         );
 
         assert!(temp_dir.join("nested").is_dir());
@@ -2228,7 +2238,7 @@ mod tests {
         );
         let gitignore_content = fs::read_to_string(temp_dir.join(".gitignore")).unwrap();
         assert!(gitignore_content.contains(".macc/"));
-        assert!(gitignore_content.contains("/nested/file.txt"));
+        assert!(!gitignore_content.contains("/nested/file.txt"));
         assert!(!gitignore_content.contains("*.log"));
 
         fs::remove_dir_all(&temp_dir).ok();
@@ -2326,7 +2336,8 @@ mod tests {
             b"generated",
             |_| Ok(()),
         )?;
-        let status = ensure_gitignore_entries(&paths, &["new_entry"], Some(timestamp))?;
+        fs::write(temp_dir.join(".gitignore"), "existing_entry\n").unwrap();
+        let status = ensure_gitignore_entries(&paths, BASELINE_IGNORE_ENTRIES, Some(timestamp))?;
         assert_eq!(status, plan::ActionStatus::Updated);
         assert!(paths
             .backups_dir

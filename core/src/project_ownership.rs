@@ -49,6 +49,15 @@ pub(crate) fn save(paths: &ProjectPaths, value: &Inventory) -> Result<()> {
         &serde_json::to_vec_pretty(value).map_err(crate::persistent::error)?,
     )
 }
+/// Retain the exact creation/hash evidence before Clear prunes the live inventory.
+pub(crate) fn archive_before_clear(paths: &ProjectPaths, archive: &Path) -> Result<()> {
+    let _guard = lock(paths)?;
+    crate::atomic_write(
+        paths,
+        &archive.join("generated-project-files-before.json"),
+        &serde_json::to_vec_pretty(&read(paths)?).map_err(crate::persistent::error)?,
+    )
+}
 pub(crate) fn digest(path: &Path) -> Result<String> {
     Ok(format!(
         "{:x}",
@@ -116,54 +125,6 @@ pub fn record_branch(root: &Path, branch: &str) -> Result<()> {
         .insert(branch.trim_start_matches("refs/heads/").into());
     save(&paths, &inventory)
 }
-/// A directory that existed before MACC is never hidden wholesale. Only new children
-/// may receive exact ignore rules. Preview and execution use this same selection.
-pub(crate) fn ignore_patterns(
-    paths: &ProjectPaths,
-    patterns: &BTreeSet<String>,
-    planned: &BTreeSet<String>,
-) -> Result<BTreeSet<String>> {
-    let inventory = read(paths)?;
-    let mut result = BTreeSet::new();
-    for pattern in patterns {
-        if crate::gitignore_policy::BASELINE.contains(&pattern.as_str()) || pattern == ".macc/" {
-            result.insert(pattern.clone());
-            continue;
-        }
-        let relative = pattern.trim_matches('/');
-        if relative.contains(&['*', '?', '[', ']'][..])
-            || crate::normalize_relative_path(relative).as_deref() != Some(relative)
-        {
-            continue; // Adapter ignore declarations must identify project paths, not global globs.
-        }
-        let full = paths.root.join(relative);
-        if !full.exists()
-            || inventory.files.contains_key(relative)
-            || inventory.directories.contains(relative)
-        {
-            result.insert(format!(
-                "/{relative}{}",
-                if pattern.ends_with('/') { "/" } else { "" }
-            ));
-        } else if full.is_dir() {
-            for file in inventory.files.keys().chain(planned.iter()) {
-                if file.starts_with(&format!("{relative}/"))
-                    && (inventory.files.contains_key(file) || !paths.root.join(file).exists())
-                {
-                    result.insert(format!("/{file}"));
-                }
-            }
-        }
-    }
-    if patterns
-        .iter()
-        .any(|p| crate::gitignore_policy::BASELINE.contains(&p.as_str()) || p == ".macc/")
-    {
-        result.extend(inventory.files.keys().map(|file| format!("/{file}")));
-    }
-    Ok(result)
-}
-
 pub(crate) fn record_directory(paths: &ProjectPaths, relative: &str) -> Result<()> {
     if relative == ".macc" || relative.starts_with(".macc/") {
         return Ok(());
@@ -210,15 +171,6 @@ mod tests {
             crate::write_if_changed(&paths, rel, &paths.root.join(rel), b"generated", |_| Ok(()))
                 .unwrap();
         }
-        let requested = [".claude/", "CLAUDE.md", "AGENTS.md"]
-            .iter()
-            .map(|p| p.to_string())
-            .collect();
-        let rules = ignore_patterns(&paths, &requested, &BTreeSet::new()).unwrap();
-        assert!(!rules.contains("/.claude/"));
-        assert!(!rules.contains("/CLAUDE.md"));
-        assert!(rules.contains("/.claude/hooks/new-hook.sh"));
-        assert!(rules.contains("/AGENTS.md"));
         let report = crate::clear(&paths).unwrap();
         assert!(report.failures.is_empty());
         assert!(paths.root.join("CLAUDE.md").exists());
@@ -326,28 +278,12 @@ mod clearing_exclusions_tests {
         crate::ensure_gitignore_entries(&paths, crate::BASELINE_IGNORE_ENTRIES, None).unwrap();
         assert!(std::fs::read_to_string(paths.root.join(".gitignore"))
             .unwrap()
-            .contains("/AGENTS.md"));
+            .contains("/.macc/*"));
         crate::clear(&paths).unwrap();
         let after = std::fs::read_to_string(paths.root.join(".gitignore")).unwrap();
         assert!(after.starts_with("# user\n*.private\n"));
         assert!(!after.contains("/AGENTS.md"));
         assert!(after.contains("/.macc/*"));
-    }
-}
-
-#[cfg(test)]
-mod pattern_tests {
-    use super::*;
-    #[test]
-    fn broad_adapter_globs_cannot_hide_preexisting_user_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = ProjectPaths::from_root(tmp.path());
-        std::fs::create_dir_all(paths.root.join("user-skills")).unwrap();
-        std::fs::write(paths.root.join("user-skills/own.md"), "user").unwrap();
-        let patterns = BTreeSet::from(["user-skills/**".into(), "*.secret".into()]);
-        assert!(ignore_patterns(&paths, &patterns, &BTreeSet::new())
-            .unwrap()
-            .is_empty());
     }
 }
 

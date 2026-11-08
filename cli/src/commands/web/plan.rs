@@ -143,7 +143,13 @@ pub(super) fn build_plan_response(
                 }
             })
             .collect(),
-        risks: build_plan_risks(ops),
+        risks: build_plan_risks(ops)
+            .into_iter()
+            .chain(plan.warnings.iter().map(|message| ApiPlanRisk {
+                level: ApiRiskLevel::Caution,
+                message: message.clone(),
+            }))
+            .collect(),
         consents: ops
             .iter()
             .filter(|op| op.consent_required)

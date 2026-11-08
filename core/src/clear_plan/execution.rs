@@ -30,6 +30,7 @@ pub(super) fn execute_with_remover(
         &archive.join("plan.json"),
         &serde_json::to_vec_pretty(&plan).map_err(crate::persistent::error)?,
     )?;
+    crate::project_ownership::archive_before_clear(paths, &archive)?;
     let mut report = plan.report();
     report.removed = 0;
     report.archived = 0;
@@ -164,6 +165,10 @@ pub(super) fn execute_with_remover(
     crate::project_ownership::save(paths, &inventory)?;
     if let Err(error) = crate::gitignore_policy::after_clear(paths, &inventory, &archive) {
         report.failures.push(error.to_string());
+    }
+    match crate::local_exclusions::reconcile(paths) {
+        Ok(warnings) => report.warnings.extend(warnings),
+        Err(error) => report.failures.push(error.to_string()),
     }
     for dir in [".macc/worktree", ".macc/state"] {
         let _ = std::fs::remove_dir(paths.root.join(dir));

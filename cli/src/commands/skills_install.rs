@@ -201,6 +201,9 @@ fn execute(app: &AppContext, requests: Vec<Request>, dry_run: bool, refresh: boo
             return ui.render_plan_preview(&paths, &plan, &operations, false, false);
         }
         ui.info("MACC Skills Install Review");
+        for warning in &plan.warnings {
+            ui.warn(warning);
+        }
         for unit in &units {
             if let Some(provenance) = &unit.provenance {
                 for selection in &unit.selections {

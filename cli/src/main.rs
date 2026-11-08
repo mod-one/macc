@@ -2414,6 +2414,7 @@ struct PlanPreviewOp {
 struct PlanPreviewOutput {
     summary: PlanPreviewSummary,
     operations: Vec<PlanPreviewOp>,
+    warnings: Vec<String>,
 }
 
 fn render_plan_preview(
@@ -2431,6 +2432,7 @@ fn render_plan_preview(
         let payload = PlanPreviewOutput {
             summary,
             operations: build_plan_preview_ops(ops, true),
+            warnings: plan.warnings.clone(),
         };
         let rendered = serde_json::to_string_pretty(&payload).map_err(|e| {
             MaccError::Validation(format!("Failed to serialize plan JSON output: {}", e))
@@ -2440,6 +2442,9 @@ fn render_plan_preview(
     }
 
     print_plan_preview_summary(&summary);
+    for warning in &plan.warnings {
+        eprintln!("WARN  {warning}");
+    }
     print_plan_preview_ops(ops, explain);
     println!("Core: Total actions planned: {}", plan.actions.len());
     Ok(())

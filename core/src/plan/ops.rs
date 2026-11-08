@@ -84,12 +84,7 @@ impl OperationAccumulator {
         }
     }
 
-    fn into_planned_op(
-        self,
-        paths: &ProjectPaths,
-        path: String,
-        planned: &BTreeSet<String>,
-    ) -> Option<PlannedOp> {
+    fn into_planned_op(self, paths: &ProjectPaths, path: String) -> Option<PlannedOp> {
         let kind = self.kind.unwrap_or(PlannedOpKind::Other);
 
         if kind == PlannedOpKind::Other
@@ -105,9 +100,9 @@ impl OperationAccumulator {
         let consent_required = self.scope == Scope::User;
 
         let after = match kind {
-            PlannedOpKind::Write => self.write_content.or_else(|| {
-                compute_gitignore_after(paths, &existing, &self.ensure_patterns, planned)
-            }),
+            PlannedOpKind::Write => self
+                .write_content
+                .or_else(|| compute_gitignore_after(&existing, &self.ensure_patterns)),
             PlannedOpKind::Merge => compute_merge_after(&existing, &self.merge_patches),
             _ => None,
         };
@@ -180,34 +175,9 @@ pub fn collect_plan_operations(paths: &ProjectPaths, plan: &ActionPlan) -> Vec<P
         }
     }
 
-    let planned: BTreeSet<String> = plan
-        .actions
-        .iter()
-        .filter_map(|action| match action {
-            Action::WriteFile {
-                path,
-                scope: Scope::Project,
-                ..
-            }
-            | Action::MergeJson {
-                path,
-                scope: Scope::Project,
-                ..
-            } => Some(path.clone()),
-            _ => None,
-        })
-        .collect();
-    if let Some(ignore) = accumulator.get_mut(".gitignore") {
-        ignore.ensure_patterns.extend(
-            planned
-                .iter()
-                .filter(|path| path.as_str() != ".gitignore" && !path.starts_with(".macc/"))
-                .cloned(),
-        );
-    }
     let mut ops: Vec<PlannedOp> = accumulator
         .into_iter()
-        .filter_map(|(path, entry)| entry.into_planned_op(paths, path, &planned))
+        .filter_map(|(path, entry)| entry.into_planned_op(paths, path))
         .map(|mut op| {
             op.metadata.preserve_bytes = plan.skill_file_paths.contains(&op.path);
             op
@@ -268,10 +238,8 @@ fn compute_merge_after(
 }
 
 fn compute_gitignore_after(
-    paths: &ProjectPaths,
     existing: &crate::plan::diff::ExistingFile,
     patterns: &BTreeSet<String>,
-    planned: &BTreeSet<String>,
 ) -> Option<Vec<u8>> {
     if patterns.is_empty() {
         return None;
@@ -282,13 +250,5 @@ fn compute_gitignore_after(
         .as_deref()
         .and_then(|b| std::str::from_utf8(b).ok())
         .unwrap_or_default();
-    // Fail closed on unreadable provenance: never hide preexisting project files.
-    let patterns = match crate::project_ownership::ignore_patterns(paths, patterns, planned) {
-        Ok(patterns) => patterns,
-        Err(error) => {
-            tracing::error!(%error,"Cannot preview Git exclusions: provenance is unreadable; Apply will refuse execution");
-            return None;
-        }
-    };
-    Some(crate::gitignore_policy::rewrite(existing, &patterns).into_bytes())
+    Some(crate::gitignore_policy::rewrite(existing, patterns).into_bytes())
 }

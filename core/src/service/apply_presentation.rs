@@ -133,7 +133,7 @@ pub fn review(paths: &ProjectPaths, plan: &ActionPlan, ops: &[PlannedOp]) -> Str
             )),
         }
     }
-    for warning in warnings(ops) {
+    for warning in plan.warnings.iter().cloned().chain(warnings(ops)) {
         text.push_str(&format!("WARN  {warning}\n"));
     }
     text

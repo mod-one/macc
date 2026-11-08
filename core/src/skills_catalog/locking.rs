@@ -31,19 +31,22 @@ pub fn revision(paths: &ProjectPaths) -> Result<String> {
     }
 }
 pub fn guard(paths: &ProjectPaths, plan: &ActionPlan) -> Result<Option<AdvisoryLock>> {
-    let Some(expected) = &plan.skills_lock_revision else {
+    if plan.skills_lock_revision.is_none() && plan.skill_roots.is_empty() {
         return Ok(None);
-    };
+    }
     let lock = AdvisoryLock::acquire(
         &paths.macc_dir.join("state/skills-write.lock"),
         Duration::from_secs(30),
         "skills lockfile",
     )?;
-    if &revision(paths)? != expected {
-        return Err(MaccError::Validation(
-            "Skills lockfile changed after preview; review Apply again".into(),
-        ));
+    if let Some(expected) = &plan.skills_lock_revision {
+        if &revision(paths)? != expected {
+            return Err(MaccError::Validation(
+                "Skills lockfile changed after preview; review Apply again".into(),
+            ));
+        }
     }
+    crate::plan::skill_ownership::validate_review(paths, plan)?;
     validate_local_files(paths, plan)?;
     Ok(Some(lock))
 }

@@ -4,6 +4,7 @@ pub mod builders;
 pub mod diff;
 pub mod diff_view;
 pub mod ops;
+pub(crate) mod skill_ownership;
 pub use diff::{
     compute_write_status, generate_unified_diff, is_text_file, read_existing, ActionStatus,
     ExistingFile,
@@ -20,6 +21,13 @@ pub enum Scope {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct ActionPlan {
+    /// Whole skill roots, used to preserve preexisting user installations.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub skill_roots: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub preserved_skill_roots: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// Skill assets are copied verbatim, including structured files.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub skill_file_paths: std::collections::BTreeSet<String>,
@@ -162,6 +170,9 @@ impl ActionPlan {
 
         let mut output = String::new();
         writeln!(output, "Planned changes summary:").unwrap();
+        for warning in &self.warnings {
+            writeln!(output, "WARN  {warning}").unwrap();
+        }
         if let Some(activation) = &self.o2_activation {
             writeln!(output, "O2 prerequisite: {}", activation.operation).unwrap();
         }

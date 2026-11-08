@@ -1,8 +1,8 @@
 //! Ordered managed Git policy; portable configuration is distinct from local authority.
-use crate::{MaccError, Result};
+use crate::Result;
 use std::{collections::BTreeSet, path::Path};
-const BEGIN: &str = "# BEGIN MACC project visibility";
-const END: &str = "# END MACC project visibility";
+pub(crate) const BEGIN: &str = "# BEGIN MACC project visibility";
+pub(crate) const END: &str = "# END MACC project visibility";
 pub const BASELINE: &[&str] = &[
     "!/.macc/",
     "/.macc/*",
@@ -30,26 +30,13 @@ pub fn rewrite(existing: &str, requested: &BTreeSet<String>) -> String {
         lines.push(source[index].to_string());
         index += 1;
     }
-    let extras: Vec<_> = requested
-        .iter()
-        .filter(|pattern| {
-            !pattern.chars().any(char::is_control)
-                && !BASELINE.contains(&pattern.as_str())
-                && pattern.as_str() != ".macc/"
-                && !lines.iter().any(|line| line.trim() == pattern.as_str())
-        })
-        .cloned()
-        .collect();
     while lines.last().is_some_and(|s| s.is_empty()) {
         lines.pop();
     }
     if managed {
         lines.push(BEGIN.into());
         lines.extend(BASELINE.iter().map(|s| s.to_string()));
-        lines.extend(extras);
         lines.push(END.into());
-    } else {
-        lines.extend(extras);
     }
     if lines.is_empty() {
         String::new()
@@ -59,41 +46,7 @@ pub fn rewrite(existing: &str, requested: &BTreeSet<String>) -> String {
 }
 /// Local defense in depth, never an allow-rule for config: exclusions only.
 pub(crate) fn ensure_local_exclusions(common: &Path) -> Result<()> {
-    let path = common.join("info/exclude");
-    crate::persistent::no_symlink(&common.join("info"))?;
-    crate::persistent::no_symlink(&path)?;
-    let mut text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(source) => {
-            return Err(MaccError::Io {
-                path: path.display().to_string(),
-                action: "read local Git exclusions".into(),
-                source,
-            })
-        }
-    };
-    let mut changed = false;
-    for entry in ["/.macc/persistent/", "/.macc/worktree/"] {
-        if !text.lines().any(|l| l == entry) {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(entry);
-            text.push('\n');
-            changed = true;
-        }
-    }
-    if changed {
-        std::fs::create_dir_all(path.parent().unwrap())
-            .and_then(|_| std::fs::write(&path, text))
-            .map_err(|source| MaccError::Io {
-                path: path.display().to_string(),
-                action: "write local Git exclusions".into(),
-                source,
-            })?;
-    }
-    Ok(())
+    crate::local_exclusions::bootstrap(common)
 }
 #[cfg(test)]
 mod tests {
@@ -172,8 +125,8 @@ mod ownership_tests {
         let result = rewrite(original, &requested);
         assert!(result.starts_with(original));
         let block = result.split(BEGIN).nth(1).unwrap();
-        assert!(block.contains("/.codex/"));
-        assert!(block.contains("/AGENTS.md"));
+        assert!(!block.contains("/.codex/"));
+        assert!(!block.contains("/AGENTS.md"));
         assert!(!block.contains(".claude/"));
         assert_eq!(rewrite(&result, &requested), result);
     }
@@ -183,7 +136,7 @@ mod ownership_tests {
 /// the runtime/portable setup boundary. Private surviving files remain excluded.
 pub(crate) fn after_clear(
     paths: &crate::ProjectPaths,
-    inventory: &crate::project_ownership::Inventory,
+    _inventory: &crate::project_ownership::Inventory,
     archive: &Path,
 ) -> Result<()> {
     let path = paths.root.join(".gitignore");
@@ -194,8 +147,7 @@ pub(crate) fn after_clear(
     if !before.lines().any(|line| line == BEGIN) || !before.lines().any(|line| line == END) {
         return Ok(());
     }
-    let mut patterns: BTreeSet<String> = BASELINE.iter().map(|s| s.to_string()).collect();
-    patterns.extend(inventory.files.keys().map(|s| format!("/{s}")));
+    let patterns: BTreeSet<String> = BASELINE.iter().map(|s| s.to_string()).collect();
     let after = rewrite(&before, &patterns);
     if after != before {
         crate::atomic_write(

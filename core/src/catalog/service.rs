@@ -242,6 +242,7 @@ pub fn install_skill(
         operation: "install_skill".to_string(),
         message: e,
     })?;
+    crate::plan::skill_ownership::preserve_existing(paths, &mut plan)?;
     let report = backend.apply(paths, &mut plan, false)?;
 
     Ok(InstallSkillOutcome {

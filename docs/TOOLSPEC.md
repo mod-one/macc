@@ -14,7 +14,7 @@ Primary references:
 - `display_name` (string, required): user-facing label.
 - `description` (string, optional): long description used in TUI/details.
 - `capabilities` (array<string>, optional): capability hints (`mcp`, `skills`, etc.).
-- `gitignore` (array<string>, optional): project paths MACC may add to `.gitignore`.
+- `gitignore` (array<string>, optional): adapter project-path declarations (also used for context-file discovery). Apply derives local `info/exclude` rules from proven file/directory creation, not from declarations alone; the shared `.gitignore` contains only the portable `.macc` boundary. See `PERSISTENT_PROJECT_STATE.md`.
 - `fields` (array<FieldSpec>, required): TUI-editable settings.
 - `doctor` (array<DoctorCheckSpec>, optional): install/health checks for `macc doctor`.
 - `install` (ToolInstallSpec, optional): commands used by `macc tool install <tool>`.

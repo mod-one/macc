@@ -13,6 +13,8 @@ MACC stores its shared decision/graph authority in the primary checkout:
     controller.lock
     mutation.lock
     integration.lock
+    generated-project-files.json   local creation/hash inventory for Apply/Clear
+    clear-history/                archived proofs, logs and cleanup results
     broker/                       retained auxiliary authority state, when present
     migration-backups/            verified pre-migration SQLite snapshots
   worktree/integration/            detached Git integration checkout
@@ -112,12 +114,51 @@ Retention is independent of Git tracking. Explicit Init and reviewed Apply maint
 visibility block: runtime files stay ignored, while configuration, catalogs and
 the pinned skill lock become eligible for version control. Existing blanket
 `.macc/` exclusions are superseded by the ordered block without deleting user
-rules. Tool rules live in the managed block and are rooted at the project. A
-preexisting user directory/file is never hidden wholesale by MACC: only newly
-created children may receive precise rules. The generator records content hashes
-and created directories in the ignored persistent provenance inventory.
-Project-local Git exclusions additionally protect the persistent authority
-and integration checkouts before the next Apply.
+rules. The shared `.gitignore` block contains only these stable rules:
+
+```gitignore
+# BEGIN MACC project visibility
+!/.macc/
+/.macc/*
+!/.macc/macc.yaml
+!/.macc/catalog/
+!/.macc/skills.lock.json
+# END MACC project visibility
+```
+
+Generated tool assets are excluded locally in Git's common `info/exclude`, inside
+`# BEGIN MACC local tool exclusions` / `# END MACC local tool exclusions`.
+Apply removes historical per-file entries only from MACC's shared block; rules
+outside managed blocks remain user policy. MACC does not change `core.excludesFile`.
+
+- A directory proven to have been created by MACC receives one anchored directory
+  rule; child rules are redundant and removed from the managed local block.
+- An existing user directory is never hidden wholesale. Only newly created
+  subdirectories/files are eligible. Git's matcher checks existing user exclusions,
+  including nested ignore files, negations and the effective global exclusion file.
+  For example, an existing `.agents/` user rule needs no extra MACC rule.
+- An existing user skill directory (including a skill symlink) is preserved as a
+  whole: no file updates, extra files, chmod or new installation receipt. Apply
+  warns with `MACC-SKILL-USER-OWNED` in its shared CLI/TUI/Web preview and result.
+  MACC-created skills remain eligible for the normal locked update workflow.
+- The common exclusion file affects every worktree. MACC consults all registered
+  checkout inventories and falls back to narrower rules if another checkout has
+  user-owned content at the same path. `MACC-EXCLUDE-001` reports a file collision;
+  `MACC-EXCLUDE-002` reports a higher-priority user rule preventing exclusion;
+  `MACC-EXCLUDE-003` identifies already tracked generated assets. These are warnings,
+  not deletion failures during Clear.
+
+The detailed creation inventory and content hashes stay under the ignored
+`.macc/persistent/`; they are not copied into `.gitignore`. Each clone recreates its
+own local rules during Apply from new local creation proofs. Clear reconciles the
+local block after cleanup: removed assets lose their rules, retained work keeps
+its rules, and user-authored exclusions survive. Each Clear archive keeps
+`generated-project-files-before.json`, the creation/hash evidence before the live
+inventory is pruned. Partial Apply also reconciles
+successfully created assets before returning its failure. Bootstrap exclusions
+protect private authority/worktrees when portable configuration is not yet present.
+Without a Git repository, no `info/exclude` is created and MACC does not initialize
+Git implicitly. Exclusions never untrack files already in the Git index.
 
 Runtime initialization and supervisor restarts do not rewrite visibility rules or
 publish previously ignored configuration. MACC never automatically stages or

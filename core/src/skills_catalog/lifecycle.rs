@@ -36,6 +36,7 @@ pub fn plan_files(
                 .filter(|(tool, _)| selection.tools.is_empty() || selection.tools.contains(tool))
             {
                 let _ = tool;
+                plan.skill_roots.insert(format!("{root}/{}", selection.id));
                 crate::plan::builders::expand_directory_to_plan(
                     plan,
                     &source,
@@ -96,6 +97,20 @@ pub fn plan_lock(
     roots: &BTreeMap<String, String>,
 ) -> Result<()> {
     let mut lock = SkillsLockFile::load(&paths.skills_lock_path())?;
+    for selection in units
+        .iter()
+        .flat_map(|unit| &unit.selections)
+        .filter(|s| s.kind == SelectionKind::Skill)
+    {
+        for (tool, root) in roots
+            .iter()
+            .filter(|(tool, _)| selection.tools.is_empty() || selection.tools.contains(tool))
+        {
+            let _ = tool;
+            plan.skill_roots.insert(format!("{root}/{}", selection.id));
+        }
+    }
+    crate::plan::skill_ownership::preserve_existing(paths, plan)?;
     if !paths.skills_lock_path().exists() {
         lock.generated_at.clear();
     }
@@ -359,5 +374,7 @@ pub fn apply_installation(
         }
     }
     let operations = crate::plan::collect_plan_operations(paths, plan);
-    crate::apply_operations(paths, &operations, false, |_, _, _| {})
+    let mut report = crate::apply_operations(paths, &operations, false, |_, _, _| {})?;
+    report.warnings.extend(plan.warnings.iter().cloned());
+    Ok(report)
 }
