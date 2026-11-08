@@ -2266,7 +2266,7 @@ async fn coordinator_event_stream_emits_heartbeat_records() {
     assert!(data.contains("\"status\":\"ok\""), "{data}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn coordinator_event_stream_waits_for_heartbeat_interval() {
     let root = temp_root("events-heartbeat-interval");
     fs::create_dir_all(&root).expect("create root");
@@ -2286,17 +2286,18 @@ async fn coordinator_event_stream_waits_for_heartbeat_interval() {
     .into_response();
     let mut body = response.into_body();
 
-    let early = tokio::time::timeout(Duration::from_millis(60), body.frame()).await;
-    assert!(early.is_err(), "heartbeat arrived earlier than configured interval");
-
-    let frame = tokio::time::timeout(Duration::from_millis(120), body.frame())
-        .await
-        .expect("heartbeat timeout")
-        .expect("frame")
-        .expect("body frame");
-    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
-
-    assert!(data.contains("event: heartbeat"), "{data}");
+    // Ownership notifications from other parallel tests may legitimately arrive
+    // first. Measure the first heartbeat itself using the paused Tokio clock.
+    let started = tokio::time::Instant::now();
+    let data = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = body.frame().await.expect("frame").expect("body frame");
+            let data=String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+            if data.contains("event: heartbeat") { break data; }
+        }
+    }).await.expect("heartbeat timeout");
+    assert!(started.elapsed() >= Duration::from_millis(120), "heartbeat arrived earlier than configured interval");
+    assert!(data.contains("event: heartbeat"),"{data}");
 }
 
 #[test]

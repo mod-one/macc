@@ -282,6 +282,7 @@ pub fn collect_all_findings(
 ) -> Vec<DiagnosticFinding> {
     let mut findings = Vec::new();
     findings.extend(check_git_identity(&paths.root));
+    findings.extend(crate::project_hygiene::findings(paths));
     findings.extend(check_disk_space(&paths.root, max_parallel));
     findings.extend(check_coordinator_ipc(&paths.macc_dir));
     findings.extend(check_task_readiness(&paths.macc_dir));

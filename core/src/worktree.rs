@@ -78,6 +78,7 @@ pub fn create_worktrees(
         let path = base_dir.join(&id);
 
         crate::git::worktree_add(root, &branch, &path, &spec.base)?;
+        crate::project_ownership::record_branch(root, &branch)?;
 
         write_worktree_metadata(
             &path,
@@ -465,15 +466,36 @@ pub fn ensure_performer(worktree_path: &Path) -> Result<PathBuf> {
     let _ = crate::ensure_embedded_automation_scripts(&worktree_paths)?;
     let source = worktree_paths.automation_performer_path();
 
-    if target.exists() && std::fs::read(&target).ok() == std::fs::read(&source).ok() {
-        return Ok(target);
+    if target.exists() {
+        let inventory = crate::project_ownership::read(&worktree_paths)?;
+        if !inventory.files.get("performer.sh").is_some_and(|hash| {
+            crate::project_ownership::digest(&target).is_ok_and(|actual| &actual == hash)
+        }) {
+            // A user script or a modified generated launcher stays intact. The
+            // task runner can execute the canonical embedded launcher directly.
+            return Ok(source);
+        }
+        if std::fs::read(&target).ok() == std::fs::read(&source).ok() {
+            return Ok(target);
+        }
     }
 
+    let existed = target.exists();
+    let previous = std::fs::read(&target).ok();
     std::fs::copy(&source, &target).map_err(|e| MaccError::Io {
         path: target.to_string_lossy().into(),
         action: "copy performer.sh".into(),
         source: e,
     })?;
+
+    crate::project_ownership::record_write(
+        &worktree_paths,
+        &target,
+        existed,
+        vec![],
+        previous.as_deref(),
+    )?;
+    crate::ensure_gitignore_entries(&worktree_paths, &["performer.sh"], None)?;
 
     #[cfg(unix)]
     {
@@ -552,19 +574,18 @@ pub fn sync_context_files_from_root(
             continue;
         }
 
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-                path: parent.to_string_lossy().into(),
-                action: "create context file parent directory in worktree".into(),
-                source: e,
-            })?;
-        }
-
-        std::fs::copy(&src, &dest).map_err(|e| MaccError::Io {
-            path: dest.to_string_lossy().into(),
-            action: "synchronize context file into worktree".into(),
-            source: e,
+        let bytes = std::fs::read(&src).map_err(|source| MaccError::Io {
+            path: src.display().to_string(),
+            action: "read context source".into(),
+            source,
         })?;
+        crate::write_if_changed(
+            &ProjectPaths::from_root(worktree_root),
+            &rel,
+            &dest,
+            &bytes,
+            |_| Ok(()),
+        )?;
     }
     Ok(())
 }
@@ -684,7 +705,14 @@ mod tests {
     fn reused_worktree_refreshes_performer_and_installs_completion_contract() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("performer.sh");
-        std::fs::write(&target, "stale runner").unwrap();
+        crate::write_if_changed(
+            &ProjectPaths::from_root(temp.path()),
+            "performer.sh",
+            &target,
+            b"stale runner",
+            |_| Ok(()),
+        )
+        .unwrap();
         ensure_performer(temp.path()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
@@ -696,6 +724,21 @@ mod tests {
             include_str!("../../automat/completion_evidence.sh")
         );
         ensure_performer(temp.path()).unwrap();
+    }
+
+    #[test]
+    fn preexisting_user_launcher_is_preserved_and_canonical_runner_is_used() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("performer.sh");
+        std::fs::write(&target, "user script").unwrap();
+        let executable = ensure_performer(temp.path()).unwrap();
+        assert_eq!(
+            executable,
+            temp.path().join(".macc/automation/performer.sh")
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "user script");
+        crate::clear(&ProjectPaths::from_root(temp.path())).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "user script");
     }
 
     #[test]

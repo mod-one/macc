@@ -100,6 +100,15 @@ pub fn plan_lock(
         lock.generated_at.clear();
     }
     let before = lock.clone();
+    for entry in &mut lock.skills {
+        if entry.source.kind == "local" {
+            entry.source.url = entry
+                .source
+                .url
+                .as_deref()
+                .and_then(|url| crate::project_hygiene::portable_local_url(&paths.root, url));
+        }
+    }
     if units.iter().any(|u| {
         u.provenance.is_some() && u.selections.iter().any(|s| s.kind == SelectionKind::Skill)
     }) {
@@ -233,7 +242,11 @@ pub fn plan_lock(
                     tool: tool.clone(),
                     source: LockedSource {
                         kind: format!("{:?}", source.kind).to_lowercase(),
-                        url: Some(source.url.clone()),
+                        url: if source.kind == SourceKind::Local {
+                            crate::project_hygiene::portable_local_url(&paths.root, &source.url)
+                        } else {
+                            Some(source.url.clone())
+                        },
                         requested_ref: Some(requested),
                         resolved_ref: if source.kind == SourceKind::Git {
                             Some(source.reference.clone())

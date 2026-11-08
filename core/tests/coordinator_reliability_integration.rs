@@ -241,7 +241,7 @@ fn coordinator_reliability_chain_integration() {
             phase_timeout_seconds: 300,
             elapsed_seconds: 5,
             status_text: "performer reported error_with_changes".to_string(),
-            completion_kind: None,
+            completion_kind: Some(PerformerCompletionKind::ErrorWithChanges),
             error_code: None,
             error_origin: None,
             error_message: None,

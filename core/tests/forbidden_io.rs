@@ -42,6 +42,11 @@ fn test_core_forbidden_io_patterns() {
         let Ok(content) = fs::read_to_string(&file) else {
             continue;
         };
+        // Explicit test-only modules may use stdin as a subprocess fixture pipe;
+        // they are compiled out of the client-independent production library.
+        if content.lines().any(|line| line.trim() == "#![cfg(test)]") {
+            continue;
+        }
         for pattern in forbidden_patterns {
             if content.contains(pattern) {
                 violations.push(format!("{} contains forbidden pattern `{}`", rel, pattern));

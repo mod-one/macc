@@ -102,6 +102,7 @@ pub fn prepare(
             // checkout rather than inventing a new, unrelated branch name.
             git(&path, &["branch", "--show-current"])?
         };
+        macc_core::project_ownership::record_branch(root, &branch)?;
         let marker = json!({
             "incident_id": incident,
             "base": head,
@@ -122,6 +123,7 @@ pub fn prepare(
     } else {
         git(root, &["worktree", "add", "-b", &branch, slot, head])?;
     }
+    macc_core::project_ownership::record_branch(root, &branch)?;
     std::fs::create_dir_all(path.join(".macc")).map_err(|e| io(&path, e))?;
     // This repository-wide exclude keeps local evidence out of repair commits.
     let exclude = PathBuf::from(git(&path, &["rev-parse", "--git-path", "info/exclude"])?);
@@ -227,25 +229,7 @@ pub fn safe_to_remove(root: &Path, path: &Path) -> Result<bool> {
     if !git(path, &["status", "--porcelain"])?.is_empty() {
         return Ok(false);
     }
-    let ignored = macc_core::git::run_git_output_mapped(
-        path,
-        &[
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-        ],
-        "inspect unarchived ignored repair files",
-    )?;
-    // .macc evidence is archived before removal. Any other ignored files
-    // (credentials, generated outputs, dependencies, etc.) keep the slot.
-    if !ignored.status.success()
-        || ignored
-            .stdout
-            .split(|b| *b == 0)
-            .any(|name| !name.is_empty() && !name.starts_with(b".macc/"))
-    {
+    if !macc_core::project_ownership::unowned_ignored_files(path)?.is_empty() {
         return Ok(false);
     }
     let head = git(path, &["rev-parse", "HEAD"])?;
@@ -380,7 +364,7 @@ mod tests {
         let target = target(root, None)?;
         Ok((prepare(root, incident, &target, retain)?, target.base))
     }
-    fn fixture() -> tempfile::TempDir {
+    pub(super) fn fixture() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         git(root, &["init", "-q", "-b", "main"]).unwrap();
@@ -554,5 +538,43 @@ mod tests {
         );
         let branches = git(root, &["branch", "--list", "macc/supervisor/*"]).unwrap();
         assert!(branches.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod generated_cleanup_tests {
+    use super::*;
+    #[test]
+    fn proven_generated_ignored_configuration_no_longer_keeps_a_finished_slot() {
+        let temp = super::tests::fixture();
+        let root = temp.path();
+        let target = target(root, None).unwrap();
+        let slot = prepare(root, "generated-config", &target, false).unwrap();
+        let path = slot.join(".codex/config.toml");
+        macc_core::write_if_changed(
+            &macc_core::ProjectPaths::from_root(&slot),
+            ".codex/config.toml",
+            &path,
+            b"generated",
+            |_| Ok(()),
+        )
+        .unwrap();
+        let common = macc_core::git::git_common_dir(root).unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(common.join("info/exclude"))
+            .unwrap()
+            .write_all(b"\n.codex/\n")
+            .unwrap();
+        assert!(finish(
+            root,
+            &slot,
+            &root.join(".macc/log/supervisor/generated-config"),
+            true,
+            false
+        )
+        .unwrap());
+        assert!(!slot.exists());
     }
 }

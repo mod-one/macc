@@ -1489,20 +1489,11 @@ pub fn write_worktree_prd_for_task(
 ) -> Result<()> {
     let payload = scoped_prd_for_task(prd_file, task_id)?;
     let out_path = worktree_path.join("worktree.prd.json");
-    std::fs::write(
-        &out_path,
-        serde_json::to_string_pretty(&payload).map_err(|e| {
-            MaccError::Validation(format!(
-                "Failed to serialize worktree.prd.json payload: {}",
-                e
-            ))
-        })?,
-    )
-    .map_err(|e| MaccError::Io {
-        path: out_path.to_string_lossy().into(),
-        action: "write worktree.prd.json".into(),
-        source: e,
-    })
+    let paths = crate::ProjectPaths::from_root(worktree_path);
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|e| MaccError::Validation(format!("Failed to serialize scoped PRD: {e}")))?;
+    crate::write_if_changed(&paths, "worktree.prd.json", &out_path, &bytes, |_| Ok(()))?;
+    Ok(())
 }
 
 pub fn is_pid_running(pid: i64) -> bool {

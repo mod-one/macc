@@ -176,6 +176,9 @@ impl SkillsCatalog {
         let mut persisted = self.clone();
         for entry in &mut persisted.entries {
             entry.availability = None;
+            if path.starts_with(paths.project_catalog_dir()) {
+                crate::project_hygiene::normalize_source(paths, &mut entry.source);
+            }
         }
         let mut json =
             serde_json::to_string_pretty(&persisted).map_err(|e| MaccError::Catalog {
@@ -289,7 +292,13 @@ pub fn load_effective_skills_catalog(paths: &ProjectPaths) -> MaccResult<SkillsC
     let embedded = embedded_skills_catalog()?;
     let user = SkillsCatalog::load(&paths.skills_catalog_path())?;
     let project = SkillsCatalog::load(&paths.project_skills_catalog_path())?;
-    let mut catalog = merge_skill_layers(merge_skill_layers(embedded, user), project);
+    let primary =
+        crate::persistent::primary_root(&paths.root).unwrap_or_else(|_| paths.root.clone());
+    let local = SkillsCatalog::load(&primary.join(".macc/persistent/catalog/skills.catalog.json"))?;
+    let mut catalog = merge_skill_layers(
+        merge_skill_layers(merge_skill_layers(embedded, user), project),
+        local,
+    );
     availability::annotate(paths, &mut catalog.entries);
     Ok(catalog)
 }
@@ -311,7 +320,13 @@ pub fn load_effective_mcp_catalog(paths: &ProjectPaths) -> MaccResult<McpCatalog
     let embedded = embedded_mcp_catalog()?;
     let user = McpCatalog::load(&paths.mcp_catalog_path())?;
     let project = McpCatalog::load(&paths.project_mcp_catalog_path())?;
-    Ok(merge_mcp_layers(merge_mcp_layers(embedded, user), project))
+    let primary =
+        crate::persistent::primary_root(&paths.root).unwrap_or_else(|_| paths.root.clone());
+    let local = McpCatalog::load(&primary.join(".macc/persistent/catalog/mcp.catalog.json"))?;
+    Ok(merge_mcp_layers(
+        merge_mcp_layers(merge_mcp_layers(embedded, user), project),
+        local,
+    ))
 }
 
 /// Syncs project-level catalog entries from `repo_paths` into `worktree_paths` so that
@@ -331,6 +346,9 @@ pub fn sync_project_catalog_to_worktree(
                 worktree_skills.entries.push(entry);
             }
         }
+        for entry in &mut worktree_skills.entries {
+            crate::project_hygiene::normalize_source(repo_paths, &mut entry.source);
+        }
         worktree_skills.save_atomically(
             worktree_paths,
             &worktree_paths.project_skills_catalog_path(),
@@ -344,6 +362,9 @@ pub fn sync_project_catalog_to_worktree(
             if !worktree_mcp.entries.iter().any(|e| e.id == entry.id) {
                 worktree_mcp.entries.push(entry);
             }
+        }
+        for entry in &mut worktree_mcp.entries {
+            crate::project_hygiene::normalize_source(repo_paths, &mut entry.source);
         }
         worktree_mcp.save_atomically(worktree_paths, &worktree_paths.project_mcp_catalog_path())?;
     }
@@ -373,14 +394,18 @@ fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
         entries.push(SkillEntry {
             id: id.to_string(),
             name: format!("Local: {}", id),
-            description: format!("Local skill from {}", path.display()),
+            description: format!("Local project skill: {}", id),
             tags: vec!["local".to_string()],
             selector: Selector {
                 subpath: "".to_string(),
             },
             source: Source {
                 kind: SourceKind::Local,
-                url: path.to_string_lossy().into(),
+                url: path
+                    .strip_prefix(&paths.root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into(),
                 reference: "".to_string(),
                 checksum: None,
                 subpaths: vec![],
@@ -445,10 +470,17 @@ impl McpCatalog {
     }
 
     pub fn save_atomically(&self, paths: &ProjectPaths, path: &Path) -> MaccResult<()> {
-        let mut json = serde_json::to_string_pretty(self).map_err(|e| MaccError::Catalog {
-            operation: "serialize_mcp".to_string(),
-            message: format!("Failed to serialize mcp catalog: {}", e),
-        })?;
+        let mut persisted = self.clone();
+        if path.starts_with(paths.project_catalog_dir()) {
+            for entry in &mut persisted.entries {
+                crate::project_hygiene::normalize_source(paths, &mut entry.source);
+            }
+        }
+        let mut json =
+            serde_json::to_string_pretty(&persisted).map_err(|e| MaccError::Catalog {
+                operation: "serialize_mcp".to_string(),
+                message: format!("Failed to serialize mcp catalog: {}", e),
+            })?;
         json.push('\n');
         let _ = write_if_changed(
             paths,

@@ -886,9 +886,9 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
         return Ok(());
     }
     let args = if force {
-        vec!["branch", "-D", normalized]
+        vec!["branch", "-D", "--", normalized]
     } else {
-        vec!["branch", "-d", normalized]
+        vec!["branch", "-d", "--", normalized]
     };
     let output = run_git_output(repo_root, &args, "run git branch delete")?;
     if !output.status.success() {

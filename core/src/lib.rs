@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod catalog;
+pub mod clear_plan;
 pub mod clear_policy;
 pub mod commit_completion;
 pub mod commit_message;
@@ -16,6 +17,8 @@ pub mod gitignore_policy;
 pub mod hooks;
 pub mod o2;
 pub mod persistent;
+pub mod project_hygiene;
+pub mod project_ownership;
 pub mod session_store;
 pub use config::migrate;
 pub mod mcp_json;
@@ -149,10 +152,16 @@ pub struct ApplyReport {
 
 mod apply_report;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ClearReport {
     pub removed: usize,
     pub skipped: usize,
+    pub archived: usize,
+    pub removed_worktrees: usize,
+    pub removed_branches: usize,
+    pub archive_path: Option<PathBuf>,
+    pub failures: Vec<String>,
+    pub items: Vec<clear_plan::Item>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -618,6 +627,7 @@ fn init_project_files(paths: &ProjectPaths, force: bool, update_visibility: bool
             .map(|s| s.to_string())
             .collect();
         ignore_entries.extend(collect_tool_gitignore_entries(paths, None));
+        ignore_entries.extend(["performer.sh".into(), "worktree.prd.json".into()]);
         let ignore_refs: Vec<&str> = ignore_entries.iter().map(|s| s.as_str()).collect();
         let gitignore_status = ensure_gitignore_entries(paths, &ignore_refs, None)?;
         if gitignore_status == plan::ActionStatus::Created {
@@ -668,6 +678,7 @@ pub fn build_plan(
     materialized_units: &[resolve::MaterializedFetchUnit],
     registry: &ToolRegistry,
 ) -> Result<plan::ActionPlan> {
+    project_ownership::read(paths)?;
     let effective_resolved = resolve::with_mandatory_skills(paths, resolved)?;
     let resolved = &effective_resolved;
     let mut total_plan = plan::ActionPlan::new();
@@ -680,7 +691,9 @@ pub fn build_plan(
         });
     }
 
-    let tool_ignore_entries = collect_tool_gitignore_entries(paths, Some(&resolved.tools.enabled));
+    let mut tool_ignore_entries =
+        collect_tool_gitignore_entries(paths, Some(&resolved.tools.enabled));
+    tool_ignore_entries.extend(["performer.sh".into(), "worktree.prd.json".into()]);
     for entry in tool_ignore_entries {
         total_plan.add_action(plan::Action::EnsureGitignore {
             pattern: entry,
@@ -738,6 +751,7 @@ pub fn build_plan(
         .collect();
     skills_catalog::lifecycle::plan_files(&mut total_plan, materialized_units, &skill_roots)?;
     skills_catalog::lifecycle::plan_lock(paths, &mut total_plan, materialized_units, &skill_roots)?;
+    project_hygiene::plan_portable_catalogs(paths, &mut total_plan)?;
     total_plan.o2_activation = o2::activation::preview(&paths.root)?;
     service::preparation::configure(paths, &mut total_plan)?;
     total_plan.preparation = service::preparation::preview(paths)?;
@@ -1155,6 +1169,11 @@ pub fn apply_plan(
         }
         let operations = plan::collect_plan_operations(paths, plan);
         let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
+        report.warnings.extend(
+            project_hygiene::findings(paths)
+                .into_iter()
+                .map(|f| format!("{}: {}", f.id, f.message)),
+        );
         if paths.config_path.is_file() {
             hooks::native::verify(paths)?;
         }
@@ -1226,6 +1245,7 @@ where
         )));
     }
 
+    project_ownership::read(paths)?;
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
     let total_ops = operations.len();
     let mut report = ApplyReport::new();
@@ -1249,11 +1269,18 @@ where
         match op.kind {
             plan::PlannedOpKind::Mkdir => {
                 if !full_path.exists() {
+                    let missing_parents = project_ownership::missing_parents(paths, &full_path);
                     std::fs::create_dir_all(&full_path).map_err(|e| MaccError::Io {
                         path: full_path.to_string_lossy().into(),
                         action: "create directory".into(),
                         source: e,
                     })?;
+                    if op.scope == plan::Scope::Project {
+                        for parent in missing_parents {
+                            project_ownership::record_directory(paths, &parent)?;
+                        }
+                        project_ownership::record_directory(paths, &op.path)?;
+                    }
                     report.outcomes.insert(path, plan::ActionStatus::Created);
                     if op.scope == plan::Scope::Project {
                         record_managed_path(paths, &op.path)?;
@@ -1446,129 +1473,13 @@ fn context_file_names_from_config(value: &serde_json::Value) -> Vec<String> {
 }
 
 pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
-    clear_policy::require_stopped(&paths.root)?;
-    let mut managed = load_managed_paths(paths)?;
-
-    if let Some(rel) = relative_to_root(paths, &paths.managed_paths_state_path()) {
-        managed.insert(rel);
-    }
-    if let Some(parent) = paths.managed_paths_state_path().parent() {
-        if let Some(rel) = relative_to_root(paths, parent) {
-            managed.insert(rel);
-        }
-    }
-
-    let mut entries: Vec<String> = managed.into_iter().collect();
-    entries.sort_by(|a, b| {
-        let da = a.split('/').count();
-        let db = b.split('/').count();
-        db.cmp(&da).then_with(|| b.cmp(a))
-    });
-
-    let mut report = ClearReport::default();
-    let mut removed_paths: Vec<PathBuf> = Vec::new();
-    for rel in entries {
-        if clear_policy::retained(&rel) {
-            report.skipped += 1;
-            continue;
-        }
-        let full = paths.root.join(&rel);
-        if !full.exists() {
-            continue;
-        }
-        let result = if full.is_dir() {
-            std::fs::remove_dir(&full)
-        } else {
-            std::fs::remove_file(&full)
-        };
-        match result {
-            Ok(_) => {
-                report.removed += 1;
-                removed_paths.push(full);
-            }
-            Err(_) => report.skipped += 1,
-        }
-    }
-
-    cleanup_empty_parents(paths, &removed_paths);
-
-    Ok(report)
+    clear_plan::execute(paths)
 }
 
 pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
-    let mut managed = load_managed_paths(paths)?;
-
-    if let Some(rel) = relative_to_root(paths, &paths.managed_paths_state_path()) {
-        managed.insert(rel);
-    }
-    if let Some(parent) = paths.managed_paths_state_path().parent() {
-        if let Some(rel) = relative_to_root(paths, parent) {
-            managed.insert(rel);
-        }
-    }
-
-    let mut entries: Vec<String> = managed.into_iter().collect();
-    entries.sort_by(|a, b| {
-        let da = a.split('/').count();
-        let db = b.split('/').count();
-        db.cmp(&da).then_with(|| b.cmp(a))
-    });
-
-    let mut report = ClearReport::default();
-    let mut removed = HashSet::new();
-    for rel in entries {
-        if clear_policy::retained(&rel) {
-            report.skipped += 1;
-            continue;
-        }
-        let full = paths.root.join(&rel);
-        if !full.exists() {
-            continue;
-        }
-        if !clear_policy::preview_removable(&full, &removed) {
-            report.skipped += 1;
-            continue;
-        }
-        removed.insert(full);
-        report.removed += 1;
-    }
-
-    Ok(report)
+    Ok(clear_plan::preview(paths)?.report())
 }
 
-fn cleanup_empty_parents(paths: &ProjectPaths, removed: &[PathBuf]) {
-    let mut candidates: HashSet<PathBuf> = HashSet::new();
-    for path in removed {
-        let mut current = path.parent();
-        while let Some(dir) = current {
-            if dir == paths.root {
-                break;
-            }
-            candidates.insert(dir.to_path_buf());
-            current = dir.parent();
-        }
-    }
-
-    let mut candidates: Vec<PathBuf> = candidates.into_iter().collect();
-    candidates.sort_by(|a, b| {
-        let depth_a = a.components().count();
-        let depth_b = b.components().count();
-        depth_b.cmp(&depth_a).then_with(|| b.cmp(a))
-    });
-
-    for dir in candidates {
-        if !dir.exists() {
-            continue;
-        }
-        let is_empty = std::fs::read_dir(&dir)
-            .ok()
-            .map(|mut it| it.next().is_none())
-            .unwrap_or(false);
-        if is_empty {
-            let _ = std::fs::remove_dir(&dir);
-        }
-    }
-}
 pub const BASELINE_IGNORE_ENTRIES: &[&str] = gitignore_policy::BASELINE;
 
 fn collect_tool_gitignore_entries(
@@ -1619,6 +1530,7 @@ pub fn ensure_gitignore_entries(
     };
 
     let requested = entries.iter().map(|s| s.to_string()).collect();
+    let requested = project_ownership::ignore_patterns(paths, &requested, &BTreeSet::new())?;
     let new_content = gitignore_policy::rewrite(&content, &requested);
     if new_content == content {
         return Ok(plan::ActionStatus::Unchanged);
@@ -1690,8 +1602,21 @@ where
         return Ok(status);
     }
 
+    let missing_parents = project_ownership::missing_parents(paths, target_path);
+    if let Some(relative) =
+        relative_to_root(paths, target_path).filter(|rel| !rel.starts_with(".macc/"))
+    {
+        project_ownership::validate_path(paths, &relative)?;
+    }
     before_write(existing)?;
     atomic_write(paths, target_path, content)?;
+    project_ownership::record_write(
+        paths,
+        target_path,
+        existing.exists,
+        missing_parents,
+        existing.bytes.as_deref(),
+    )?;
 
     Ok(status)
 }
@@ -2261,7 +2186,7 @@ mod tests {
         let mut plan = plan::ActionPlan::new();
         // Add actions in "wrong" order
         plan.add_action(plan::Action::EnsureGitignore {
-            pattern: "*.log".into(),
+            pattern: "nested/file.txt".into(),
             scope: plan::Scope::Project,
         });
         plan.add_action(plan::Action::WriteFile {
@@ -2303,7 +2228,8 @@ mod tests {
         );
         let gitignore_content = fs::read_to_string(temp_dir.join(".gitignore")).unwrap();
         assert!(gitignore_content.contains(".macc/"));
-        assert!(gitignore_content.contains("*.log"));
+        assert!(gitignore_content.contains("/nested/file.txt"));
+        assert!(!gitignore_content.contains("*.log"));
 
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())
@@ -2393,6 +2319,13 @@ mod tests {
         // 4. Test with backup
         fs::create_dir_all(&paths.backups_dir).unwrap();
         let timestamp = "20260129-220000";
+        write_if_changed(
+            &paths,
+            "new_entry",
+            &temp_dir.join("new_entry"),
+            b"generated",
+            |_| Ok(()),
+        )?;
         let status = ensure_gitignore_entries(&paths, &["new_entry"], Some(timestamp))?;
         assert_eq!(status, plan::ActionStatus::Updated);
         assert!(paths
@@ -2587,7 +2520,13 @@ mod tests {
         fs::write(&preexisting, "user file").unwrap();
 
         let generated = temp_dir.join("generated.txt");
-        fs::write(&generated, "from macc").unwrap();
+        write_if_changed(
+            &paths,
+            "generated.txt",
+            &generated,
+            b"from macc",
+            |_| Ok(()),
+        )?;
         record_managed_path(&paths, "generated.txt")?;
 
         let report = clear(&paths)?;
@@ -2607,9 +2546,8 @@ mod tests {
         let paths = ProjectPaths::from_root(&temp_dir);
 
         let nested = temp_dir.join("a/b/c");
-        fs::create_dir_all(&nested).unwrap();
         let file = nested.join("file.txt");
-        fs::write(&file, "data").unwrap();
+        write_if_changed(&paths, "a/b/c/file.txt", &file, b"data", |_| Ok(()))?;
         record_managed_path(&paths, "a/b/c/file.txt")?;
 
         let report = clear(&paths)?;

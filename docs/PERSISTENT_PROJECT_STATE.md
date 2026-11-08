@@ -58,20 +58,53 @@ an old binary after migration.
 
 ## Clear and preview
 
-`macc clear --dry-run` reports existing preserved paths and previews eligible
-worktree removal using the same candidate selection as execution. Normal clear
-preserves:
+`macc clear --dry-run` builds the same read-only disposition plan used by CLI,
+TUI and Web execution. Each entry has an action, reason and byte count:
+remove, archive, preserve, retain user file, retain worktree or delete merged
+branch. A retained worktree is not necessarily an active worker.
 
-- `.macc/macc.yaml`, all of `.macc/catalog/`, and `skills.lock.json`.
-- All of `.macc/persistent/`, including migration backups and evidence.
-- Existing O2 memory/checkpoints/session authority and JSON session inventory.
-- `.gitignore`, so runtime exclusions and user rules survive cleanup.
+Clear resets generated runtime, including unregistered artifacts under `.macc`.
+It preserves:
 
-Clear removes managed generated files; it does not recursively erase `.macc`.
-Unmanaged files and unfinished work retain their existing protections. Active
-coordinators, supervisors, task/session owners or occupied authority locks block
-execution; `--force` does not bypass those protections. Run clear from the primary
-checkout, rather than from a worker. CLI, TUI and Web use this shared service.
+- `.macc/macc.yaml`, `.macc/catalog/`, and `.macc/skills.lock.json` (portable setup).
+- `.macc/persistent/` (local authority, provenance, local overrides and archives).
+- `.macc/memory.db` and existing WAL/SHM companions, together with
+  `.macc/state/tool-sessions.json` and its lock. This pair remains necessary to
+  retain O2 memory/checkpoints and identify its session authority; it is local,
+  not portable Git setup.
+- `.gitignore` and preexisting or modified user files outside `.macc`.
+- Worktrees containing unintegrated commits, uncommitted/untracked work, unknown
+  ignored files, parked supervisor repairs, locks or unverifiable ownership.
+
+Before resetting the coordinator registry, Clear archives recovery state,
+logs/reports, cache/drafts, backups and unclassified `.macc` data under
+`.macc/persistent/clear-history/<id>/project/`. The archive contains a disposition
+plan and execution result. Archived registry data is evidence for deliberate
+recovery, not a live registry automatically loaded by the next run. Rebuildable
+context/index/tmp/automation directories are removed. Symlinks are never followed
+for recursive cleanup or evidence collection. Unknown worktree slots are retained.
+
+Clean, MACC-owned worktrees are removed only when their commits are reachable
+from the configured reference branch. Their `.macc` evidence and text/log files
+are archived first. A generated tool config is disposable only with recorded
+ownership and a matching content fingerprint; an unknown ignored credential or
+user file keeps the slot. Only branches recorded as MACC-created (or verified
+through an owned slot's metadata) and integrated into the reference are eligible
+for deletion. User branches, checked-out branches and unmerged branches survive.
+
+Generated project files have persistent provenance. Existing tool directories or
+context files are never adopted. Clear removes matching generated files and empty
+owned directories, preserving later user edits. Older manifests lack content
+fingerprints: their unverifiable external files are conservatively retained and
+listed. Clear releases managed ignore rules for removed generated files, while
+retaining runtime exclusions and user-authored rules. Failed removals are reported with their cause, retain retry provenance,
+and make the command fail instead of announcing complete success.
+
+Client Clear requires an initialized project (configuration or a managed-project
+receipt); it does not reset a standalone shared user cache. Active coordinators,
+supervisors, task/session owners or occupied authority locks
+block execution; `--force` bypasses confirmation only. Run Clear from the primary
+checkout. Preview never creates locks, archives or authorities.
 
 ## Git visibility and backups
 
@@ -79,13 +112,23 @@ Retention is independent of Git tracking. Explicit Init and reviewed Apply maint
 visibility block: runtime files stay ignored, while configuration, catalogs and
 the pinned skill lock become eligible for version control. Existing blanket
 `.macc/` exclusions are superseded by the ordered block without deleting user
-rules. Project-local Git exclusions additionally protect the persistent authority
+rules. Tool rules live in the managed block and are rooted at the project. A
+preexisting user directory/file is never hidden wholesale by MACC: only newly
+created children may receive precise rules. The generator records content hashes
+and created directories in the ignored persistent provenance inventory.
+Project-local Git exclusions additionally protect the persistent authority
 and integration checkouts before the next Apply.
 
 Runtime initialization and supervisor restarts do not rewrite visibility rules or
 publish previously ignored configuration. MACC never automatically stages or
 commits these portable files. Review
-configuration/catalog contents for private values before publishing them. Their
+configuration/catalog contents for private values before publishing them. Doctor
+and Apply diagnose typed native-session/lease/owner fields, literal credentials,
+nonportable paths and runtime paths already in the Git index, without printing
+private values. They never automatically untrack files or rewrite history.
+Apply includes project-contained absolute catalog source conversions in its
+reviewed plan; the persisted sources become project-relative and resolve from
+the destination checkout/worktree. External sources are not silently remapped. Their
 new visibility can make a previously clean checkout show untracked configuration;
 commit the intended configuration or use the existing reviewed dirty-reference
 workflow. Never commit active SQLite databases, WAL/SHM sidecars, broker secrets,

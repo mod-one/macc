@@ -82,11 +82,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = ProjectPaths::from_root(tmp.path());
         std::fs::create_dir_all(tmp.path().join(".macc")).unwrap();
-        let out = std::process::Command::new("git")
-            .args(["init", "-q", "-b", "main"])
-            .current_dir(tmp.path())
-            .output()
-            .unwrap();
+        let out = macc_core::git::run_git_output_mapped(
+            tmp.path(),
+            &["init", "-q", "-b", "main"],
+            "initialize recovery fixture",
+        )
+        .unwrap();
         assert!(out.status.success());
         let mut config = macc_core::config::CanonicalConfig::default();
         let c = config

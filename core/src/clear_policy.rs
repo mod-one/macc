@@ -24,18 +24,6 @@ pub fn existing_preserved(paths: &ProjectPaths) -> Vec<String> {
         .map(|p| p.to_string())
         .collect()
 }
-/// A preview predicts remove_dir without deleting or initializing state.
-pub(crate) fn preview_removable(
-    path: &std::path::Path,
-    removed: &std::collections::HashSet<std::path::PathBuf>,
-) -> bool {
-    !path.is_dir()
-        || std::fs::read_dir(path)
-            .map(|mut entries| {
-                entries.all(|e| e.map(|e| removed.contains(&e.path())).unwrap_or(false))
-            })
-            .unwrap_or(false)
-}
 /// Includes worktree runner PIDs, not only coordinator/supervisor ownership.
 pub fn require_stopped(root: &std::path::Path) -> Result<()> {
     crate::session_store::require_stopped(root)?;

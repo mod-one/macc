@@ -197,7 +197,13 @@ impl Command for ClearCommand {
             .app
             .engine
             .clear_project(&paths, self.force, self.dry_run, &CliInteraction)?;
-        println!("Project MACC files cleared successfully.");
+        if self.dry_run {
+            println!("Clear preview complete; no files changed.");
+        } else {
+            println!(
+                "Project MACC cleanup completed; retained work and archives are listed above."
+            );
+        }
         Ok(())
     }
 }

@@ -375,12 +375,14 @@ mod decision_editor_tests {
         use macc_core::coordinator::decisions as dm;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        assert!(std::process::Command::new("git")
-            .current_dir(root)
-            .args(["init", "-q", "-b", "main"])
-            .status()
-            .unwrap()
-            .success());
+        assert!(macc_core::git::run_git_output_mapped(
+            root,
+            &["init", "-q", "-b", "main"],
+            "initialize editor fixture"
+        )
+        .unwrap()
+        .status
+        .success());
         std::fs::create_dir_all(root.join(".macc")).unwrap();
         let mut cfg = macc_core::config::CanonicalConfig::default();
         let c = cfg

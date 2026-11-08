@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 fn physical_request(key: &str) -> Request {
     let mut r = question(key);
@@ -511,11 +512,18 @@ fn sqlite_writer_process_fixture() {
     std::process::exit(86);
 }
 #[test]
-fn actual_clear_and_consistent_backup_survive_a_concurrent_process_wal_writer() {
+fn actual_clear_refuses_a_concurrent_authority_writer_and_preserves_its_commit() {
     use std::io::Write;
     let (tmp, s, plan, _, _) = fixture();
     let paths = crate::ProjectPaths::from_root(tmp.path());
-    std::fs::write(tmp.path().join("generated.md"), "owned generated output").unwrap();
+    crate::write_if_changed(
+        &paths,
+        "generated.md",
+        &tmp.path().join("generated.md"),
+        b"owned generated output",
+        |_| Ok(()),
+    )
+    .unwrap();
     std::fs::write(tmp.path().join("dirty-user-work.txt"), "must survive").unwrap();
     crate::save_managed_paths(
         &paths,
@@ -544,8 +552,8 @@ fn actual_clear_and_consistent_backup_survive_a_concurrent_process_wal_writer() 
     let root = tmp.path().to_owned();
     let destination = backup.path().to_owned();
     let capture = std::thread::spawn(move || capture_backup(&root, &destination));
-    let cleared = crate::clear(&paths).unwrap();
-    assert!(cleared.removed > 0);
+    assert!(crate::clear(&paths).is_err());
+    assert!(tmp.path().join("generated.md").exists());
     assert!(s.path.exists());
     assert_eq!(
         std::fs::read_to_string(tmp.path().join("dirty-user-work.txt")).unwrap(),
@@ -555,6 +563,9 @@ fn actual_clear_and_consistent_backup_survive_a_concurrent_process_wal_writer() 
     assert_eq!(child.wait().unwrap().code(), Some(86));
     let meta = capture.join().unwrap().unwrap().unwrap();
     validate_backup(tmp.path(), &backup.path().join(&meta.database_path), &meta).unwrap();
+    let cleared = crate::clear(&paths).unwrap();
+    assert!(cleared.removed > 0);
+    assert!(!tmp.path().join("generated.md").exists());
     drop(s);
     let mut recovered = Store::open(tmp.path()).unwrap();
     assert!(

@@ -218,15 +218,17 @@ fn recent_activity_breaks_tie_for_cold_slots() {
 }
 
 #[test]
-fn activity_ttl_boundary_recent_inclusive_then_stale() {
+fn recent_activity_preference_reverts_after_expiry() {
     let (repo, _base) = make_clone_with_origin();
     let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-TTL-001");
     let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-TTL-002");
     let registry = serde_json::json!({ "tasks": [] });
     let now_epoch = chrono::Utc::now().timestamp();
 
+    // Exact 300/301-second boundaries are checked with a fixed clock in the
+    // helpers unit tests. Git I/O must not race a wall-clock second here.
     let mut at_boundary = HashMap::new();
-    at_boundary.insert(wt2.to_string_lossy().to_string(), now_epoch - 300);
+    at_boundary.insert(wt2.to_string_lossy().to_string(), now_epoch - 60);
     let (reused_boundary, prep_error_boundary) =
         find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &at_boundary)
             .expect("reuse result boundary");
@@ -237,11 +239,11 @@ fn activity_ttl_boundary_recent_inclusive_then_stale() {
     let (picked_boundary, _, _, _, _) = reused_boundary.expect("expected reusable boundary");
     assert_eq!(
         picked_boundary, wt2,
-        "ttl boundary should still count as recent"
+        "recent activity should prefer the second slot"
     );
 
     let mut stale = HashMap::new();
-    stale.insert(wt2.to_string_lossy().to_string(), now_epoch - 301);
+    stale.insert(wt2.to_string_lossy().to_string(), now_epoch - 3600);
     let (reused_stale, prep_error_stale) =
         find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &stale)
             .expect("reuse result stale");

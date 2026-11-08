@@ -9,8 +9,6 @@ pub const BASELINE: &[&str] = &[
     "!/.macc/macc.yaml",
     "!/.macc/catalog/",
     "!/.macc/skills.lock.json",
-    "performer.sh",
-    "worktree.prd.json",
 ];
 pub fn rewrite(existing: &str, requested: &BTreeSet<String>) -> String {
     let managed =
@@ -32,21 +30,26 @@ pub fn rewrite(existing: &str, requested: &BTreeSet<String>) -> String {
         lines.push(source[index].to_string());
         index += 1;
     }
-    for pattern in requested {
-        if managed && (BASELINE.contains(&pattern.as_str()) || pattern == ".macc/") {
-            continue;
-        }
-        if !lines.iter().any(|l| l.trim() == pattern) {
-            lines.push(pattern.clone());
-        }
-    }
+    let extras: Vec<_> = requested
+        .iter()
+        .filter(|pattern| {
+            !pattern.chars().any(char::is_control)
+                && !BASELINE.contains(&pattern.as_str())
+                && pattern.as_str() != ".macc/"
+                && !lines.iter().any(|line| line.trim() == pattern.as_str())
+        })
+        .cloned()
+        .collect();
     while lines.last().is_some_and(|s| s.is_empty()) {
         lines.pop();
     }
     if managed {
         lines.push(BEGIN.into());
         lines.extend(BASELINE.iter().map(|s| s.to_string()));
+        lines.extend(extras);
         lines.push(END.into());
+    } else {
+        lines.extend(extras);
     }
     if lines.is_empty() {
         String::new()
@@ -151,5 +154,69 @@ mod git_tests {
                 .unwrap();
             assert_eq!(status.success(), ignored, "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn tool_rules_stay_inside_managed_section_without_moving_user_rules() {
+        let requested = BASELINE
+            .iter()
+            .copied()
+            .chain(["/.codex/", "/AGENTS.md"])
+            .map(str::to_owned)
+            .collect();
+        let original = "# user\n.claude/\n*.private\n";
+        let result = rewrite(original, &requested);
+        assert!(result.starts_with(original));
+        let block = result.split(BEGIN).nth(1).unwrap();
+        assert!(block.contains("/.codex/"));
+        assert!(block.contains("/AGENTS.md"));
+        assert!(!block.contains(".claude/"));
+        assert_eq!(rewrite(&result, &requested), result);
+    }
+}
+
+/// Clear releases exclusions for removed generated files, keeping user rules and
+/// the runtime/portable setup boundary. Private surviving files remain excluded.
+pub(crate) fn after_clear(
+    paths: &crate::ProjectPaths,
+    inventory: &crate::project_ownership::Inventory,
+    archive: &Path,
+) -> Result<()> {
+    let path = paths.root.join(".gitignore");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let before = std::fs::read_to_string(&path).map_err(crate::persistent::error)?;
+    if !before.lines().any(|line| line == BEGIN) || !before.lines().any(|line| line == END) {
+        return Ok(());
+    }
+    let mut patterns: BTreeSet<String> = BASELINE.iter().map(|s| s.to_string()).collect();
+    patterns.extend(inventory.files.keys().map(|s| format!("/{s}")));
+    let after = rewrite(&before, &patterns);
+    if after != before {
+        crate::atomic_write(
+            paths,
+            &archive.join("gitignore-before.txt"),
+            before.as_bytes(),
+        )?;
+        crate::atomic_write(paths, &path, after.as_bytes())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod path_line_tests {
+    use super::*;
+    #[test]
+    fn generated_path_cannot_inject_an_allow_rule_for_private_runtime() {
+        let mut patterns: BTreeSet<String> = BASELINE.iter().map(|s| s.to_string()).collect();
+        patterns.insert("/assets/malicious\n!/.macc/memory.db".into());
+        let text = rewrite("", &patterns);
+        assert!(!text.contains("!/.macc/memory.db"));
+        assert!(text.contains("/.macc/*"));
     }
 }

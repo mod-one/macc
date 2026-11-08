@@ -29,6 +29,9 @@ pub fn review(paths: &ProjectPaths, plan: &ActionPlan, ops: &[PlannedOp]) -> Str
         }
     }
     let mut text=format!("MACC Apply · {}\n\nConfiguration {changed} file changes · {unchanged} already current\nScope         Project{}\nBackups       {}\n",paths.root.file_name().unwrap_or_default().to_string_lossy(),if user>0{" and user files (explicit consent required)"}else{" only"},paths.backups_dir.display());
+    for finding in crate::project_hygiene::findings(paths) {
+        text.push_str(&format!("WARN  {}: {}\n", finding.id, finding.message));
+    }
     if let Some(activation) = &plan.o2_activation {
         text.push_str(&format!(
             "O2 storage    {} · backup included\n",

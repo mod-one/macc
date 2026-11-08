@@ -204,3 +204,24 @@ git add -f .macc/skills.lock.json
 ```
 
 Lock receipts are deterministic: incidental planning timestamps are not regenerated on each preview; Apply logs hold execution times. Unavailable locked content fails explicitly instead of falling back to a newer branch version.
+
+## Portable setup and private catalog overrides
+
+Catalog sources within the project are persisted as project-relative paths.
+Reviewed Apply also proposes conversions for existing project-contained absolute
+paths, keeping unrelated catalog fields. Relative local sources are materialized
+from the current checkout/worktree root, not the process working directory.
+Local lock receipts do not publish external machine paths; local source selection
+continues to come from the effective catalog.
+
+For intentionally machine-local sources or private MCP declarations, use the same
+catalog schema under `.macc/persistent/catalog/skills.catalog.json` or
+`.macc/persistent/catalog/mcp.catalog.json`. These ignored local layers override
+project entries by ID and are visible to linked workers through the primary
+checkout. They survive Clear, remain outside Git and do not travel to another
+user's checkout. Put credentials in environment references rather than literals.
+Normal catalog editing commands continue to edit the portable project catalog.
+
+Doctor and Apply report portable metadata containing native session/lease/owner
+identifiers, literal credentials, machine paths or already tracked runtime. A
+warning never stages, untracks or rewrites Git history automatically.

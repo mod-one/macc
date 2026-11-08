@@ -1,18 +1,22 @@
 use crate::service::interaction::InteractionHandler;
-use crate::{ClearReport, MaccError, ProjectPaths, Result};
-
+use crate::{clear_plan::Disposition, ClearReport, MaccError, ProjectPaths, Result};
 #[derive(Debug, Clone, Default)]
 pub struct ClearExecutionReport {
     pub removed_worktrees: usize,
     pub clear_report: ClearReport,
 }
-
 pub fn clear_project(
     paths: &ProjectPaths,
     force: bool,
     dry_run: bool,
     ui: &dyn InteractionHandler,
 ) -> Result<ClearExecutionReport> {
+    if !paths.config_path.is_file() && !paths.managed_paths_state_path().is_file() {
+        return Err(MaccError::Validation(format!(
+            "No initialized MACC project at {}; Clear does not reset shared user caches",
+            paths.root.display()
+        )));
+    }
     if let Ok(primary) = crate::persistent::primary_root(&paths.root) {
         if paths.root.canonicalize().ok().as_ref() != Some(&primary) {
             return Err(MaccError::Validation(format!(
@@ -21,52 +25,51 @@ pub fn clear_project(
             )));
         }
     }
-    ui.info("This will:");
-    ui.info("  1) Remove eligible clean, integrated worktrees; unfinished work is protected");
-    ui.info("  2) Remove MACC-managed files/directories in this project (macc clear)");
-    ui.info("  Configuration, catalogs, .macc/persistent authority, session authority and O2 memory/checkpoints are retained. A configuration-only restore does not restore historical O2 data; use a saved session bundle for that.");
-
-    for path in crate::clear_policy::existing_preserved(paths) {
-        ui.info(&format!("  Keep: {path}"));
+    let plan = crate::clear_plan::preview(paths)?;
+    ui.info("MACC Clear · reset generated runtime; keep setup, local durable authority and unfinished work");
+    ui.info("Evidence, drafts and previous coordinator recovery state are archived under .macc/persistent/clear-history (local, ignored by Git).");
+    for item in &plan.items {
+        let action = match item.disposition {
+            Disposition::Preserve => "Keep",
+            Disposition::Archive => "Archive",
+            Disposition::Remove => "Remove",
+            Disposition::RemoveWorktree => "Remove worktree",
+            Disposition::RetainWorktree => "Retain worktree",
+            Disposition::RetainUser => "Retain user file",
+            Disposition::RemoveBranch => "Delete merged branch",
+            Disposition::RetainBranch => "Retain branch",
+        };
+        ui.info(&format!(
+            "  {action}: {} · {} · {} bytes",
+            item.path, item.reason, item.bytes
+        ));
     }
-
     if dry_run {
-        let removed_worktrees = crate::domain::worktree::removable_worktrees(&paths.root)?.len();
-
-        let clear_report = crate::clear_dry_run(paths)?;
-        ui.info(&format!(
-            "[Dry run] Would remove worktrees: {}",
-            removed_worktrees
-        ));
-        ui.info(&format!(
-            "[Dry run] Would clear managed paths: removed={}, skipped={}",
-            clear_report.removed, clear_report.skipped
-        ));
-
         return Ok(ClearExecutionReport {
-            removed_worktrees,
-            clear_report,
+            removed_worktrees: plan
+                .items
+                .iter()
+                .filter(|i| i.disposition == Disposition::RemoveWorktree)
+                .count(),
+            clear_report: plan.report(),
         });
     }
-
     if !force && !ui.confirm("Continue [y/N]? ")? {
         return Err(MaccError::Validation("Clear cancelled.".into()));
     }
-
-    crate::clear_policy::require_stopped(&paths.root)?;
-    let _authority_guards = crate::persistent::idle_guards(&paths.root)?;
-    let removed_worktrees = crate::service::worktree::remove_all_worktrees(&paths.root, false)?;
-    crate::prune_worktrees(&paths.root)?;
-    ui.info(&format!("Removed worktrees: {}", removed_worktrees));
-
-    let clear_report = crate::clear(paths)?;
-    ui.info(&format!(
-        "Cleared managed paths: removed={}, skipped={}",
-        clear_report.removed, clear_report.skipped
-    ));
-
+    let report = crate::clear(paths)?;
+    ui.info(&format!("Clear: {} removed paths, {} archived entries, {} removed worktrees, {} deleted merged branches, {} retained entries",report.removed,report.archived,report.removed_worktrees,report.removed_branches,report.skipped));
+    if let Some(path) = &report.archive_path {
+        ui.info(&format!("Recovery archive: {}", path.display()));
+    }
+    if !report.failures.is_empty() {
+        return Err(MaccError::Validation(format!(
+            "Clear incomplete; unresolved entries are retained for retry:\n{}",
+            report.failures.join("\n")
+        )));
+    }
     Ok(ClearExecutionReport {
-        removed_worktrees,
-        clear_report,
+        removed_worktrees: report.removed_worktrees,
+        clear_report: report,
     })
 }
