@@ -4,7 +4,9 @@ mod approvals;
 mod backup;
 pub use backup::*;
 mod context;
+mod delegation;
 mod diagnostic;
+pub(crate) use delegation::verified as verified_delegated_gates;
 pub use diagnostic::DiagnosticDelivery;
 mod context_budget;
 mod context_render;
@@ -61,6 +63,9 @@ pub fn error(message: impl Into<String>) -> crate::MaccError {
     crate::MaccError::Validation(format!("Decision control: {}", message.into()))
 }
 
+#[cfg(test)]
+#[path = "tests_delegation.rs"]
+mod delegation_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

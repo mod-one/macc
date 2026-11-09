@@ -232,3 +232,90 @@ fn supervisor_revision_is_stable_and_changes_after_reviewed_reconciliation() {
     reconcile(root, &id, preview["current_sha256"].as_str()).unwrap();
     assert_ne!(before, revision(root, &ids).unwrap());
 }
+
+#[test]
+fn physical_relocation_guard_refuses_a_live_session_on_either_checkout() {
+    let (tmp, id, request) = setup();
+    let root = tmp.path();
+    let old = Path::new(request.identity["execution_root"].as_str().unwrap());
+    let current = root.join(".macc/worktree/worker-01");
+    let grant = crate::session_store::acquire(
+        root,
+        &crate::session_store::AcquireRequest {
+            identity: request.identity.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            owner_pid: std::process::id() as i64,
+            preferred_provider_id: None,
+            generate_provider_id: true,
+            checkpoint_id: Some(id),
+        },
+    )
+    .unwrap();
+    assert!(idle_worktrees(root, &[&current, old]).is_err());
+    crate::session_store::release(root, &grant.key, false).unwrap();
+    assert!(idle_worktrees(root, &[&current, old]).unwrap().is_some());
+}
+
+#[test]
+fn public_unblock_relocates_a_reserved_worker_before_checkpoint_branch_validation() {
+    let (tmp, _, _) = setup();
+    let root = tmp.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let from = root.join(".macc/worktree/worker-01");
+    let reserved = root.join(".macc/worktree/integration");
+    let branch = "ai/future-tool/legacy";
+    git(&from, &["branch", "-m", branch]);
+    git(
+        root,
+        &[
+            "worktree",
+            "move",
+            from.to_str().unwrap(),
+            reserved.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(reserved.join(".macc")).unwrap();
+    std::fs::write(reserved.join(".macc/worktree.json"), json!({
+        "id":"integration","slug":"integration","tool":"future-tool","base":"main","branch":branch
+    }).to_string()).unwrap();
+    git(&reserved, &["checkout", "--detach"]);
+    let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = storage.load_snapshot().unwrap();
+    let task = &mut snapshot.registry.tasks[0];
+    task.tool = Some("future-tool".into());
+    task.ensure_worktree().worktree_path = Some(reserved.to_string_lossy().into());
+    task.ensure_worktree().branch = Some(branch.into());
+    task.task_runtime.current_phase = Some("review".into());
+    task.task_runtime.set_last_error_details(
+        "E901",
+        "worktree_ownership",
+        "Legacy reserved collision",
+    );
+    let request = crate::coordinator::control::Request::new(
+        task,
+        "Restore retained ownership and revalidate",
+    )
+    .unwrap();
+    storage.save_snapshot(&snapshot).unwrap();
+    let config = crate::config::CoordinatorConfig {
+        reference_branch: Some("main".into()),
+        ..Default::default()
+    };
+    crate::service::coordinator_workflow::unblocking::apply(
+        &paths,
+        Some(&config),
+        &crate::coordinator::types::CoordinatorEnvConfig::default(),
+        &request,
+    )
+    .unwrap();
+    let after = storage.load_registry().unwrap();
+    let task = &after.tasks[0];
+    assert_ne!(task.worktree_path(), Some(reserved.to_str().unwrap()));
+    assert_eq!(task.branch(), Some(branch));
+    assert_eq!(task.state, "testing");
+    assert!(task
+        .task_runtime
+        .extra
+        .contains_key("review_refresh_required"));
+    ensure_task_ready(root, "A").unwrap();
+}

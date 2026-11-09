@@ -42,7 +42,11 @@ pub(super) fn requeue(
             if task.has_worktree_attached() {
                 let reference =
                     macc_core::config::CoordinatorConfigResolved::resolve(config).reference_branch;
-                macc_core::coordinator::repair_handoff::reconcile(&paths.root, task, &reference)?;
+                macc_core::coordinator::repair_handoff::reconcile_task(
+                    &paths.root,
+                    task,
+                    &reference,
+                )?;
             }
             task.ensure_runtime().pid = None;
             macc_core::coordinator::state::coordinator_state_registry_save(
@@ -57,7 +61,7 @@ pub(super) fn requeue(
             let reference =
                 macc_core::config::CoordinatorConfigResolved::resolve(config).reference_branch;
             let base = if task.has_worktree_attached() {
-                Some(macc_core::coordinator::repair_handoff::reconcile(
+                Some(macc_core::coordinator::repair_handoff::reconcile_task(
                     &paths.root,
                     task,
                     &reference,

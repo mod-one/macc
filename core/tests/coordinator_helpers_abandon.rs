@@ -74,6 +74,8 @@ fn make_clone_with_origin() -> (PathBuf, PathBuf) {
 
     run_git(&repo, &["config", "user.email", "tests@example.com"]);
     run_git(&repo, &["config", "user.name", "MACC Tests"]);
+    fs::write(repo.join(".gitignore"), ".macc/\n").expect("write ignore");
+    run_git(&repo, &["add", ".gitignore"]);
     create_commit(&repo, "base.txt", "base\n", "chore: base");
     run_git(&repo, &["branch", "-M", "main"]);
     run_git(&repo, &["push", "-u", "origin", "main"]);
@@ -85,7 +87,7 @@ fn make_pool_worktree(repo: &Path, task_id: &str) -> PathBuf {
     let pool_root = repo.join(".macc").join("worktree");
     fs::create_dir_all(&pool_root).expect("create pool root");
     let worktree = pool_root.join("worker-01");
-    let branch = format!("task/{task_id}");
+    let branch = format!("ai/codex/{task_id}");
     run_git(
         repo,
         &[
@@ -100,6 +102,15 @@ fn make_pool_worktree(repo: &Path, task_id: &str) -> PathBuf {
 
     run_git(&worktree, &["config", "user.email", "tests@example.com"]);
     run_git(&worktree, &["config", "user.name", "MACC Tests"]);
+    fs::create_dir_all(worktree.join(".macc")).unwrap();
+    fs::write(
+        worktree.join(".macc/worktree.json"),
+        serde_json::json!({
+            "id":"worker-01","slug":"worker-01","tool":"codex","base":"main","branch":&branch
+        })
+        .to_string(),
+    )
+    .unwrap();
     worktree
 }
 
@@ -118,7 +129,7 @@ fn abandoned_registry(task_id: &str, worktree_path: &Path) -> serde_json::Value 
 }
 
 #[test]
-fn reused_stuck_worktree_with_commits_creates_abandonment_tag() {
+fn abandoned_worktree_with_unmerged_commits_is_preserved_without_recycling() {
     let (repo, _base) = make_clone_with_origin();
     let task_id = "L4-ABANDON-001";
     let worktree = make_pool_worktree(&repo, task_id);
@@ -137,26 +148,23 @@ fn reused_stuck_worktree_with_commits_creates_abandonment_tag() {
         find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
 
-    assert!(
-        prep_error.is_none(),
-        "unexpected prep error: {prep_error:?}"
+    assert!(reused.is_none(), "unmerged work must remain in its slot");
+    assert_eq!(prep_error.unwrap().0, "previous_branch_not_merged");
+    assert_eq!(
+        run_git_capture(&worktree, &["rev-parse", "HEAD"]),
+        ahead_head
     );
-    assert!(reused.is_some(), "expected reusable worktree");
-
+    assert_eq!(
+        fs::read_to_string(worktree.join("ahead.txt")).unwrap(),
+        "ahead\n"
+    );
     let tags = run_git_capture(
         &repo,
         &["tag", "--list", &format!("macc/abandoned/{task_id}-*")],
     );
-    let matching: Vec<&str> = tags
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    assert_eq!(matching.len(), 1, "expected exactly one abandonment tag");
-
-    let tagged_head = run_git_capture(&repo, &["rev-parse", &format!("refs/tags/{}", matching[0])]);
-    assert_eq!(
-        tagged_head, ahead_head,
-        "tag should preserve pre-reset HEAD"
+    assert!(
+        tags.is_empty(),
+        "reuse must not silently abandon retained work"
     );
 }
 

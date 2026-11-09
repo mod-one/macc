@@ -418,10 +418,13 @@ pub fn build_advance_actions(
         let task_id = task.id.clone();
         let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
         let workflow_state = task.workflow_state();
-        match workflow_state
-            .map(|s| plan_advance(s, max_review_cycles, review_cycles, phases))
-            .unwrap_or(AdvancePlan::Noop)
-        {
+        match crate::coordinator::retained_reconciliation::advance_override(task).unwrap_or_else(
+            || {
+                workflow_state
+                    .map(|s| plan_advance(s, max_review_cycles, review_cycles, phases))
+                    .unwrap_or(AdvancePlan::Noop)
+            },
+        ) {
             AdvancePlan::RunPhase(transition) => {
                 actions.push(AdvanceTaskAction::RunPhase {
                     task_id,
@@ -810,6 +813,9 @@ pub(crate) fn apply_phase_success_typed(
     super::phase_failure::clear(runtime);
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some(transition.runtime_phase.to_string());
+    if transition.mode == "fix" {
+        runtime.extra.remove("review_refresh_correction");
+    }
     runtime.pid = None;
     runtime.delayed_until = None;
     task.touch_state_changed(now);
@@ -842,7 +848,11 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.pid = None;
     runtime.delayed_until = None;
     // Count completed reviews; a rejection at the limit still owns one correction.
-    let cycles = runtime.review_cycles.unwrap_or(0) + 1;
+    let refresh = crate::coordinator::retained_reconciliation::review_completed(
+        runtime,
+        verdict == ReviewVerdict::ChangesRequested,
+    );
+    let cycles = runtime.review_cycles.unwrap_or(0) + usize::from(!refresh);
     runtime.review_cycles = Some(cycles);
     task.touch_state_changed(now);
     Ok(to)

@@ -803,7 +803,13 @@ impl TaskRegistry {
             }
             if !matches!(
                 task.state.as_str(),
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
+                "claimed"
+                    | "in_progress"
+                    | "testing"
+                    | "reviewing"
+                    | "pr_open"
+                    | "changes_requested"
+                    | "queued"
             ) {
                 continue;
             }
@@ -880,6 +886,8 @@ impl TaskRegistry {
         const BLOCKING: &[&str] = &[
             "claimed",
             "in_progress",
+            "testing",
+            "reviewing",
             "pr_open",
             "changes_requested",
             "queued",

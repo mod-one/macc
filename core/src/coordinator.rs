@@ -29,6 +29,7 @@ pub mod preflight;
 pub mod rate_limit;
 pub mod repair_handoff;
 pub mod result_protocol;
+pub mod retained_reconciliation;
 pub mod runner_output;
 pub mod runtime;
 pub mod session_identity;
@@ -38,6 +39,8 @@ pub mod state_runtime;
 pub mod task_selector;
 pub mod types;
 pub mod view_model;
+pub mod worktree_recovery;
+pub mod worktree_roles;
 
 pub const COORDINATOR_TASK_REGISTRY_REL_PATH: &str = ".macc/automation/task/task_registry.json";
 pub const COORDINATOR_PAUSE_FILE_REL_PATH: &str = ".macc/automation/task/coordinator.pause.json";

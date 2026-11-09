@@ -119,8 +119,11 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                         != Some(decision.id.as_str())
                         && task.has_worktree_attached()
                     {
-                        let base =
-                            crate::coordinator::repair_handoff::reconcile(root, task, &reference)?;
+                        let Some(base) = crate::coordinator::retained_reconciliation::reconcile(
+                            root, task, &reference,
+                        ) else {
+                            continue;
+                        };
                         task.task_runtime.extra.insert(crate::coordinator::repair_handoff::RESUME_KEY.into(),json!({"base":base,"evidence":"Prepare only the recorded answer's graph effects; retained source is read-only"}));
                     }
                     task.set_workflow_state(WorkflowState::Todo);
@@ -167,10 +170,15 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                 .is_some_and(|s| s.contains("DM_STALE"));
         if refresh && !active && !task.is_human_approval_gate() {
             if task.has_worktree_attached() {
-                let base = crate::coordinator::repair_handoff::reconcile(root, task, &reference)?;
+                let Some(base) =
+                    crate::coordinator::retained_reconciliation::reconcile(root, task, &reference)
+                else {
+                    continue;
+                };
                 task.task_runtime.extra.insert(crate::coordinator::repair_handoff::RESUME_KEY.into(),json!({"base":base,"evidence":"Durable decision resolved; resume with current context"}));
             }
-            task.set_workflow_state(WorkflowState::Todo);
+            let next_state = crate::coordinator::retained_reconciliation::resume_state(root, task);
+            task.set_workflow_state(next_state);
             task.task_runtime.set_status(RuntimeStatus::Idle);
             task.task_runtime.pid = None;
             task.task_runtime.clear_last_error_details();
@@ -184,21 +192,14 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
         if task.is_human_approval_gate() && p.human_question_min_risk == Consultation::NeverAsk {
             // The gate outcome is delegated, not a human vote. Revalidate its
             // exact current subject every cycle before deriving satisfaction.
-            let gate = task.gate.as_ref().unwrap();
-            let subject = gate.subject_task.as_deref().unwrap_or_default();
             if !task.dependencies.iter().all(|d| satisfied.contains(d)) {
+                satisfied.remove(&task.id);
                 continue;
             }
-            if let Some(revision) =
-                crate::coordinator::approval::subject_revision(root, &reference, subject)
-            {
-                let request:Request=serde_json::from_value(json!({"idempotency_key":format!("gate:{}:{}:{}",task.id,revision,digest(&p)),"task_id":task.id,"kind":"approval","question":format!("Resolve approval of {subject} at {revision}"),"context":gate.description,"investigated":[format!("Verified subject {subject} integrated at {revision}; prerequisites satisfied")],"recommendation":format!("Proceed under explicit never_ask delegation for {subject} at {revision}; this is not a human vote"),"risk":"high","impact":{"evidence":[revision]}})).map_err(|e|error(e.to_string()))?;
-                let resolution = store.submit(&plan, request, "coordinator", "coordinator", &p)?;
-                task.task_runtime.extra.insert("delegated_gate_resolution".into(),json!({"decision_id":resolution.id,"origin":"delegated_autonomous","subject_revision":revision,"policy_digest":digest(&p),"subject_task":subject}));
-                task.task_runtime.approval = None;
-                task.set_workflow_state(WorkflowState::Approved);
-                task.task_runtime.set_status(RuntimeStatus::Idle);
+            if super::delegation::resolve(&mut store, &plan, task, &p, &reference, root)? {
                 satisfied.insert(task.id.clone());
+            } else {
+                satisfied.remove(&task.id);
             }
         }
     }

@@ -14,6 +14,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Partial native indexes and parse failures are visible across clients. The assistant can propose a reviewed budget increase/rebuild or retain partial coverage with warnings. The default native build budget is 15 seconds; explicit existing budgets are preserved.
 
 ### Fixed
+- Reserved integration/supervisor slots cannot become performers. Scratch mutations verify ownership; proven idle legacy collisions recover through journaled moves with content/index/refs preserved. Ownership conflicts remain task-local and resume the retained phase without bypassing independent review.
+- Native delegated approval and ledger reconciliation use the same durable, subject/policy-bound authority, respect explicit human vetoes, and avoid repeated false quorum warnings. Dependency errors refresh their root cause.
 - Checkpoint resumes use finish headroom for retained evidence while keeping mandatory context within the initial limit. Compatible branch changes in the same idle worktree recapture Git evidence and rotate provider sessions; specification drift, divergent history and existing reconciliation blocks remain protected. Size/reconciliation errors identify their actual cause.
 - Skill assets retain their exact source bytes across repeated Apply operations. Existing assets affected by MACC's structured-file reserialization can be repaired when they match that exact transformation of the locked source; local edits remain protected.
 - Coordinator worktree Apply failures retain complete child output and report the task, worktree, underlying error and diagnostic log path.

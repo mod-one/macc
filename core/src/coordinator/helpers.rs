@@ -512,22 +512,15 @@ pub fn find_reusable_worktree_native(
     Option<ReusableWorktree>,
     Option<ReusableWorktreePrepareError>,
 )> {
+    let _roles = super::worktree_roles::lock(repo_root)?;
     let active_paths = active_task_worktree_paths(registry);
-    let pool_root = repo_root.join(".macc").join("worktree");
     let entries = crate::list_worktrees(repo_root)?;
     let sessions_state = load_tool_sessions_state(repo_root);
     let now_epoch = chrono::Utc::now().timestamp();
     let mut ranked_entries = entries
         .into_iter()
         .enumerate()
-        .filter(|(_, entry)| {
-            entry.path.starts_with(&pool_root)
-                && !entry
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("supervisor-"))
-        })
+        .filter(|(_, entry)| super::worktree_roles::performer(repo_root, &entry.path))
         .map(|(idx, entry)| {
             let warmth = score_worktree_session_warmth_from_state(
                 sessions_state.as_ref(),
@@ -598,52 +591,26 @@ pub fn find_reusable_worktree_native(
         let previous_branch = git_current_branch_name(&entry.path).unwrap_or_default();
         let task_id_hint = task_id_for_worktree(registry, &entry.path);
         if !is_branch_merged_into_base(&entry.path, &previous_branch, base_branch) {
-            // If the task that owns this branch is permanently stuck (blocked/failed/abandoned),
-            // it will never merge autonomously. Force-checkout to base to reclaim the slot
-            // rather than letting the coordinator deadlock.
-            let stuck = TaskRegistry::from_value(registry)
-                .map(|r| r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy()))
-                .unwrap_or(false);
-            if stuck {
-                let _ = create_abandonment_tag_if_needed(
-                    repo_root,
-                    &entry.path,
-                    base_branch,
-                    Some(&previous_branch),
-                    task_id_hint.as_deref(),
-                )?;
-                // Abandon the unmerged branch. We cannot `git checkout <base>` directly
-                // because git forbids checking out a branch that is already used by
-                // another worktree (the main repo). Instead we detach HEAD first, then
-                // reset to the base branch commit. prepare_reused_worktree_base will
-                // also handle the checkout-to-base via the same detach+reset pattern.
-                let detached = crate::git::checkout_detach(&entry.path).unwrap_or(false);
-                if detached {
-                    let _ = crate::git::reset_hard(&entry.path, base_branch);
-                    // Fall through — prepare_reused_worktree_base will finish the reset.
-                } else {
-                    last_prepare_error = Some((
-                        "stuck_branch_checkout_failed".to_string(),
-                        format!(
-                            "worktree {} stuck branch {} could not be abandoned (detach failed)",
-                            entry.path.display(),
-                            previous_branch,
-                        ),
-                    ));
-                    continue;
-                }
-            } else {
-                last_prepare_error = Some((
-                    "previous_branch_not_merged".to_string(),
-                    format!(
-                        "worktree {} branch {} is not merged into {}",
-                        entry.path.display(),
-                        previous_branch,
-                        base_branch
-                    ),
-                ));
-                continue;
-            }
+            last_prepare_error = Some((
+                "previous_branch_not_merged".into(),
+                format!(
+                    "worktree {} branch {} retains unmerged work; slot preserved",
+                    entry.path.display(),
+                    previous_branch
+                ),
+            ));
+            continue;
+        }
+        if dirty_before || !crate::project_ownership::unowned_ignored_files(&entry.path)?.is_empty()
+        {
+            last_prepare_error = Some((
+                "retained_local_work".into(),
+                format!(
+                    "worktree {} contains local work; slot preserved",
+                    entry.path.display()
+                ),
+            ));
+            continue;
         }
 
         let (prepared, skipped_reset) = prepare_reused_worktree_base(

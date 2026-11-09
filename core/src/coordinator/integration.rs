@@ -106,6 +106,7 @@ impl IntegrationWorktree {
             LOCK_RETRY_DELAY,
             "integration worktree",
         )?;
+        let _role_lock = super::worktree_roles::lock(repo_root)?;
         let path = crate::persistent::integration_path(repo_root)?;
         std::fs::create_dir_all(path.parent().unwrap()).map_err(crate::persistent::error)?;
 
@@ -114,6 +115,7 @@ impl IntegrationWorktree {
             message: format!("base branch '{}' could not be resolved", base),
         })?;
 
+        super::worktree_roles::validate_scratch(repo_root, &path, &base_sha)?;
         // Drop registrations for worktree directories that no longer exist, so
         // a manually deleted integration dir can be recreated.
         let _ = git::worktree_prune(repo_root);
@@ -144,6 +146,7 @@ impl IntegrationWorktree {
             }
             git::worktree_add_detached(repo_root, &path, &base_sha)?;
         }
+        super::worktree_roles::record_scratch(repo_root, &path)?;
 
         Ok(Self {
             repo_root: repo_root.to_path_buf(),
@@ -174,12 +177,16 @@ impl IntegrationWorktree {
     /// See the module docs for why the mechanism depends on whether a working
     /// tree holds the base branch.
     pub fn publish(&self) -> Result<PublishOutcome> {
+        let _roles = super::worktree_roles::lock(&self.repo_root)?;
+        super::worktree_roles::validate_scratch(&self.repo_root, &self.path, &self.base_sha)?;
         let new_sha = git::head_commit(&self.path)?;
         publish_commit(&self.repo_root, &self.base, &new_sha, &self.base_sha)
     }
 
     /// Abort any in-progress merge and return the worktree to the base tip.
     pub fn reset(&self) -> Result<()> {
+        let _roles = super::worktree_roles::lock(&self.repo_root)?;
+        super::worktree_roles::validate_scratch(&self.repo_root, &self.path, &self.base_sha)?;
         let _ = git::merge_abort(&self.path);
         git::checkout_detach_force(&self.path, &self.base_sha)?;
         let _ = git::clean_untracked(&self.path);

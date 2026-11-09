@@ -13,6 +13,9 @@ MACC stores its shared decision/graph authority in the primary checkout:
     controller.lock
     mutation.lock
     integration.lock
+    worktree-roles.lock             shared assignment/cleanup exclusion
+    integration-slot.json           local scratch ownership receipt
+    worktree-recovery/              journaled ownership recovery proofs
     generated-project-files.json   local creation/hash inventory for Apply/Clear
     clear-history/                archived proofs, logs and cleanup results
     broker/                       retained auxiliary authority state, when present
@@ -179,3 +182,37 @@ Use the existing `macc save` session bundles to capture/restore governed authori
 snapshots; the bundle format remains unchanged (`state/control.sqlite`). Existing
 structured decision/graph exports remain available for deliberate publication.
 Copying a live SQLite file or versioning runtime state is not a backup procedure.
+
+
+## Disjoint worktree roles and retained collision recovery
+
+The coordinator reserves `.macc/worktree/integration` for detached merge scratch
+and `supervisor-*` for supervisor interventions. Performers use verified worker
+metadata in separate direct children of the pool. Reserved slots cannot be
+created as performer slots or selected for reuse. Testing/reviewing, unfinished
+commits, dirty files and unowned ignored files prevent reuse.
+
+Scratch preparation, reset and publication independently verify assignment,
+branch, repository and local ownership receipt before any destructive operation.
+An attached branch, performer metadata, retained assignment or unknown detached
+history causes `worktree_ownership_conflict`; no reset or cleanup follows.
+Old scratch without a receipt is adopted only when clean and already an ancestor
+of the reference. A nonce binds new receipts to the actual checkout. Its local
+`.macc/integration-owner` marker is covered by MACC's managed Git
+`info/exclude` technical rules, including before Apply and after exclusion reconciliation.
+
+Coordinator decision refresh and the existing authorized unblock/supervisor
+handoff can recover an old performer assigned to `integration`. Recovery requires
+an idle performer/session and provable durable ownership. It pins the branch,
+detached HEAD, content and index under local `refs/macc/recovery/ownership-*`,
+journals the operation, then moves the checkout with Git to a free worker slot.
+Committed, staged, unstaged, untracked and ignored files remain in that checkout.
+Only the original branch HEAD or an exact same-tree MACC merge with that branch
+as its second parent qualifies for automatic restoration. Ambiguous content,
+foreign ownership, live sessions and competing merge work remain blocked.
+
+The journal supports interrupted-move replay; it never certifies delivery or
+rewrites review evidence. These receipts and recovery refs are machine-local
+execution proofs, not portable human authority. A physical ownership failure
+stays task-local with its task, phase, path, claim, expected/actual branch and
+journal path; unrelated tasks can still reconcile.

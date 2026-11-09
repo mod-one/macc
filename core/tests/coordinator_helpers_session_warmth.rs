@@ -59,6 +59,8 @@ fn make_clone_with_origin() -> (PathBuf, PathBuf) {
 
     run_git(&repo, &["config", "user.email", "tests@example.com"]);
     run_git(&repo, &["config", "user.name", "MACC Tests"]);
+    fs::write(repo.join(".gitignore"), ".macc/\n").expect("write ignore");
+    run_git(&repo, &["add", ".gitignore"]);
     create_commit(&repo, "base.txt", "base\n", "chore: base");
     run_git(&repo, &["branch", "-M", "main"]);
     run_git(&repo, &["push", "-u", "origin", "main"]);
@@ -70,7 +72,7 @@ fn add_pool_worktree(repo: &Path, slot: &str, task_id: &str) -> PathBuf {
     let pool_root = repo.join(".macc").join("worktree");
     fs::create_dir_all(&pool_root).expect("create pool root");
     let worktree = pool_root.join(slot);
-    let branch = format!("task/{task_id}");
+    let branch = format!("ai/codex/{task_id}");
     run_git(
         repo,
         &[
@@ -84,6 +86,15 @@ fn add_pool_worktree(repo: &Path, slot: &str, task_id: &str) -> PathBuf {
     );
     run_git(&worktree, &["config", "user.email", "tests@example.com"]);
     run_git(&worktree, &["config", "user.name", "MACC Tests"]);
+    fs::create_dir_all(worktree.join(".macc")).unwrap();
+    fs::write(
+        worktree.join(".macc/worktree.json"),
+        serde_json::json!({
+            "id":slot,"slug":slot,"tool":"codex","base":"main","branch":&branch
+        })
+        .to_string(),
+    )
+    .unwrap();
     worktree
 }
 

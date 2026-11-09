@@ -91,6 +91,8 @@ fn make_test_repo(prefix: &str) -> (PathBuf, PathBuf) {
     );
     run_git(&repo, &["config", "user.email", "tests@example.com"]);
     run_git(&repo, &["config", "user.name", "MACC Tests"]);
+    fs::write(repo.join(".gitignore"), ".macc/\n").expect("write ignore");
+    run_git(&repo, &["add", ".gitignore"]);
     create_commit(&repo, "README.md", "base\n", "chore: base");
     run_git(&repo, &["branch", "-M", "main"]);
     run_git(&repo, &["push", "-u", "origin", "main"]);
@@ -114,6 +116,15 @@ fn add_pool_worktree(repo: &Path, slot: &str, branch: &str) -> PathBuf {
     );
     run_git(&worktree, &["config", "user.email", "tests@example.com"]);
     run_git(&worktree, &["config", "user.name", "MACC Tests"]);
+    fs::create_dir_all(worktree.join(".macc")).unwrap();
+    fs::write(
+        worktree.join(".macc/worktree.json"),
+        serde_json::json!({
+            "id":slot,"slug":slot,"tool":"codex","base":"main","branch":branch
+        })
+        .to_string(),
+    )
+    .unwrap();
     worktree
 }
 
@@ -158,7 +169,7 @@ fn coordinator_reliability_chain_integration() {
     // (1), (2), (6): phase_done override + error_with_changes retry + session carry-over.
     let (repo_a, _base_a) = make_test_repo("chain-a");
     let task_id_a = "L4-INT-001-A";
-    let branch_a = format!("task/{task_id_a}");
+    let branch_a = format!("ai/codex/{task_id_a}");
     let worktree_a = add_pool_worktree(&repo_a, "worker-01", &branch_a);
     create_commit(
         &worktree_a,
@@ -343,10 +354,10 @@ fn coordinator_reliability_chain_integration() {
         captured
     );
 
-    // (3): abandoned branch gets tagged before recycling.
+    // (3): abandoned unmerged work is preserved in place, never silently recycled.
     let (repo_b, _base_b) = make_test_repo("chain-b");
     let task_id_b = "L4-INT-001-B";
-    let worktree_b = add_pool_worktree(&repo_b, "worker-01", &format!("task/{task_id_b}"));
+    let worktree_b = add_pool_worktree(&repo_b, "worker-01", &format!("ai/codex/{task_id_b}"));
     create_commit(
         &worktree_b,
         "ahead.txt",
@@ -374,21 +385,16 @@ fn coordinator_reliability_chain_integration() {
         &std::collections::HashMap::new(),
     )
     .expect("reuse abandoned worktree");
-    assert!(prep_error_b.is_none());
-    assert!(reused_b.is_some());
-    let tags_b = run_git_capture(
-        &repo_b,
-        &["tag", "--list", &format!("macc/abandoned/{task_id_b}-*")],
+    assert!(reused_b.is_none());
+    assert_eq!(prep_error_b.unwrap().0, "previous_branch_not_merged");
+    assert_eq!(
+        run_git_capture(&worktree_b, &["rev-parse", "HEAD"]),
+        abandoned_head
     );
-    let abandoned_tag = tags_b
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .expect("abandoned tag exists");
-    let tagged_head = run_git_capture(
-        &repo_b,
-        &["rev-parse", &format!("refs/tags/{}", abandoned_tag)],
+    assert_eq!(
+        fs::read_to_string(worktree_b.join("ahead.txt")).unwrap(),
+        "ahead\n"
     );
-    assert_eq!(tagged_head, abandoned_head);
 
     // (4): orphaned branch discovered during sync and merged.
     let (repo_c, _base_c) = make_test_repo("chain-c");
@@ -480,8 +486,8 @@ fn coordinator_reliability_chain_integration() {
     // (7): slot with recent activity preferred when pool has a warm session.
     // In the pool model, session warmth is tool-level; the tiebreak is recency.
     let (repo_e, _base_e) = make_test_repo("chain-e");
-    let cold_wt = add_pool_worktree(&repo_e, "worker-01", "task/L4-INT-001-E-COLD");
-    let warm_wt = add_pool_worktree(&repo_e, "worker-02", "task/L4-INT-001-E-WARM");
+    let cold_wt = add_pool_worktree(&repo_e, "worker-01", "ai/codex/L4-INT-001-E-COLD");
+    let warm_wt = add_pool_worktree(&repo_e, "worker-02", "ai/codex/L4-INT-001-E-WARM");
     let fresh = Utc::now()
         .checked_sub_signed(TimeDelta::seconds(15))
         .expect("fresh timestamp")

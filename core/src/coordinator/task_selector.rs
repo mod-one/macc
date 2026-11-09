@@ -686,7 +686,9 @@ pub fn reconcile_task_blocks(registry: &mut TaskRegistry, now: &str) -> Vec<Stri
                 )
             });
             if let Some(path) = path {
-                if task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo) {
+                if task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo)
+                    || propagated
+                {
                     let root_id = path.last().cloned().unwrap_or_default();
                     let root_reason = tasks_by_id
                         .get(root_id.as_str())
@@ -698,6 +700,11 @@ pub fn reconcile_task_blocks(registry: &mut TaskRegistry, now: &str) -> Vec<Stri
                         root_id,
                         root_reason
                     );
+                    if propagated
+                        && task.task_runtime.last_error_message.as_deref() == Some(detail.as_str())
+                    {
+                        continue;
+                    }
                     task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
                     let runtime = task.ensure_runtime();
                     runtime.set_status(crate::coordinator::RuntimeStatus::Failed);

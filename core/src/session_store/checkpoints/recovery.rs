@@ -8,6 +8,24 @@ use rusqlite::TransactionBehavior;
 /// Stable diagnostic identifier under the existing E903 precondition contract.
 pub const CODE: &str = "MACC-CHECKPOINT-CONTEXT-DRIFT";
 
+/// Keep session claims excluded throughout a physical worktree ownership repair.
+pub(crate) fn idle_worktrees(
+    root: &Path,
+    worktrees: &[&Path],
+) -> Result<Option<crate::fs_lock::AdvisoryLock>> {
+    if !root.join(".macc/memory.db").exists()
+        || !authority(root)?.is_some_and(|a| a.mode == "sqlite")
+    {
+        return Ok(None);
+    }
+    let guard = lock(root)?;
+    let (db, _) = db::active(root)?;
+    for worktree in worktrees {
+        super::lifecycle::idle(&db, &worktree.to_string_lossy())?;
+    }
+    Ok(Some(guard))
+}
+
 /// Preview and apply resolve the same actual worker and authoritative PRD as dispatch.
 pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value> {
     reconcile_mode(root, id, expected, false)

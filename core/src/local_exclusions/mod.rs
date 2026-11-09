@@ -115,7 +115,11 @@ pub(crate) fn bootstrap(common: &Path) -> Result<()> {
         .into_iter()
         .filter(|line| line.starts_with('/'))
         .collect();
-    for rule in ["/.macc/persistent/", "/.macc/worktree/"] {
+    for rule in [
+        "/.macc/persistent/",
+        "/.macc/worktree/",
+        "/.macc/integration-owner",
+    ] {
         if !user.lines().any(|line| line == rule) {
             rules.insert(rule.into());
         }
@@ -233,6 +237,7 @@ pub(crate) fn reconcile(paths: &ProjectPaths) -> Result<Vec<String>> {
     selected.extend([
         (".macc/persistent".into(), true),
         (".macc/worktree".into(), true),
+        (".macc/integration-owner".into(), false),
     ]);
     // A rule can be omitted only if every checkout is already covered by user policy.
     let mut covered_everywhere: BTreeSet<_> = selected.iter().cloned().collect();

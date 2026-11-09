@@ -93,14 +93,19 @@ pub(crate) fn idle_guards(root: &Path) -> Result<Vec<crate::fs_lock::AdvisoryLoc
         return Ok(Vec::new());
     }
     let directory = prepare(root)?;
-    ["controller.lock", "mutation.lock", "integration.lock"]
-        .into_iter()
-        .map(|name| {
-            crate::fs_lock::AdvisoryLock::acquire(
-                &directory.join(name),
-                std::time::Duration::ZERO,
-                "MACC clear (stop active state users first)",
-            )
-        })
-        .collect()
+    [
+        "controller.lock",
+        "mutation.lock",
+        "integration.lock",
+        "worktree-roles.lock",
+    ]
+    .into_iter()
+    .map(|name| {
+        crate::fs_lock::AdvisoryLock::acquire(
+            &directory.join(name),
+            std::time::Duration::ZERO,
+            "MACC clear (stop active state users first)",
+        )
+    })
+    .collect()
 }

@@ -206,6 +206,16 @@ pub fn reconcile_human_gates(
     subject_digest: &dyn Fn(&str) -> Option<String>,
     ledger: &dyn Fn(&str) -> Vec<ApprovalRecord>,
 ) -> Vec<HumanGateTransition> {
+    reconcile_gates(registry, now, subject_digest, ledger, &Default::default())
+}
+
+fn reconcile_gates(
+    registry: &mut TaskRegistry,
+    now: &str,
+    subject_digest: &dyn Fn(&str) -> Option<String>,
+    ledger: &dyn Fn(&str) -> Vec<ApprovalRecord>,
+    delegated: &std::collections::BTreeSet<String>,
+) -> Vec<HumanGateTransition> {
     // Tasks delivered by earlier PRD lots satisfy dependencies too, exactly as
     // they do for the dispatcher.
     let mut satisfied = crate::coordinator::task_selector::satisfied_dependency_ids(registry);
@@ -226,6 +236,26 @@ pub fn reconcile_human_gates(
         let subject = gate.subject_task.clone().unwrap_or_default();
         let digest = subject_digest(&subject);
         let decisions = ledger(&task.id);
+        let human_veto = evaluate_gate(&gate, deps_ok, digest.as_deref(), &decisions, now)
+            .is_some_and(|eval| {
+                eval.state == WorkflowState::Rejected
+                    || eval.status == ApprovalStatus::ChangesRequested
+            });
+        if deps_ok && delegated.contains(&task.id) && !human_veto {
+            task.set_workflow_state(WorkflowState::Approved);
+            task.task_runtime.approval = None;
+            if task.task_runtime.last_error_code.as_deref() == Some("E909") {
+                task.task_runtime.clear_last_error_details();
+            }
+            task.task_runtime.set_status(RuntimeStatus::Idle);
+            satisfied.insert(task.id.clone());
+            if previous != Some(WorkflowState::Approved) {
+                task.touch_state_changed(now);
+                transitions.push(HumanGateTransition { task_id:task.id.clone(),event:"gate_delegated",severity:"info",detail:format!("Approval of {subject} at {} derives from verified delegated authority, not human votes",digest.as_deref().unwrap_or("unknown")) });
+            }
+            continue;
+        }
+        task.task_runtime.extra.remove("delegated_gate_resolution");
         let Some(eval) = evaluate_gate(&gate, deps_ok, digest.as_deref(), &decisions, now) else {
             // Dependencies regressed or never met: an open gate must not stay
             // approved on a subject that is no longer delivered.
@@ -334,6 +364,11 @@ pub fn reconcile_human_gates(
         } else {
             runtime.set_last_error_details("E909", "approval", eval.note.clone());
         }
+        if eval.state == WorkflowState::Approved {
+            satisfied.insert(task.id.clone());
+        } else {
+            satisfied.remove(&task.id);
+        }
     }
     transitions
 }
@@ -419,11 +454,13 @@ fn evaluate_human_gates_for_project(
         storage.gate_decisions_by_task()?
     };
     let branch = reference_branch(repo_root);
-    Ok(reconcile_human_gates(
+    let delegated = crate::coordinator::decisions::verified_delegated_gates(repo_root, registry)?;
+    Ok(reconcile_gates(
         registry,
         now,
         &|subject| subject_revision(repo_root, &branch, subject),
         &|task_id| ledger.get(task_id).cloned().unwrap_or_default(),
+        &delegated,
     ))
 }
 

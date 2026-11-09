@@ -74,6 +74,7 @@ pub(crate) fn apply(
             "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
         )));
     }
+    crate::coordinator::worktree_recovery::recover_task(&paths.root, task)?;
     // A successful unblock must not immediately redispatch a stale checkpoint.
     crate::session_store::checkpoints::recovery::ensure_task_ready(&paths.root, task_id)?;
     // Reconcile before changing task state. A conflict preserves the original
@@ -81,7 +82,7 @@ pub(crate) fn apply(
     let repaired_base = if task.has_worktree_attached() {
         let reference =
             crate::config::CoordinatorConfigResolved::resolve(coordinator_cfg).reference_branch;
-        Some(crate::coordinator::repair_handoff::reconcile(
+        Some(crate::coordinator::repair_handoff::reconcile_task(
             &paths.root,
             task,
             &reference,
@@ -100,7 +101,11 @@ pub(crate) fn apply(
                 tracking_id: block.tracking_id.clone(),
             });
     }
-    let next_state = if crate::coordinator::phase_diagnostics::retained_review_protocol(task) {
+    let next_state = if task.task_runtime.last_error_origin.as_deref() == Some("worktree_ownership")
+        || task.task_runtime.last_error_code.as_deref() == Some("DM_CONTEXT")
+    {
+        crate::coordinator::retained_reconciliation::resume_state(&paths.root, task)
+    } else if crate::coordinator::phase_diagnostics::retained_review_protocol(task) {
         WorkflowState::Reviewing
     } else {
         WorkflowState::Todo

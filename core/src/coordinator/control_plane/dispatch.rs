@@ -233,6 +233,10 @@ fn resume_attached_worktree(
     if !path.join(".git").exists() {
         return Ok(None);
     }
+    let _roles = crate::coordinator::worktree_roles::lock(repo_root)?;
+    if crate::coordinator::worktree_roles::reserved(&path) {
+        return Err(crate::coordinator::worktree_roles::conflict(format!("Task {task_id} retains reserved path {}; recover its worktree ownership before resuming", path.display())));
+    }
     if !ensure_expected_worktree_branch(&path, &resume.branch).unwrap_or(false) {
         return Ok(None);
     }
@@ -372,6 +376,7 @@ pub(super) async fn acquire_worktree_for_dispatch(
         });
     }
 
+    let _roles = crate::coordinator::worktree_roles::lock(repo_root)?;
     let create_spec = crate::WorktreeCreateSpec {
         slug: crate::coordinator::helpers::next_free_worker_slug(repo_root, &task.tool)?,
         tool: task.tool.clone(),

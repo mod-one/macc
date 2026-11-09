@@ -206,3 +206,27 @@ processes; real provider installation remains opt-in. Local HTTP fixtures own an
 join their server threads, bound request reads and I/O, and serve multiple requests
 without leaking an accept loop. Tests should not depend on tools or cached GitHub
 availability installed on the developer's machine.
+
+
+## Reserved scratch ownership and phase-preserving recovery
+
+Integration scratch is never a performer candidate. Both allocation and merge
+preparation enforce this rule under shared role locks; see
+[worktree ownership and recovery](PERSISTENT_PROJECT_STATE.md#disjoint-worktree-roles-and-retained-collision-recovery).
+A local retained-work conflict blocks that task instead of aborting decision
+refresh for the whole registry. Dependency diagnostics follow the current root
+cause and unchanged diagnostics are deduplicated.
+
+Recovery returns to the retained test, correction, review or publication phase.
+A merge resumes directly only if the existing exact-commit/compliance fence
+passes. Otherwise MACC schedules a mandatory independent review, even when
+ordinary optional review is disabled or its correction-cycle budget is spent.
+This freshness refresh does not consume an additional correction cycle.
+Changed content never inherits a rewritten `reviewed_commit`.
+
+Approval gates under explicit `never_ask` policy derive authority from the
+resolved durable decision bound to the exact subject revision, gate contract and
+current policy. The ledger evaluator verifies the same authority rather than
+alternating between delegated approval and zero human quorum. Revocation,
+subject/policy changes and a live verified human rejection or changes-request
+invalidate delegation. Delegation never creates human votes.

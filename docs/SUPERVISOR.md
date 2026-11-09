@@ -358,3 +358,15 @@ within 15 seconds (for example, tasks still wait for a quota), MACC retains the
 restart PID and reports that resumption is unverified. It does not announce recovery.
 Clients also read timestamp-scoped structured coordinator error logs when the
 SQLite event mirror has no failure, preserving causes such as E902 in the TUI.
+
+
+## Integration ownership product defects
+
+An integration checkout carrying performer ownership is a MACC product defect,
+not permission for the application supervisor to reset it or patch the installed
+runner. The supervisor reports the defect and preserves application work.
+After the corrected MACC build is installed, the shared retained-task handoff
+supports journaled recovery of a provable idle collision and uses normal
+independent-review/publication checks. Unknown ownership remains escalated.
+Application-specific validation-script recommendations must be assessed
+separately; they do not justify weakening MACC review receipts.

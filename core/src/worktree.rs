@@ -61,6 +61,19 @@ pub fn create_worktrees(
     }
 
     let base_dir = root.join(&spec.dir);
+    let pool = root.join(".macc/worktree");
+    if crate::coordinator::worktree_roles::same_path(&base_dir, &pool) {
+        for idx in 1..=spec.count {
+            let id = if spec.count == 1 {
+                spec.slug.clone()
+            } else {
+                format!("{}-{:02}", spec.slug, idx)
+            };
+            if crate::coordinator::worktree_roles::reserved(&base_dir.join(id)) {
+                return Err(crate::coordinator::worktree_roles::conflict("This worktree name is reserved for MACC infrastructure; choose a performer name"));
+            }
+        }
+    }
     std::fs::create_dir_all(&base_dir).map_err(|e| MaccError::Io {
         path: base_dir.to_string_lossy().into(),
         action: "create worktree base dir".into(),

@@ -5,7 +5,7 @@ use std::path::Path;
 
 pub const RESUME_KEY: &str = "repair_resume";
 
-fn git(path: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git(path: &Path, args: &[&str]) -> Result<String> {
     let out = crate::git::run_git_output_mapped(path, args, "reconcile retained task work")?;
     if !out.status.success() {
         return Err(MaccError::Validation(format!(
@@ -29,6 +29,18 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
 /// Conflicts are computed off-worktree: the worker remains untouched on rejection.
 /// Successful reconciliation keeps the branch and leaves unfinished work uncommitted.
 pub fn reconcile(root: &Path, task: &Task, reference: &str) -> Result<String> {
+    let _roles = super::worktree_roles::lock(root)?;
+    reconcile_inner(root, task, reference)
+}
+
+/// Supported recovery used by coordinator sync, unblock and supervisor repair.
+pub fn reconcile_task(root: &Path, task: &mut Task, reference: &str) -> Result<String> {
+    let _locks = super::worktree_roles::retained_locks(root, task)?;
+    super::worktree_recovery::recover_reserved(root, task)?;
+    reconcile_inner(root, task, reference)
+}
+
+fn reconcile_inner(root: &Path, task: &Task, reference: &str) -> Result<String> {
     let path = task.worktree_path().map(Path::new).ok_or_else(|| {
         MaccError::Validation(format!("Task {} has no retained worktree", task.id))
     })?;
@@ -47,12 +59,16 @@ pub fn reconcile(root: &Path, task: &Task, reference: &str) -> Result<String> {
             source,
         })?;
     if canonical.parent() != Some(pool.as_path())
-        || crate::git::git_common_dir(path)? != crate::git::git_common_dir(root)?
+        || crate::git::git_common_dir(path)?
+            .canonicalize()
+            .map_err(crate::persistent::error)?
+            != crate::git::git_common_dir(root)?
+                .canonicalize()
+                .map_err(crate::persistent::error)?
         || git(path, &["branch", "--show-current"])? != branch
+        || super::worktree_roles::reserved(path)
     {
-        return Err(MaccError::Validation(
-            "Retained worktree ownership changed; refusing reconciliation".into(),
-        ));
+        return Err(super::worktree_roles::conflict(format!("Retained worktree ownership changed; task={} claim={} path={} expected_branch={} actual_branch={}; refusing reconciliation; recover ownership before retrying",task.id,task.task_runtime.claim_id.as_deref().unwrap_or("-"),path.display(),branch,git(path,&["rev-parse","--abbrev-ref","HEAD"])?)));
     }
     if task
         .task_runtime
