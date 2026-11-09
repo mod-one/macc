@@ -211,6 +211,10 @@ pub struct CoordinatorRuntimeEvent {
 }
 
 pub struct CoordinatorRunState {
+    pub(crate) phase_job: Option<super::control_plane::phase_job::PhaseJob>,
+    pub(crate) activity_wake: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) pending_job_event: Option<CoordinatorJobEvent>,
+    pub(crate) pending_merge_event: Option<CoordinatorMergeEvent>,
     pub active_jobs: HashMap<String, CoordinatorJob>,
     pub join_set: tokio::task::JoinSet<()>,
     pub event_tx: tokio::sync::mpsc::UnboundedSender<CoordinatorJobEvent>,
@@ -326,12 +330,39 @@ pub trait PhaseExecutor {
 }
 
 impl CoordinatorRunState {
+    /// Wait without consuming a completion: the normal monitors remain the
+    /// single writers of task outcomes. Receives are cancellation safe.
+    pub(crate) async fn wait_for_activity(&mut self, timeout: std::time::Duration) {
+        if self.pending_job_event.is_some()
+            || self.pending_merge_event.is_some()
+            || self.phase_job.as_ref().is_some_and(|job| job.is_finished())
+        {
+            return;
+        }
+        tokio::select! {
+            event = self.event_rx.recv() => { self.pending_job_event = event; }
+            event = self.merge_event_rx.recv() => { self.pending_merge_event = event; }
+            _ = async {
+                match self.phase_job.as_mut() {
+                    Some(job) => job.wait().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+            _ = self.activity_wake.notified() => {}
+            _ = tokio::time::sleep(timeout) => {}
+        }
+    }
+
     pub fn new() -> Self {
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(32);
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (merge_event_tx, merge_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (runtime_event_bus_tx, runtime_event_bus_rx) = tokio::sync::broadcast::channel(4096);
         Self {
+            phase_job: None,
+            activity_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            pending_job_event: None,
+            pending_merge_event: None,
             control_tx,
             control_rx,
             active_jobs: HashMap::new(),
@@ -1200,6 +1231,7 @@ pub fn spawn_performer_job(
     coordinator_epoch: i64,
     // Extra env vars to forward (e.g. MACC_MODEL_TIER, MACC_REASONING_DEPTH).
     extra_env: &[(&str, String)],
+    exit_wake: std::sync::Arc<tokio::sync::Notify>,
 ) -> Result<Option<i64>> {
     let effective_ipc_addr = performer_ipc_addr
         .filter(|value| !value.trim().is_empty())
@@ -1334,8 +1366,10 @@ pub fn spawn_performer_job(
                 Err(err) => (false, err.to_string(), false),
             }
         };
+        // Wake on the OS exit itself, before bounded IPC reconciliation.
+        exit_wake.notify_one();
         let reported_success = success;
-        let completion_details=read_last_completion_details(&repo_root_owned,&task_id_owned,&event_source_owned);
+        let completion_details=read_last_completion_details(&repo_root_owned,&task_id_owned,&event_source_owned).await;
         let mut completion_details_source=completion_details.as_ref().map(|_|"sqlite".to_string());
         let completion_details = match crate::session_store::decision_wait::waiting_for_invocation(
             &repo_root_owned, &task_id_owned, &event_source_owned,
@@ -1447,19 +1481,22 @@ fn read_last_error_details(
     read_last_error_details_from_sqlite(repo_root, task_id, event_source)
 }
 
-fn read_last_completion_details(
+async fn read_last_completion_details(
     repo_root: &Path,
     task_id: &str,
     event_source: &str,
 ) -> Option<CompletionDetails> {
-    // Retry a few times to handle the race where the IPC handler has not yet
-    // committed the phase_result event to SQLite when the monitor checks.
-    for attempt in 0..3u8 {
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+    // Preserve the existing four-second IPC reconciliation window, but
+    // check early and never block a runtime thread or the monitoring loop.
+    for (attempt, delay_ms) in [0, 50, 100, 200, 400, 800, 1000, 1000, 450]
+        .into_iter()
+        .enumerate()
+    {
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
         if let Some(details) =
-            read_last_completion_details_once(repo_root, task_id, event_source, attempt)
+            read_last_completion_details_once(repo_root, task_id, event_source, attempt as u8)
         {
             return Some(details);
         }

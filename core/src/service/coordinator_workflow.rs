@@ -2650,6 +2650,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         &claim_id,
         epoch,
         &[], // run-cycle path: routing env not computed here
+        state.activity_wake.clone(),
     )?;
     state.active_jobs.insert(
         task_id.to_string(),

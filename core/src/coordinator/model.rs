@@ -859,7 +859,13 @@ impl TaskRegistry {
         for task in &self.tasks {
             if !matches!(
                 task.state.as_str(),
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
+                "claimed"
+                    | "in_progress"
+                    | "testing"
+                    | "reviewing"
+                    | "pr_open"
+                    | "changes_requested"
+                    | "queued"
             ) {
                 continue;
             }
@@ -1026,6 +1032,8 @@ impl Task {
             Some(
                 WorkflowState::Claimed
                     | WorkflowState::InProgress
+                    | WorkflowState::Testing
+                    | WorkflowState::Reviewing
                     | WorkflowState::PrOpen
                     | WorkflowState::ChangesRequested
                     | WorkflowState::Queued

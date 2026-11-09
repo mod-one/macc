@@ -145,6 +145,7 @@ pub(super) async fn launch_performer(
         &claim.claim_id,
         epoch,
         &routing_env,
+        state.activity_wake.clone(),
     )
     .map_err(|error| {
         super::failure::record(repo_root, claim, error, logger).unwrap_or_else(|error| error)

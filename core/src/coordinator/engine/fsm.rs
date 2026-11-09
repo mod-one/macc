@@ -1774,6 +1774,9 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                         .note("- Force stop requested. Terminating all performers...".to_string());
                 }
 
+                if let Some(mut job) = self.run_state.phase_job.take() {
+                    job.cancel_and_wait().await;
+                }
                 let mut pids_to_kill = std::collections::HashSet::new();
                 if let Ok(db_pids) = sqlite.get_running_task_pids() {
                     for (task_id, pid) in db_pids {
@@ -1861,7 +1864,8 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                     ctrl.drain_snapshot_json.as_deref(),
                     &registry,
                     !self.run_state.active_jobs.is_empty()
-                        || !self.run_state.active_merge_jobs.is_empty(),
+                        || !self.run_state.active_merge_jobs.is_empty()
+                        || self.run_state.phase_job.is_some(),
                 )?;
                 if !active_draining_tasks_left {
                     if let Some(log) = self.logger {
@@ -1878,6 +1882,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             } else if ctrl.mode == "graceful_stopping"
                 && self.run_state.active_jobs.is_empty()
                 && self.run_state.active_merge_jobs.is_empty()
+                && self.run_state.phase_job.is_none()
             {
                 if let Some(log) = self.logger {
                     let _ = log.note("- Graceful stopping completed. Exiting.".to_string());
@@ -2047,6 +2052,9 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                 let _ = log.note(format!("- Sent TERM to active task={} pid={}", tid, pid));
             }
         }
+        if let Some(mut job) = self.run_state.phase_job.take() {
+            job.cancel_and_wait().await;
+        }
         self.run_state.merge_join_set.abort_all();
         self.run_state.active_merge_jobs.clear();
         set_task_paused_for_merge(self.repo_root, task_id, reason)?;
@@ -2078,6 +2086,9 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn on_integrity_pause(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        if let Some(mut job) = self.run_state.phase_job.take() {
+            job.cancel_and_wait().await;
+        }
         write_coordinator_pause_file(self.repo_root, task_id, "dev", reason)?;
         if let Some(log) = self.logger {
             let _ = log.note(format!(
@@ -2157,7 +2168,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         let counts = CoordinatorCounts {
             total,
             todo,
-            active,
+            active: if self.run_state.phase_job.is_some() {
+                active.max(1)
+            } else {
+                active
+            },
             blocked,
             merged,
             waiting_approval: snapshot.registry.waiting_approval_count()
@@ -2178,7 +2193,9 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         } else {
             2000
         };
-        tokio::time::sleep(Duration::from_millis(ms)).await;
+        self.run_state
+            .wait_for_activity(Duration::from_millis(ms))
+            .await;
         Ok(())
     }
 
@@ -2190,6 +2207,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             && counts.active == 0
             && self.run_state.active_jobs.is_empty()
             && self.run_state.active_merge_jobs.is_empty()
+            && self.run_state.phase_job.is_none()
         {
             return Some(format!(
                 "Coordinator stopped: dispatch limit reached (dispatched={}, max_dispatch={}). \
@@ -2690,6 +2708,10 @@ pub(crate) async fn run_single_prd_control_plane(
         }
     };
 
+    // Cancels an outstanding phase even on graceful signal or early failure.
+    if let Some(mut job) = backend.run_state.phase_job.take() {
+        job.cancel_and_wait().await;
+    }
     let mut is_clean_exit = false;
     let mut final_status = "success".to_string();
     let is_terminal_blocked = matches!(

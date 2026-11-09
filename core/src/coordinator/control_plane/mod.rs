@@ -5,6 +5,7 @@ mod diagnostic_delivery;
 mod dispatch;
 mod merge_gate;
 mod phase_handoff;
+pub(crate) mod phase_job;
 mod phase_runner;
 #[cfg(test)]
 mod quota_tests;

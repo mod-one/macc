@@ -22,7 +22,7 @@ use std::time::Instant;
 use super::dispatch::{dispatch_limit_reached, run_dispatch_pipeline, DispatchPipelineContext};
 use super::phase_runner::{
     append_task_lifecycle_event_with_session, refresh_task_active_session_id_in_registry,
-    task_active_session_id_from_registry, NativePhaseExecutor,
+    task_active_session_id_from_registry,
 };
 use super::sanitize::{prepare_clean_worktree, SanitizeOptions};
 #[cfg(test)]
@@ -718,6 +718,30 @@ pub async fn advance_tasks_native(
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
 
+    if let Some(job) = state.phase_job.as_ref() {
+        let current = TaskRegistry::from_value(&registry)?;
+        if !current
+            .find_task(&job.task.id)
+            .is_some_and(|task| job.matches_task(task))
+        {
+            let mut job = state.phase_job.take().expect("active phase exists");
+            job.cancel_and_wait().await;
+            job.drain_logs(logger);
+            append_coordinator_event(
+                repo_root,
+                "phase_result_stale",
+                &job.task.id,
+                job.mode,
+                "discarded",
+                "Task state, branch or worktree changed during phase; worker cancelled",
+            )?;
+            registry = crate::coordinator::state::coordinator_state_registry_load(
+                repo_root,
+                &BTreeMap::new(),
+            )?;
+        }
+    }
+
     // --- Emit skipped phase events if phases are disabled ---
     let mut registry_typed = TaskRegistry::from_value(&registry)?;
     let mut skipped_phases_changed = false;
@@ -757,6 +781,27 @@ pub async fn advance_tasks_native(
         max_review_cycles,
         &cfg.phases,
     )?;
+    if let Some(job) = state.phase_job.as_mut() {
+        job.drain_logs(logger);
+        actions.retain(|action| match action {
+            coordinator_engine::AdvanceTaskAction::RunPhase { task_id, .. }
+            | coordinator_engine::AdvanceTaskAction::QueueMerge { task_id, .. }
+            | coordinator_engine::AdvanceTaskAction::BlockReviewBudget { task_id }
+            | coordinator_engine::AdvanceTaskAction::BlockNoBranch { task_id } => {
+                task_id != &job.task.id
+            }
+        });
+        if job.is_finished() {
+            actions.insert(
+                0,
+                coordinator_engine::AdvanceTaskAction::RunPhase {
+                    task_id: job.task.id.clone(),
+                    mode: job.mode,
+                    transition: job.transition,
+                },
+            );
+        }
+    }
     if crate::coordinator::decisions::policy(repo_root)?.enabled {
         for action in &mut actions {
             if let coordinator_engine::AdvanceTaskAction::QueueMerge { task_id, .. } = action {
@@ -791,6 +836,7 @@ pub async fn advance_tasks_native(
             let _ = log.note(format!("- Advance started (actions={})", actions.len()));
         }
     }
+    let mut pending_phase = None;
     for action in actions {
         match action {
             coordinator_engine::AdvanceTaskAction::RunPhase {
@@ -809,24 +855,48 @@ pub async fn advance_tasks_native(
                             ))
                         })?;
 
-                let executor = NativePhaseExecutor { repo_root, logger };
+                if state.phase_job.is_none() {
+                    // Launch only after the registry snapshot is committed:
+                    // context preparation before worker execution is itself a writer.
+                    if pending_phase.is_none() {
+                        pending_phase = Some((task_snapshot, mode, transition));
+                        progressed = true;
+                    }
+                    continue;
+                }
+                if !state
+                    .phase_job
+                    .as_ref()
+                    .is_some_and(|job| job.task.id == task_id && job.is_finished())
+                {
+                    continue;
+                }
+                let mut job = state.phase_job.take().expect("finished phase exists");
+                let outcome = job.finish().await;
+                job.drain_logs(logger);
+                // Never apply a result to a replacement worktree/branch or a
+                // task changed by the operator while the phase was running.
+                if !job.matches_task(&task_snapshot) {
+                    append_coordinator_event(
+                        repo_root,
+                        "phase_result_stale",
+                        &task_id,
+                        mode,
+                        "discarded",
+                        "Task state, branch or worktree changed during phase; result not applied",
+                    )?;
+                    continue;
+                }
                 if mode == "review" {
-                    // block_in_place: the phase runner is synchronous blocking I/O (spawns
-                    // an external process and waits). Running it directly in the async
-                    // executor would seize the tokio thread for minutes, preventing heartbeat
-                    // monitoring, merge detection, and rate-limit timers from firing.
-                    let reviewed_commit = crate::git::head_commit(Path::new(
-                        task_snapshot.worktree_path().unwrap_or_default(),
-                    ))
-                    .ok();
-                    let mut review_result = tokio::task::block_in_place(|| {
-                        coordinator_runtime::run_review_phase(
-                            &executor,
-                            &task_snapshot,
-                            coordinator_tool_override,
-                            phase_runner_max_attempts,
-                        )
-                    })?;
+                    let reviewed_commit = job.reviewed_commit.clone();
+                    let mut review_result = match outcome? {
+                        super::phase_job::PhaseOutcome::Review(result) => result,
+                        _ => {
+                            return Err(MaccError::Validation(
+                                "Unexpected phase worker outcome".into(),
+                            ))
+                        }
+                    };
                     if matches!(review_result, Ok(coordinator_engine::ReviewVerdict::Ok))
                         && crate::coordinator::decisions::policy(repo_root)?.enabled
                     {
@@ -911,15 +981,15 @@ pub async fn advance_tasks_native(
                         }
                     }
                 } else {
-                    match tokio::task::block_in_place(|| {
-                        coordinator_runtime::run_phase(
-                            &executor,
-                            &task_snapshot,
-                            mode,
-                            coordinator_tool_override,
-                            phase_runner_max_attempts,
-                        )
-                    })? {
+                    let result = match outcome? {
+                        super::phase_job::PhaseOutcome::Other(result) => result,
+                        _ => {
+                            return Err(MaccError::Validation(
+                                "Unexpected phase worker outcome".into(),
+                            ))
+                        }
+                    };
+                    match result {
                         Ok(_) => coordinator_engine::apply_phase_outcome_in_registry(
                             &mut registry,
                             &task_id,
@@ -1115,6 +1185,17 @@ pub async fn advance_tasks_native(
         &BTreeMap::new(),
         &registry,
     )?;
+    if let Some((task, mode, transition)) = pending_phase {
+        state.phase_job = Some(super::phase_job::PhaseJob::start(
+            repo_root.to_path_buf(),
+            task,
+            mode,
+            transition,
+            coordinator_tool_override.map(str::to_owned),
+            phase_runner_max_attempts,
+            state.activity_wake.clone(),
+        ));
+    }
     Ok(coordinator_engine::AdvanceResult {
         progressed,
         blocked_merge,
@@ -1224,7 +1305,12 @@ pub async fn monitor_active_jobs_native(
     let retry_codes = resolve_error_code_retry_list(env_cfg, coordinator);
     let retry_max = resolve_error_code_retry_max(env_cfg, coordinator);
     loop {
-        match state.event_rx.try_recv() {
+        match state
+            .pending_job_event
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| state.event_rx.try_recv())
+        {
             Ok(evt) => {
                 if let Some(log) = logger {
                     let _ = log.note(format!(
@@ -1647,6 +1733,7 @@ pub async fn monitor_active_jobs_native(
                         &claim_id,
                         epoch,
                         &[], // retry preserves previous performer env
+                        state.activity_wake.clone(),
                     )?;
                     state.active_jobs.insert(
                         task_id,
@@ -2385,7 +2472,12 @@ pub async fn monitor_merge_jobs_native(
 ) -> Result<Option<(String, String)>> {
     let mut blocked_merge: Option<(String, String)> = None;
     loop {
-        match state.merge_event_rx.try_recv() {
+        match state
+            .pending_merge_event
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| state.merge_event_rx.try_recv())
+        {
             Ok(evt) => {
                 let maybe_job = state.active_merge_jobs.remove(&evt.task_id);
                 let elapsed = maybe_job

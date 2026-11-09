@@ -9,6 +9,16 @@ use std::path::Path;
 pub(super) struct NativePhaseExecutor<'a> {
     pub(super) repo_root: &'a Path,
     pub(super) logger: Option<&'a dyn CoordinatorLog>,
+    pub(super) cancelled: Option<&'a std::sync::atomic::AtomicBool>,
+    pub(super) prepared_context: Option<&'a PreparedPhaseContext>,
+}
+
+pub(super) struct PreparedPhaseContext {
+    pub attempt: String,
+    pub context: Option<(
+        crate::coordinator::decisions::ContextPackage,
+        std::path::PathBuf,
+    )>,
 }
 
 /// Append a line to the performer log file for this task.
@@ -241,6 +251,83 @@ fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
         });
 }
 
+/// Drain both pipes while waiting, so large tool output cannot stall exit.
+/// Cancellation is owned by the phase job; never kill a PID loaded from state.
+fn phase_output(
+    command: &mut std::process::Command,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let mut child = command.spawn()?;
+    std::thread::scope(|scope| {
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let out = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let err = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let status = loop {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                }
+                let _ = child.kill();
+                break child.wait();
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(error) => {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(error);
+                }
+            }
+        }?;
+        // A runner can exit while a descendant still holds an output pipe.
+        // Keep cancellation responsive during pipe drain as well as wait().
+        while !out.is_finished() || !err.is_finished() {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let stdout = out
+            .join()
+            .map_err(|_| std::io::Error::other("phase stdout reader panicked"))??;
+        let stderr = err
+            .join()
+            .map_err(|_| std::io::Error::other("phase stderr reader panicked"))??;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+}
+
 impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
     fn run_phase(
         &self,
@@ -314,24 +401,31 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             )));
         }
         let mut prompt = coordinator_runtime::build_phase_prompt(mode, task_id, &phase_tool, task)?;
-        let decision_attempt = uuid::Uuid::new_v4().to_string();
-        let decision_context = match crate::coordinator::decisions::prepare_context(
-            self.repo_root,
-            task_id,
-            mode,
-            &worktree,
-            &decision_attempt,
-        ) {
-            Ok(context) => context,
-            Err(error)
-                if error
-                    .to_string()
-                    .contains(crate::coordinator::decisions::CONTEXT_BUDGET_CODE)
-                    || error.to_string().contains("DM_PENDING:") =>
-            {
-                return Ok(Err(format!("E903: {error}")))
+        let decision_attempt = self
+            .prepared_context
+            .map(|prepared| prepared.attempt.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let decision_context = if let Some(prepared) = self.prepared_context {
+            prepared.context.clone()
+        } else {
+            match crate::coordinator::decisions::prepare_context(
+                self.repo_root,
+                task_id,
+                mode,
+                &worktree,
+                &decision_attempt,
+            ) {
+                Ok(context) => context,
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains(crate::coordinator::decisions::CONTEXT_BUDGET_CODE)
+                        || error.to_string().contains("DM_PENDING:") =>
+                {
+                    return Ok(Err(format!("E903: {error}")))
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         };
         if let Some((context, _)) = &decision_context {
             prompt.push_str(&context.render());
@@ -413,6 +507,12 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         };
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
+            if self
+                .cancelled
+                .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Ok(Err("phase cancelled by coordinator".into()));
+            }
             append_performer_log(
                 &worktree,
                 task_id,
@@ -486,7 +586,13 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .and_then(|(_, v)| v)
                 .map(|v| v.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let output = command.output();
+            let output = phase_output(&mut command, self.cancelled);
+            if self
+                .cancelled
+                .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Ok(Err("phase cancelled by coordinator".into()));
+            }
             let Ok(out) = output else {
                 last_reason = format!(
                     "phase '{}' failed to execute runner '{}'",
@@ -740,7 +846,12 @@ pub fn run_phase_for_task_native(
     max_attempts: usize,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<std::result::Result<String, String>> {
-    let executor = NativePhaseExecutor { repo_root, logger };
+    let executor = NativePhaseExecutor {
+        repo_root,
+        logger,
+        cancelled: None,
+        prepared_context: None,
+    };
     coordinator_runtime::run_phase(
         &executor,
         task,
@@ -757,6 +868,121 @@ pub fn run_review_phase_for_task_native(
     max_attempts: usize,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<std::result::Result<coordinator_engine::ReviewVerdict, String>> {
-    let executor = NativePhaseExecutor { repo_root, logger };
+    let executor = NativePhaseExecutor {
+        repo_root,
+        logger,
+        cancelled: None,
+        prepared_context: None,
+    };
     coordinator_runtime::run_review_phase(&executor, task, coordinator_tool_override, max_attempts)
+}
+
+#[cfg(all(test, unix))]
+mod cancellation_tests {
+    use super::phase_output;
+    use std::{
+        process::Command,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    #[test]
+    fn phase_process_cancellation_reaps_child_and_descendants() {
+        let root = tempfile::tempdir().unwrap();
+        let pids = root.path().join("pids");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = cancelled.clone();
+        let pid_file = pids.clone();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg("sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait")
+                .arg("phase-test")
+                .arg(pid_file);
+            phase_output(&mut command, Some(&cancel)).unwrap()
+        });
+        for _ in 0..100 {
+            if pids.exists()
+                && !std::fs::read_to_string(&pids)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pids = std::fs::read_to_string(pids).unwrap();
+        cancelled.store(true, Ordering::Release);
+        let output = worker.join().unwrap();
+        assert!(!output.status.success());
+        let parent: i32 = pids.split_whitespace().next().unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(parent, 0) }, -1, "child must be reaped");
+        let child: i32 = pids.split_whitespace().nth(1).unwrap().parse().unwrap();
+        // A descendant can briefly remain a zombie until the system reaps it;
+        // neither a live sleeper nor an output pipe may outlive cancellation.
+        let stopped = || {
+            let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).unwrap_or_default();
+            stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z")
+        };
+        for _ in 0..100 {
+            if stopped() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            stopped(),
+            "descendant must have received group cancellation"
+        );
+    }
+
+    #[test]
+    fn cancellation_also_interrupts_pipe_drain_after_the_runner_exits() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let file = parent.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = cancelled.clone();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg("sleep 30 & printf '%s' \"$$\" > \"$1\"; exit 0")
+                .arg("phase-test")
+                .arg(file);
+            phase_output(&mut command, Some(&cancel)).unwrap()
+        });
+        for _ in 0..100 {
+            let pid = std::fs::read_to_string(&parent)
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok());
+            if pid.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == -1) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancelled.store(true, Ordering::Release);
+        let (done, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(worker.join().unwrap());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("cancellation must interrupt inherited output pipes");
+    }
+
+    #[test]
+    fn phase_output_drains_large_stdout_and_stderr_without_deadlock() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2; exit 7");
+        let output = phase_output(&mut command, None).unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout.len(), 131072);
+        assert_eq!(output.stderr.len(), 131072);
+    }
 }

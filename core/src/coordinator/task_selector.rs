@@ -926,6 +926,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn testing_and_reviewing_keep_capacity_and_worktrees_reserved() {
+        for phase in ["testing", "reviewing"] {
+            let registry = json!({"tasks":[
+                {"id":"VALIDATING","state":phase,"tool":"codex","worktree":{"worktree_path":"/wt/validation"}},
+                {"id":"NEXT","state":"todo","tool":"codex"}
+            ]});
+            let config = TaskSelectorConfig {
+                default_tool: "codex".into(),
+                default_base_branch: "main".into(),
+                max_parallel: 1,
+                ..Default::default()
+            };
+            assert!(
+                select_next_ready_task(&registry, &config).is_none(),
+                "{phase} occupies the configured capacity"
+            );
+            let typed = TaskRegistry::from_value(&registry).unwrap();
+            assert!(typed
+                .active_task_worktree_paths()
+                .contains("/wt/validation"));
+            assert!(!typed.can_reuse_worktree_slot("/wt/validation"));
+        }
+    }
+
+    #[test]
     fn picks_highest_priority_ready_task() {
         let registry = json!({
           "tasks": [
