@@ -248,18 +248,18 @@ enum Commands {
         #[command(subcommand)]
         tool_command: ToolCommands,
     },
-    /// Ask AI tools to update their context files directly in the repo
+    /// Generate native tool context files deterministically from verified project configuration
     Context {
         /// Generate context for a single tool ID
         #[arg(long)]
         tool: Option<String>,
-        /// Additional source files to include in the prompt context
+        /// Existing project source files to reference in the generated context
         #[arg(long = "from")]
         from_files: Vec<String>,
-        /// Preview only; do not run tool commands
+        /// Preview generated context files without writing them
         #[arg(long)]
         dry_run: bool,
-        /// Print generated prompt(s)
+        /// Print rendered context (legacy flag name; no AI prompt is invoked)
         #[arg(long)]
         print_prompt: bool,
     },

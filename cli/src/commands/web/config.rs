@@ -107,32 +107,41 @@ fn render_preview_cards(
     resolved: &ResolvedConfig,
 ) -> macc_core::Result<Vec<ApiStandardsPreviewCard>> {
     let materialized_units = Vec::new();
+    let effective = resolve::with_mandatory_skills(paths, resolved)?;
     let planning_ctx = PlanningContext {
         paths,
-        resolved,
+        resolved: &effective,
         materialized_units: &materialized_units,
     };
     let registry = ToolRegistry::from_inventory();
+    let plan = macc_core::project_context::plan_tools(&planning_ctx, &registry)?;
     let mut cards = Vec::new();
-
-    for tool_id in registry.list_ids() {
-        let Some(adapter) = registry.get(&tool_id) else {
+    for tool_id in &effective.tools.enabled {
+        let Some(adapter) = registry.get(tool_id) else {
             continue;
         };
-        let Some(target) = adapter.context_file_target() else {
-            continue;
-        };
-        let fallback = adapter
-            .context_file_fallback()
-            .unwrap_or_else(|| format!("{target} preview unavailable.\n"));
-        let plan = adapter.plan(&planning_ctx)?;
-        cards.push(ApiStandardsPreviewCard {
-            id: tool_id.clone(),
-            title: format!("{} - {} (rendered)", tool_title(&tool_id), target),
-            content: find_rendered_file(&plan, &target, &fallback),
-        });
+        for target in adapter.context_file_targets(&planning_ctx)? {
+            let fallback = std::fs::read_to_string(paths.root.join(&target))
+                .unwrap_or_else(|_| format!("{target} is not available.\n"));
+            let mut content = find_rendered_file(&plan, &target, &fallback);
+            let warnings: Vec<_> = plan
+                .warnings
+                .iter()
+                .filter(|w| w.contains(&target))
+                .collect();
+            if !warnings.is_empty() {
+                content.push_str("\nGeneration warnings:\n");
+                for warning in warnings {
+                    content.push_str(&format!("- {warning}\n"));
+                }
+            }
+            cards.push(ApiStandardsPreviewCard {
+                id: tool_id.clone(),
+                title: format!("{} - {} (effective)", tool_title(tool_id), target),
+                content,
+            });
+        }
     }
-
     Ok(cards)
 }
 

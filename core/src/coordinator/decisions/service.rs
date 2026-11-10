@@ -325,6 +325,12 @@ impl Store {
         self.verify_artifacts(&plan.id, &request.artifacts)?;
         if request.kind == "intervention" {
             let action=request.intervention.as_ref().ok_or_else(||error("An intervention must explain the unavailable capability, exact action and expected result"))?;
+            if action.source_repair_paths.len() > 16 {
+                return Err(error("At most 16 explicit source repair paths are allowed"));
+            }
+            for path in &action.source_repair_paths {
+                super::source_recovery::validate_source_path(path)?;
+            }
             if action.action.trim().is_empty()
                 || action.inaccessible_reason.trim().is_empty()
                 || action.expected_result.trim().is_empty()

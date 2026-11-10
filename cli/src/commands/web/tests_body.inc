@@ -4140,6 +4140,7 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
     let paths = ProjectPaths::from_root(&root);
     fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
     let mut canonical = CanonicalConfig::default();
+    canonical.tools.enabled=vec!["claude".into(),"codex".into(),"gemini".into(),"agy".into(),"vibe".into()];
     canonical.tools.config.insert(
         "claude".to_string(),
         serde_json::json!({
@@ -4150,7 +4151,7 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
     canonical.tools.config.insert(
         "codex".to_string(),
         serde_json::json!({
-            "rules_enabled": false
+            "rules_enabled": true
         }),
     );
     fs::write(
@@ -4212,17 +4213,17 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
         claude
             .as_str()
             .expect("claude preview")
-            .contains("- **Primary Model**: opus")
+            .contains("MACC deterministic context v2")
     );
     assert!(
         claude
             .as_str()
             .expect("claude preview")
-            .contains("- **Language**: Spanish")
+            .contains("language: Spanish")
     );
     let codex = find_card("codex")["content"].as_str().expect("codex preview");
     assert!(
-        codex.contains("AGENTS.md is not generated when codex.rules_enabled is false."),
+        codex.contains("MACC deterministic context v2") && !codex.contains("`validate`"),
         "unexpected codex preview: {}",
         codex
     );

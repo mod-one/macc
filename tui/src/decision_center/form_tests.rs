@@ -400,3 +400,17 @@ fn polling_a_different_answer_version_cannot_close_the_submitted_form() {
         assert!(c.open, "must correlate answered_version, not just status");
     }
 }
+
+#[test]
+fn blocked_external_is_visible_and_cannot_look_like_a_recorded_answer() {
+    let mut center = intervention();
+    center.current.as_mut().unwrap().status = "blocked_external".into();
+    center.snapshot.as_mut().unwrap()["decisions"] = json!([center.current.clone().unwrap()]);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| center.draw(frame)).unwrap();
+    let text = crate::workspace_tests::text(terminal.backend().buffer());
+    assert!(text.contains("Blocked: prerequisite unavailable"));
+    assert!(text.contains("BLOCKED: external intervention"));
+    assert!(!text.contains("Recorded decision"));
+    assert!(!text.contains("Recorded response"));
+}

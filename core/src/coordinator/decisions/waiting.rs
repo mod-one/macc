@@ -43,6 +43,9 @@ pub fn pending_for_task(
 }
 impl PendingDecision {
     pub fn reason(&self) -> String {
+        if self.status == "blocked_external" {
+            return format!("DM_PENDING: blocked: external intervention required; decision {}: {}. Coordinator must hand off repairable prerequisites to the supervisor; retained work is preserved", self.id, self.question);
+        }
         format!(
             "DM_PENDING: Decision {} ({}) awaits operator resolution: {}",
             self.id, self.status, self.question
@@ -113,4 +116,66 @@ pub fn gate_revision(
     }
     result.sort_by_key(|v| v["id"].as_str().unwrap_or_default().to_owned());
     Ok(result)
+}
+
+/// Only a real human decision keeps an idle engine waiting. External recovery
+/// belongs to a stopped engine and its supervisor, not an endless idle loop.
+pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> usize {
+    if registry.tasks.iter().any(|t| {
+        t.state == "blocked"
+            && t.task_runtime.extra.contains_key("decision_wait")
+            && t.task_runtime
+                .extra
+                .get("decision_wait_status")
+                .and_then(serde_json::Value::as_str)
+                != Some("pending_human")
+    }) {
+        return 0;
+    }
+    registry.waiting_approval_count()
+        + registry
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.task_runtime
+                    .extra
+                    .get("decision_wait_status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("pending_human")
+            })
+            .count()
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    #[test]
+    fn external_prerequisite_cannot_masquerade_as_a_human_approval_wait() {
+        use crate::coordinator::{
+            engine::{ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController},
+            model::TaskRegistry,
+        };
+        let registry = |status: &str| {
+            TaskRegistry::from_value(&serde_json::json!({"tasks":[{"id":"A","state":"blocked","task_runtime":{"decision_wait":"request","decision_wait_status":status}}]})).unwrap()
+        };
+        assert_eq!(human_wait_count(&registry("pending_human")), 1);
+        let blocked = registry("blocked_external");
+        assert_eq!(human_wait_count(&blocked), 0);
+        let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+            timeout: None,
+            max_no_progress_cycles: 5,
+        });
+        let result = controller.on_cycle_counts(
+            CoordinatorCounts {
+                total: 1,
+                todo: 0,
+                active: 0,
+                blocked: 1,
+                merged: 0,
+                waiting_approval: human_wait_count(&blocked),
+            },
+            None,
+        );
+        assert!(result.unwrap_err().to_string().contains("blocked"));
+    }
 }

@@ -38,8 +38,11 @@ pub use secure::broker_available;
 mod presentation;
 mod reconciliation;
 mod runtime;
+mod source_recovery;
 mod waiting;
-pub use waiting::{gate_revision, pending_for_task, refresh_waits, PendingDecision};
+pub use waiting::{
+    gate_revision, human_wait_count, pending_for_task, refresh_waits, PendingDecision,
+};
 mod secure;
 mod service;
 mod store;

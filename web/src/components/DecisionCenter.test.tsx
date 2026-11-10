@@ -117,3 +117,12 @@ it('never treats a pending approval ticket as a recorded answer even if a poll s
  const elsewhere=snapshot();elsewhere.policy=initial.policy;elsewhere.approval_broker_available=true;elsewhere.decisions[0].status='resolved';elsewhere.decisions[0].resolution={text:'Another response',selected_option_id:null,actor:'someone else',origin:'human_secure_approval',recorded_at:'2026-11-07T12:00:00Z',advisory:false};api.get.mockResolvedValue(elsewhere);api.mutate.mockResolvedValue({id:'approval-ticket',status:'pending'});
  fireEvent.click(screen.getByRole('button',{name:'Send answer'}));await waitFor(()=>expect(api.mutate).toHaveBeenCalled());await screen.findByText(/Independent approval requested/);expect(screen.getByRole('dialog')).toBeInTheDocument();expect(screen.queryByText('Response sent.')).not.toBeInTheDocument();expect(sessionStorage.getItem('macc.decisionDrafts')).toContain('My proposed response');
 });
+it('never_ask shows an explicit external block without asking or pretending it was resolved',async()=>{
+ const data=snapshot('never_ask');data.decisions[0].status='blocked_external';data.decisions[0].request.kind='intervention';
+ api.get.mockResolvedValue(data);render(<DecisionCenter/>);
+ expect(await screen.findByText(/Blocked: external intervention or supervisor recovery required/)).toBeInTheDocument();
+ expect(screen.queryByRole('dialog')).not.toBeInTheDocument();expect(api.mutate).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByRole('button',{name:'Decisions, 0 pending'}));
+ expect(await screen.findByText('Blocked: prerequisite unavailable')).toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'Send answer'})).not.toBeInTheDocument();expect(screen.queryByText('Recorded response')).not.toBeInTheDocument();
+});

@@ -660,8 +660,11 @@ mod tests {
 
     #[test]
     fn parse_try_again_at_short_format_future_and_past() {
-        use chrono::Local;
-        let now = Local::now();
+        use chrono::{Local, TimeZone};
+        let now = Local
+            .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+            .single()
+            .unwrap();
         // Short format in future (+1 hour)
         let future = now + chrono::Duration::hours(1);
         let future_text = format!("try again at {}", future.format("%I:%M %p"));

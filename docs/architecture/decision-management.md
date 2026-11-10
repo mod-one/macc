@@ -627,3 +627,43 @@ During SQLite runner shutdown, the provider process group is terminated before
 the EXIT trap waits for the heartbeat that signaled it. The native wait receipt
 is already durable, and session finalization follows provider termination. This
 prevents a nested shell wait from leaving the provider alive on a human gate.
+
+### External prerequisite handoff and supervised source recovery
+
+An idle coordinator waits only for actual `pending_human` decisions and approval
+gates. A `blocked_external`, rejected, expired or other non-human prerequisite is
+not counted as a pending approval. If it prevents all remaining progress, the run
+terminates as blocked, retains its tasks/worktrees and releases engine ownership.
+The supervisor can then diagnose the incident without racing running performers.
+Both clients display the external block explicitly, including in `never_ask`;
+that mode does not fabricate an action or an observed result.
+
+Ordinary missing code should be returned as `precondition_unmet`, with concrete
+source paths and `out_of_scope_fix` evidence when appropriate. The supervisor's
+existing isolated repair process can implement that prerequisite beyond the
+original performer's writable scope, validate it, independently review it and
+publish against the exact reference base before requeuing retained work.
+
+If a source prerequisite needs a durable intervention request, its optional
+`intervention.source_repair_paths` declares up to 16 concrete application source
+paths. These are not physical-action reports. Under explicit `never_ask`
+delegation, enabled repair and independent verification, the supervisor may
+reconcile that exact unresolved revision after publishing a verified repair that
+changes the declared paths. State, secrets, PRDs and generated tool/runtime files
+cannot be treated as application source recovery paths. Configured context and
+PRD/registry paths are also checked against the current project configuration. Mandatory governance,
+approval/authorization, changed contracts and required human response fields still
+prevent automatic reconciliation. A superseded policy or changed decision version
+invalidates recovery.
+
+The receipt records `origin: supervisor_source_repair`, the published commit,
+verification evidence and a native version/decision-epoch increment. It does not
+claim a human vote, `performed: yes`, device visibility or release authority.
+The event is verified by the same immutable journal and distributed in subsequent
+performer contexts. No performer CLI command exposes this supervisor authority.
+
+A `blocked_external` status alone no longer skips supervisor diagnosis. Actual
+external access, physical actions and legacy requests without a declared source
+recovery scope remain external until explicitly reconciled; neither an unrelated
+Git change nor a repeated restart can satisfy them. Ambiguous classification
+retains the diagnosis and work and exposes the exact required intervention.

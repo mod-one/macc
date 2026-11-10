@@ -4,25 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeConfig {
-    pub language: String,
-    pub model: String,
     pub standards_inline: BTreeMap<String, String>,
-    pub standards_path: Option<String>,
-    pub skills: Vec<String>,
     pub agents: Vec<String>,
-    pub has_mcp: bool,
     pub rules_enabled: bool,
     pub tool_config: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct ClaudeConfigSource {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    language: Option<String>,
-    #[serde(default)]
-    skills: Vec<String>,
     #[serde(default)]
     agents: Vec<String>,
     #[serde(default)]
@@ -42,23 +31,6 @@ impl ClaudeConfig {
         let source: ClaudeConfigSource =
             serde_json::from_value(tool_config.clone()).unwrap_or_default();
 
-        let language = source
-            .language
-            .or_else(|| resolved.standards.inline.get("language").cloned())
-            .unwrap_or_else(|| "English".to_string());
-
-        let model = source.model.unwrap_or_else(|| "sonnet".to_string());
-
-        let mut skills_set = BTreeSet::new();
-        // Global selections
-        for skill in &resolved.selections.skills {
-            skills_set.insert(skill.clone());
-        }
-        // Tool-specific selections
-        for skill in &source.skills {
-            skills_set.insert(skill.clone());
-        }
-
         let mut agents_set = BTreeSet::new();
         for agent in &resolved.selections.agents {
             agents_set.insert(agent.clone());
@@ -68,16 +40,13 @@ impl ClaudeConfig {
         }
         let rules_enabled = source.rules_enabled;
 
-        let has_mcp = !resolved.selections.mcp.is_empty();
-
+        let mut standards_inline = resolved.standards.inline.clone();
+        if let Some(language) = tool_config.get("language").and_then(|v| v.as_str()) {
+            standards_inline.insert("language".into(), language.into());
+        }
         Self {
-            language,
-            model,
-            standards_inline: resolved.standards.inline.clone(),
-            standards_path: resolved.standards.path.clone(),
-            skills: skills_set.into_iter().collect(),
+            standards_inline,
             agents: agents_set.into_iter().collect(),
-            has_mcp,
             rules_enabled,
             tool_config,
         }

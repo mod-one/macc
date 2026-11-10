@@ -2168,20 +2168,15 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         let counts = CoordinatorCounts {
             total,
             todo,
-            active: if self.run_state.phase_job.is_some() {
+            active: if self.run_state.phase_job.is_some() || !self.run_state.active_jobs.is_empty()
+            {
                 active.max(1)
             } else {
                 active
             },
             blocked,
             merged,
-            waiting_approval: snapshot.registry.waiting_approval_count()
-                + snapshot
-                    .registry
-                    .tasks
-                    .iter()
-                    .filter(|t| t.task_runtime.extra.contains_key("decision_wait"))
-                    .count(),
+            waiting_approval: crate::coordinator::decisions::human_wait_count(&snapshot.registry),
         };
         self.last_logged_counts = Some(counts);
         Ok(counts)

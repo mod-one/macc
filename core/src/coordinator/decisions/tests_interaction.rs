@@ -7,6 +7,7 @@ fn physical_request(key: &str) -> Request {
     r.impact.evidence = vec!["USB hardware is not accessible in this worker".into()];
     r.risk = Risk::Low;
     r.intervention = Some(UserIntervention {
+        source_repair_paths: Vec::new(),
         action: "Connect the phone by USB and unlock its screen".into(),
         inaccessible_reason: "Worker cannot connect physical hardware".into(),
         expected_result: "Paste the observed device identifier or exact error".into(),

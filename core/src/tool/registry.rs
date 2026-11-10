@@ -60,6 +60,17 @@ pub trait ToolAdapter: Send + Sync {
         None
     }
 
+    /// Native tools sharing a target are rendered together exactly once.
+    fn context_file_targets(&self, ctx: &PlanningContext) -> crate::Result<Vec<String>> {
+        match self.context_file_target() {
+            Some(default) => crate::project_context::targets(ctx, &self.id(), &default),
+            None => Ok(Vec::new()),
+        }
+    }
+    fn context_reference_files(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Returns a human-readable fallback string displayed in the standards preview when the
     /// primary context file is not present in the generated plan.
     fn context_file_fallback(&self) -> Option<String> {

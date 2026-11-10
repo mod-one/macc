@@ -156,3 +156,30 @@ receipt presentation. Web tests cover equivalent conditional requirements.
 heartbeat shell after a native human request; it verifies the durable scoped
 receipt without invoking a model. Supervisor cache tests assert that unrelated
 changes do not spend another diagnosis while a native gate is unanswered.
+
+### 2026-11-10 — deterministic context and external prerequisite recovery
+
+Native tool contexts are assembled together from available assets. Regression
+fixtures cover empty selections, French conventions, shared Gemini/Antigravity
+output, custom Gemini filenames, missing selected skills, provenance-aware context
+migration, preservation of edited root/worktree files and conflicting writes.
+See `registry/tests/context_generation.rs` and `docs/architecture/context-generation.md`.
+
+External waits no longer keep an idle coordinator running as if an approval were
+pending. Source-recovery fixtures use real local Git commits and native decisions
+to verify exact revisions, published path evidence, journal consistency and
+machine attribution; physical or legacy interventions cannot be cleared by source
+edits. The web fixture checks explicit blocked status without an automatic
+question popup in `never_ask`. No fixture requires a paid model or a user project.
+
+Validation for this change: the core library passes 1,398 tests (two explicit
+provider smoke tests remain ignored), the native adapter/registry libraries pass,
+and the context-generation integration suite passes eight tests. The TUI suite
+passes 174 tests, the decision-center web suite passes 28 tests, and the web
+production build passes. Local Git coordinator and plan/apply integration tests
+also pass without a provider call.
+
+The CLI unit suite passes 272 tests with `RUST_MIN_STACK=8388608`. Its root-parser
+test overflows the default debug test-thread stack; this run does not establish
+that default-stack parser issue is fixed. No production stack setting was changed.
+No running user coordinator or installed binary was replaced by these checks.

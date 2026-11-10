@@ -1,4 +1,4 @@
-use crate::emit::{claude_md, rules, settings_json};
+use crate::emit::{rules, settings_json};
 use crate::map::ClaudeConfig;
 use crate::user_mcp_merge::plan_user_mcp_merge;
 use macc_core::mcp_json;
@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ClaudeAdapter;
 
 struct InstalledRemoteContent {
-    skills: BTreeSet<String>,
     mcp_servers: BTreeMap<String, Value>,
 }
 
@@ -37,15 +36,18 @@ impl ToolAdapter for ClaudeAdapter {
         Some("CLAUDE.md preview unavailable.\n".to_string()) // macc:allow-tool-name
     }
 
+    fn context_reference_files(&self) -> Vec<String> {
+        vec![
+            "README.md".into(),
+            ".claude/rules/code-style.md".into(),
+            ".claude/rules/testing.md".into(),
+        ]
+    }
+
     fn plan(&self, ctx: &PlanningContext) -> macc_core::Result<ActionPlan> {
         let config = ClaudeConfig::from_resolved(ctx.resolved);
         let mut plan = ActionPlan::new();
 
-        plan_builders::write_text(
-            &mut plan,
-            "CLAUDE.md",
-            &claude_md::render_claude_md(&config),
-        );
         plan_builders::write_text(
             &mut plan,
             ".claude/settings.json",
@@ -54,7 +56,6 @@ impl ToolAdapter for ClaudeAdapter {
 
         let installed_content = install_remote_content(&mut plan, ctx)?;
 
-        add_skills(&mut plan, &config, &installed_content.skills);
         if !config.agents.is_empty() {
             add_agents(&mut plan, &config);
         }
@@ -85,7 +86,6 @@ fn install_remote_content(
     plan: &mut ActionPlan,
     ctx: &PlanningContext,
 ) -> macc_core::Result<InstalledRemoteContent> {
-    let mut installed_skills = BTreeSet::new();
     let mut mcp_servers = BTreeMap::new();
     for unit in ctx.materialized_units {
         for selection in &unit.selections {
@@ -105,7 +105,6 @@ fn install_remote_content(
                         &selection.subpath,
                     )
                     .map_err(macc_core::MaccError::Validation)?;
-                    installed_skills.insert(selection.id.clone());
                 }
                 SelectionKind::Mcp => {
                     let manifest = plan_builders::plan_mcp_install(
@@ -122,18 +121,7 @@ fn install_remote_content(
             }
         }
     }
-    Ok(InstalledRemoteContent {
-        skills: installed_skills,
-        mcp_servers,
-    })
-}
-
-fn add_skills(_plan: &mut ActionPlan, config: &ClaudeConfig, installed_skills: &BTreeSet<String>) {
-    for skill in &config.skills {
-        if installed_skills.contains(skill) {
-            continue;
-        }
-    }
+    Ok(InstalledRemoteContent { mcp_servers })
 }
 
 fn add_agents(plan: &mut ActionPlan, config: &ClaudeConfig) {

@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Metadata such as backup and consent requirements associated with a planned operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct PlannedOpMetadata {
+    /// An invalid plan must remain invalid even through the legacy Vec API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_conflict: Option<String>,
     /// Copy reviewed asset bytes without structured configuration merging.
     #[serde(default)]
     pub preserve_bytes: bool,
@@ -117,6 +120,7 @@ impl OperationAccumulator {
             consent_required,
             kind,
             metadata: PlannedOpMetadata {
+                generation_conflict: None,
                 preserve_bytes: false,
                 backup_required: self.backup_required,
                 consent_required,
@@ -130,6 +134,21 @@ impl OperationAccumulator {
 
 /// Collects operations from an existing `ActionPlan` with deterministic ordering.
 pub fn collect_plan_operations(paths: &ProjectPaths, plan: &ActionPlan) -> Vec<PlannedOp> {
+    if let Err(error) = crate::project_context::validate_writes(plan) {
+        let detail = error.to_string();
+        return vec![PlannedOp {
+            path: format!("Conflict: {detail}"),
+            scope: Scope::Project,
+            consent_required: false,
+            kind: PlannedOpKind::Other,
+            metadata: PlannedOpMetadata {
+                generation_conflict: Some(detail),
+                ..Default::default()
+            },
+            before: None,
+            after: None,
+        }];
+    }
     let mut accumulator: BTreeMap<String, OperationAccumulator> = BTreeMap::new();
 
     for action in &plan.actions {

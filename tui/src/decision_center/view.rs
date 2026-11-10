@@ -38,7 +38,13 @@ impl Center {
         } else if self
             .current
             .as_ref()
-            .is_some_and(|d| d.status != "pending_human")
+            .is_some_and(|d| d.status == "blocked_external")
+        {
+            "Blocked: prerequisite unavailable"
+        } else if self
+            .current
+            .as_ref()
+            .is_some_and(|d| d.resolution.is_some())
         {
             "Recorded decision"
         } else if self
@@ -154,6 +160,9 @@ impl Center {
         } else {
             if let Some(d) = &self.current {
                 let pending = d.status == "pending_human";
+                if d.status == "blocked_external" {
+                    summary.push_str("BLOCKED: external intervention or supervisor recovery required. Work is preserved.\n\n");
+                }
                 summary.push_str(&format!(
                     "{}\n",
                     if self.expanded {
@@ -366,13 +375,22 @@ impl Center {
                         .as_ref()
                         .is_some_and(|d| d.status != "pending_human")
                     {
-                        caption = "Recorded response".into();
+                        caption = if self
+                            .current
+                            .as_ref()
+                            .is_some_and(|d| d.status == "blocked_external")
+                        {
+                            "Blocked prerequisite"
+                        } else {
+                            "Recorded response"
+                        }
+                        .into();
                         editor = self
                             .current
                             .as_ref()
                             .and_then(|d| d.resolution.as_ref())
                             .map(|r| r.text.clone())
-                            .unwrap_or_else(|| "Nothing to answer.".into());
+                            .unwrap_or_else(|| "No result has been recorded. Review the prerequisite and supervisor diagnosis. Work is preserved.".into());
                     } else {
                         caption = if self.submitting {
                             "Sending…"

@@ -175,6 +175,21 @@ pub(super) async fn intervene(
                 .into(),
         ));
     }
+    let source_repair_refs =
+        match super::external_verification::source_repair_refs(&paths.root, &diagnosis.task_ids) {
+            Ok(refs) => refs,
+            Err(error) => {
+                diagnosis.requires_human = true;
+                diagnosis.repairable = false;
+                diagnosis.summary = format!("DM_PENDING: {error}");
+                diagnosis.external_prerequisites.push(error.to_string());
+                report.diagnosis = Some(diagnosis);
+                return Err(error);
+            }
+        };
+    if !source_repair_refs.is_empty() && !config.ai_verification_enabled {
+        return Err(MaccError::Validation("Native source prerequisite recovery requires independent AI verification; no external decision will be cleared by tests alone".into()));
+    }
     report.validation = repair::validation_commands(&paths.root, config)?;
     let proof = repair::fix(
         &agent,
@@ -217,6 +232,15 @@ pub(super) async fn intervene(
         format!("Requeuing {}", diagnosis.task_ids.join(", ")),
     )?;
     ensure_not_stopped(paths)?;
+    if !source_repair_refs.is_empty() {
+        let mut store = macc_core::coordinator::decisions::Store::open(&paths.root)?;
+        store.complete_source_repairs(
+            &source_repair_refs,
+            &target.base,
+            report.commit.as_deref().expect("published repair"),
+            &proof,
+        )?;
+    }
     requeue(paths, canonical, &diagnosis.task_ids, &report.detail)?;
     if !config.auto_restart {
         report.status = "repair_integrated".into();

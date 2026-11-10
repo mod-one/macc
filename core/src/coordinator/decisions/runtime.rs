@@ -153,10 +153,9 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                 task.task_runtime.set_last_error_details(
                     "E903",
                     "decisions",
-                    format!(
-                        "DM_PENDING: Decision {} is {}: {}. {}",
-                        decision.id,decision.status, decision.request.question,decision.investigation.as_ref().map(|r|r.diagnosis.as_str()).unwrap_or("Inspect the recorded answer and outstanding graph effects; no consent is inferred")
-                    ),
+                    format!("DM_PENDING: {}Decision {} is {}: {}. {}",
+                        if decision.status == "blocked_external" {"Blocked: external intervention required; supervisor diagnosis needed. "} else {""},
+                        decision.id,decision.status, decision.request.question,decision.investigation.as_ref().map(|r|r.diagnosis.as_str()).unwrap_or("Inspect the recorded answer and outstanding graph effects; no consent is inferred")),
                 );
                 task.task_runtime.set_status(RuntimeStatus::Idle);
             }

@@ -385,8 +385,7 @@ mod tests {
         let config = GeminiConfig {
             standards_inline: BTreeMap::new(),
             standards_path: None,
-            skills: vec![],
-            agents: vec![],
+
             user_mcp_merge: false,
             mcp_servers,
             tool_config: JsonValue::Object(JsonMap::new()),

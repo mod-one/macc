@@ -576,6 +576,9 @@ pub fn sync_context_files_from_root(
     canonical: &CanonicalConfig,
 ) -> Result<()> {
     let targets = collect_context_targets(repo_root, canonical);
+    let source_paths = ProjectPaths::from_root(repo_root);
+    let dest_paths = ProjectPaths::from_root(worktree_root);
+    let protected = crate::protected_context_paths(&source_paths, canonical);
     for rel in targets {
         let src = repo_root.join(&rel);
         if !src.is_file() {
@@ -587,6 +590,25 @@ pub fn sync_context_files_from_root(
             continue;
         }
 
+        if dest.is_file()
+            && protected.contains(&rel)
+            && !crate::project_context::owned_unchanged(&dest_paths, &rel)?
+        {
+            tracing::warn!(path=%dest.display(), "Preserved customized worktree context");
+            continue;
+        }
+        // A worktree's freshly generated bundle describes its own installed
+        // tools/skills. Never replace it with the broader root bundle.
+        if dest.is_file()
+            && crate::project_context::owned_unchanged(&source_paths, &rel)?
+            && crate::project_context::owned_unchanged(&dest_paths, &rel)?
+            && std::fs::read(&dest)
+                .map_err(crate::persistent::error)?
+                .windows(b"MACC deterministic context v2".len())
+                .any(|w| w == b"MACC deterministic context v2")
+        {
+            continue;
+        }
         let bytes = std::fs::read(&src).map_err(|source| MaccError::Io {
             path: src.display().to_string(),
             action: "read context source".into(),
@@ -597,7 +619,16 @@ pub fn sync_context_files_from_root(
             &rel,
             &dest,
             &bytes,
-            |_| Ok(()),
+            |existing| {
+                if existing.exists {
+                    crate::create_timestamped_backup(
+                        &dest_paths,
+                        &chrono::Local::now().format("%Y%m%d-%H%M%S-%f").to_string(),
+                        &rel,
+                    )?;
+                }
+                Ok(())
+            },
         )?;
     }
     Ok(())
@@ -629,17 +660,14 @@ pub fn collect_context_targets(repo_root: &Path, canonical: &CanonicalConfig) ->
                 }
             }
         } else {
-            for rel in from_settings {
+            for rel in &from_settings {
                 if let Some(normalized) = normalize_context_target(&rel) {
                     targets.insert(normalized);
                 }
             }
         }
 
-        if !targets
-            .iter()
-            .any(|p| p == &format!("{}.md", tool_id.to_ascii_uppercase().replace('-', "_")))
-        {
+        if from_settings.is_empty() && !by_id.contains_key(tool_id) {
             let fallback = format!("{}.md", tool_id.to_ascii_uppercase().replace('-', "_"));
             if let Some(normalized) = normalize_context_target(&fallback) {
                 targets.insert(normalized);

@@ -37,10 +37,7 @@ mod tests {
         let config = AgyConfig {
             model: "auto-gemini-3".to_string(),
             sandbox: true,
-            skills: vec![],
-            agents: vec![],
-            standards_inline: BTreeMap::new(),
-            standards_path: None,
+
             mcp_servers: BTreeMap::new(),
             tool_config: serde_json::json!({
                 "model": "auto-gemini-3",

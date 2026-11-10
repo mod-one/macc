@@ -676,6 +676,10 @@ fn similarity_default(n: &u8) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UserIntervention {
+    /// Explicit source precondition repair delegated to the supervisor. Empty
+    /// for physical actions, access, credentials, approvals and legacy requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_repair_paths: Vec<String>,
     pub action: String,
     pub inaccessible_reason: String,
     pub expected_result: String,

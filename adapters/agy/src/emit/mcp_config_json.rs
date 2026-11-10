@@ -45,10 +45,7 @@ mod tests {
         let config = AgyConfig {
             model: "auto-gemini-3".to_string(),
             sandbox: true,
-            skills: vec![],
-            agents: vec![],
-            standards_inline: BTreeMap::new(),
-            standards_path: None,
+
             mcp_servers,
             tool_config: JsonValue::Object(JsonMap::new()),
         };

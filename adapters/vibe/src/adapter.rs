@@ -4,7 +4,6 @@ use macc_core::mcp_json;
 use macc_core::plan::builders as plan_builders;
 use macc_core::plan::ActionPlan;
 use macc_core::resolve::{PlanningContext, SelectionKind};
-use macc_core::tool::ProjectContextSection;
 use macc_core::ToolAdapter;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +27,10 @@ impl ToolAdapter for VibeAdapter {
 
     fn context_file_fallback(&self) -> Option<String> {
         Some("AGENTS.md is not generated when this tool is disabled.\n".to_string())
+    }
+
+    fn context_reference_files(&self) -> Vec<String> {
+        vec![".vibe/config.toml".into(), ".mcp.json".into()]
     }
 
     fn plan(&self, ctx: &PlanningContext) -> macc_core::Result<ActionPlan> {
@@ -56,17 +59,6 @@ impl ToolAdapter for VibeAdapter {
         }
 
         Ok(plan)
-    }
-
-    fn context_file_sections(
-        &self,
-        _ctx: &PlanningContext,
-    ) -> macc_core::Result<Vec<ProjectContextSection>> {
-        let sections = vec![ProjectContextSection {
-            heading: "Vibe Skills".to_string(),
-            content: "- Use `explore` for codebase exploration.\n- Use custom slash commands via the skills system.\n".to_string(),
-        }];
-        Ok(sections)
     }
 }
 

@@ -1,10 +1,8 @@
 use macc_core::resolve::ResolvedConfig;
 use serde_json::Value;
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
-    pub skills: Vec<String>,
     pub tool_config: CodexToolConfig,
 }
 
@@ -23,25 +21,7 @@ pub struct CodexToolConfig {
 impl CodexConfig {
     pub fn from_resolved(resolved: &ResolvedConfig) -> Self {
         let tool_config = extract_tool_config(resolved);
-        let mut skills_set = BTreeSet::new();
-        for skill in &resolved.selections.skills {
-            skills_set.insert(skill.clone());
-        }
-        let tool_skills = resolved
-            .tools
-            .config
-            .get("codex")
-            .or_else(|| resolved.tools.specific.get("codex"))
-            .and_then(|value| get_string_list(value, &["skills"]))
-            .unwrap_or_default();
-        for skill in tool_skills {
-            skills_set.insert(skill);
-        }
-
-        Self {
-            skills: skills_set.into_iter().collect(),
-            tool_config,
-        }
+        Self { tool_config }
     }
 }
 
@@ -85,31 +65,4 @@ fn get_bool(root: &Value, path: &[&str]) -> Option<bool> {
         current = current.get(*key)?;
     }
     current.as_bool()
-}
-
-fn get_string_list(root: &Value, path: &[&str]) -> Option<Vec<String>> {
-    let mut current = root;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    match current {
-        Value::Array(values) => {
-            let mut out = Vec::new();
-            for val in values {
-                if let Some(s) = val.as_str() {
-                    out.push(s.to_string());
-                }
-            }
-            Some(out)
-        }
-        Value::String(s) => {
-            let list = s
-                .split(',')
-                .map(|entry| entry.trim().to_string())
-                .filter(|entry| !entry.is_empty())
-                .collect::<Vec<_>>();
-            Some(list)
-        }
-        _ => None,
-    }
 }

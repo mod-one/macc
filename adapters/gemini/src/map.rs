@@ -6,8 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct GeminiConfig {
     pub standards_inline: BTreeMap<String, String>,
     pub standards_path: Option<String>,
-    pub skills: Vec<String>,
-    pub agents: Vec<String>,
     pub user_mcp_merge: bool,
     pub mcp_servers: BTreeMap<String, serde_json::Value>,
     pub tool_config: JsonValue,
@@ -23,14 +21,6 @@ impl GeminiConfig {
             .cloned()
             .unwrap_or_else(|| JsonValue::Object(JsonMap::new()));
 
-        let mut skills_set = BTreeSet::new();
-        for skill in &resolved.selections.skills {
-            skills_set.insert(skill.clone());
-        }
-        for skill in read_string_list(&tool_config, "/skills") {
-            skills_set.insert(skill);
-        }
-
         let mut mcp_servers = BTreeMap::new();
         let selection_ids: BTreeSet<String> = resolved.selections.mcp.iter().cloned().collect();
         for template in &resolved.mcp_templates {
@@ -42,19 +32,13 @@ impl GeminiConfig {
             }
         }
 
-        let mut agents = BTreeSet::new();
-        for agent in &resolved.selections.agents {
-            agents.insert(agent.clone());
+        let mut standards_inline = resolved.standards.inline.clone();
+        if let Some(language) = tool_config.get("language").and_then(|v| v.as_str()) {
+            standards_inline.insert("language".into(), language.into());
         }
-        for agent in read_string_list(&tool_config, "/agents") {
-            agents.insert(agent);
-        }
-
         Self {
-            standards_inline: resolved.standards.inline.clone(),
+            standards_inline,
             standards_path: resolved.standards.path.clone(),
-            skills: skills_set.into_iter().collect(),
-            agents: agents.into_iter().collect(),
             user_mcp_merge: read_bool(&tool_config, "/user_mcp_merge").unwrap_or(false),
             mcp_servers,
             tool_config,
@@ -64,24 +48,6 @@ impl GeminiConfig {
 
 fn read_bool(value: &JsonValue, pointer: &str) -> Option<bool> {
     value.pointer(pointer).and_then(|v| v.as_bool())
-}
-
-fn read_string_list(value: &JsonValue, pointer: &str) -> Vec<String> {
-    let Some(node) = value.pointer(pointer) else {
-        return Vec::new();
-    };
-    match node {
-        JsonValue::Array(items) => items
-            .iter()
-            .filter_map(|item| item.as_str().map(|s| s.to_string()))
-            .collect(),
-        JsonValue::String(text) => text
-            .split(',')
-            .map(|entry| entry.trim().to_string())
-            .filter(|entry| !entry.is_empty())
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 #[cfg(test)]

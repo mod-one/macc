@@ -135,6 +135,12 @@ pub(super) fn validate_initial_request(
         let action = r.intervention.as_ref().ok_or_else(|| {
             error("Intervention requires action, inaccessible_reason and expected_result")
         })?;
+        if action.source_repair_paths.len() > 16 {
+            return Err(error("At most 16 source repair paths are allowed"));
+        }
+        for path in &action.source_repair_paths {
+            super::source_recovery::validate_source_path(path)?;
+        }
         if action.action.trim().is_empty()
             || action.inaccessible_reason.trim().is_empty()
             || action.expected_result.trim().is_empty()

@@ -54,6 +54,7 @@ export function DecisionCenter() {
   React.useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 3000); return () => window.clearInterval(timer); }, [refresh]);
   React.useEffect(() => { try { sessionStorage.setItem('macc.decisionDrafts', JSON.stringify(drafts)); } catch { /* Keep drafts in memory. */ } }, [drafts]);
   const pending = snapshot?.decisions.filter(d => d.status === 'pending_human') ?? [];
+  const external = snapshot?.decisions.filter(d => d.status === 'blocked_external') ?? [];
   const neverAsk = snapshot?.policy.human_question_min_risk === 'never_ask';
   React.useEffect(() => {
     if (neverAsk) { const authoritative=snapshot?.decisions.find(d=>d.id===viewed?.id); if(autoPresented.current&&authoritative&&authoritative.status!=='pending_human'){setOpen(false);autoPresented.current=false;} return; }
@@ -94,16 +95,17 @@ export function DecisionCenter() {
   const selectedPatch=current?.request.options.find(o=>o.id===draft.option)?.proposed_patch??((draft.option===current?.request.recommended_option_id||!current?.request.recommended_option_id&&!draft.option)?current?.request.proposed_patch:undefined);
   const close = () => { if (current?.status === 'pending_human') setDeferred(old => new Set([...old, keyOf(current)])); setOpen(false); };
   return <Dialog.Root open={open} onOpenChange={value => value ? setOpen(true) : close()}>
-    <button type="button" onClick={() => { const next = pending[0] ?? snapshot?.decisions.at(-1); setSelected(next?.id ?? null); setViewed(next ?? null); autoPresented.current = false; setOpen(true); }} aria-label={`Decisions, ${pending.length} pending`} className="rounded border px-2 py-1 text-xs">Decisions {pending.length > 0 ? `(${pending.length})` : ''}</button>
+    <button type="button" onClick={() => { const next = pending[0] ?? external[0] ?? snapshot?.decisions.at(-1); setSelected(next?.id ?? null); setViewed(next ?? null); autoPresented.current = false; setOpen(true); }} aria-label={`Decisions, ${pending.length} pending`} className="rounded border px-2 py-1 text-xs">Decisions {pending.length > 0 ? `(${pending.length})` : ''}</button>
+    {external.length>0 && !open && <span role="status" className="ml-2 text-sm text-[var(--warning)]">Blocked: external intervention or supervisor recovery required ({external.length}). Open Decisions for the recorded cause.</span>}
     {!open && message==='Response sent.' && <span role="status" className="ml-2 text-xs">Response sent.</span>}
     <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" /><Dialog.Content onOpenAutoFocus={event => {
       const target = document.getElementById('decision-response')?.querySelector<HTMLElement>('input[type="radio"], [aria-required="true"], textarea');
       if (target) {event.preventDefault(); target.focus({preventScroll:true});}
     }} className="fixed left-1/2 top-1/2 z-50 flex max-h-[94dvh] w-[96vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-primary)] p-4 text-[var(--text-primary)] shadow-xl">
       <header className="max-h-[28dvh] shrink-0 overflow-y-auto border-b border-[var(--border)] pb-3">
-        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-[var(--text-secondary)]">{current && current.status!=='pending_human' ? 'Recorded response' : current?.request.kind === 'intervention' ? 'Action needed' : 'Performer question'}{pending.length > 0 ? ` · ${pending.length} pending` : ''}</p>
+        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-[var(--text-secondary)]">{current?.status==='blocked_external' ? 'Blocked: prerequisite unavailable' : current && current.resolution ? 'Recorded response' : current?.request.kind === 'intervention' ? 'Action needed' : 'Performer question'}{pending.length > 0 ? ` · ${pending.length} pending` : ''}</p>
         <Dialog.Title className="text-lg font-semibold">{current ? compactQuestion(current.request.question) : 'Decisions and performer questions'}</Dialog.Title>
-        <Dialog.Description className="mt-1 text-sm text-[var(--text-secondary)]">{current?.status==='pending_human' ? 'Choose an option or write your answer, then Send.' : 'Recorded responses and project directions.'}</Dialog.Description>
+        <Dialog.Description className="mt-1 text-sm text-[var(--text-secondary)]">{current?.status==='pending_human' ? 'Choose an option or write your answer, then Send.' : current?.status==='blocked_external' ? 'Work is preserved. Review the prerequisite and supervisor diagnosis; no action or result has been fabricated.' : 'Recorded responses and project directions.'}</Dialog.Description>
       </header>
       <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto break-words [overflow-wrap:anywhere] py-3">
         {(error || loadError) && <p role="alert" className="rounded-lg border border-[var(--error)] p-3 text-sm text-[var(--error)]">{error || loadError}</p>}

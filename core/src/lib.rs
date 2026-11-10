@@ -18,6 +18,7 @@ pub mod hooks;
 mod local_exclusions;
 pub mod o2;
 pub mod persistent;
+pub mod project_context;
 pub mod project_hygiene;
 pub mod project_ownership;
 pub mod session_store;
@@ -717,31 +718,13 @@ pub fn build_plan(
         materialized_units,
     };
 
-    let mut context_sections = Vec::new();
-
-    for tool_id in &resolved.tools.enabled {
-        if let Some(adapter) = registry.get(tool_id) {
-            let tool_plan = adapter.plan(&ctx)?;
-            total_plan.skill_roots.extend(tool_plan.skill_roots);
-            for action in tool_plan.actions {
-                total_plan.add_action(action);
-            }
-            if let Ok(sections) = adapter.context_file_sections(&ctx) {
-                context_sections.extend(sections);
-            }
-        }
-    }
-
-    if !context_sections.is_empty() {
-        if let Some(orchestrator) = crate::tool::registry::AGENTS_MD_ORCHESTRATOR.get() {
-            let content = orchestrator(resolved, &context_sections);
-            total_plan.add_action(plan::Action::WriteFile {
-                path: "AGENTS.md".to_string(),
-                content: content.into_bytes(),
-                scope: plan::Scope::Project,
-            });
-        }
-    }
+    let tool_plan = project_context::plan_tools(&ctx, registry)?;
+    total_plan.skill_roots.extend(tool_plan.skill_roots);
+    total_plan
+        .skill_file_paths
+        .extend(tool_plan.skill_file_paths);
+    total_plan.warnings.extend(tool_plan.warnings);
+    total_plan.actions.extend(tool_plan.actions);
 
     let skill_roots = resolved
         .tools
@@ -759,6 +742,7 @@ pub fn build_plan(
     total_plan.o2_activation = o2::activation::preview(&paths.root)?;
     service::preparation::configure(paths, &mut total_plan)?;
     total_plan.preparation = service::preparation::preview(paths)?;
+    project_context::validate_writes(&total_plan)?;
     total_plan.normalize();
     Ok(total_plan)
 }
@@ -869,6 +853,7 @@ pub fn plan_operations(
 }
 
 pub fn validate_plan(plan: &plan::ActionPlan, allow_user_scope: bool) -> Result<()> {
+    project_context::validate_writes(plan)?;
     for action in &plan.actions {
         if action.scope() == plan::Scope::User && !allow_user_scope {
             return Err(MaccError::UserScopeNotAllowed(format!(
@@ -1143,6 +1128,7 @@ pub fn apply_plan(
     plan: &mut plan::ActionPlan,
     allow_user_scope: bool,
 ) -> Result<ApplyReport> {
+    project_context::validate_writes(plan)?;
     plan.normalize();
     plan::skill_ownership::validate_review(paths, plan)?;
     let _skills_lock = skills_catalog::locking::guard(paths, plan)?;
@@ -1239,6 +1225,12 @@ pub fn apply_operations<F>(
 where
     F: FnMut(&plan::PlannedOp, usize, usize),
 {
+    if let Some(detail) = operations
+        .iter()
+        .find_map(|op| op.metadata.generation_conflict.as_ref())
+    {
+        return Err(MaccError::Validation(detail.clone()));
+    }
     if operations.iter().any(|op| op.scope == plan::Scope::User) && !allow_user_scope {
         let first = operations
             .iter()
@@ -1258,7 +1250,7 @@ where
     let mut report = ApplyReport::new();
     let mut backup_created = false;
     let structured_merge_policy = StructuredToolMergePolicy::from_project(paths);
-    let protected_context_paths = load_protected_context_paths(paths).unwrap_or_default();
+    let protected_context_paths = load_protected_context_paths(paths)?;
     let needs_user_scope = operations.iter().any(|op| op.scope == plan::Scope::User);
     let user_backup_manager = if allow_user_scope && needs_user_scope {
         Some(UserBackupManager::try_new()?)
@@ -1298,7 +1290,13 @@ where
             }
             plan::PlannedOpKind::Write | plan::PlannedOpKind::Merge => {
                 let existing = plan::read_existing(&full_path);
-                if protected_context_paths.contains(&path) && existing.exists {
+                if protected_context_paths.contains(&path)
+                    && existing.exists
+                    && !project_context::owned_unchanged(paths, &path)?
+                {
+                    if op.after.as_deref() != existing.bytes.as_deref() {
+                        report.warnings.push(format!("Preserved customized context {path}; review the generated context migration"));
+                    }
                     report.outcomes.insert(path, plan::ActionStatus::Unchanged);
                     continue;
                 }
@@ -1408,7 +1406,24 @@ where
 }
 
 fn load_protected_context_paths(paths: &ProjectPaths) -> Result<HashSet<String>> {
-    let canonical = load_canonical_config(&paths.config_path)?;
+    crate::persistent::no_symlink(&paths.config_path)?;
+    let canonical = match load_canonical_config(&paths.config_path) {
+        Ok(config) => config,
+        // Low-level operations also support projects before initialization.
+        // An absent config has no protection policy; malformed/unreadable
+        // configuration must still fail closed.
+        Err(MaccError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashSet::new());
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(protected_context_paths(paths, &canonical))
+}
+
+fn protected_context_paths(
+    paths: &ProjectPaths,
+    canonical: &crate::config::CanonicalConfig,
+) -> HashSet<String> {
     let loader = crate::tool::ToolSpecLoader::new(
         crate::tool::ToolSpecLoader::default_search_paths(&paths.root),
     );
@@ -1457,7 +1472,7 @@ fn load_protected_context_paths(paths: &ProjectPaths) -> Result<HashSet<String>>
             }
         }
     }
-    Ok(protected)
+    protected
 }
 
 fn context_protect_enabled(value: Option<&serde_json::Value>) -> bool {
