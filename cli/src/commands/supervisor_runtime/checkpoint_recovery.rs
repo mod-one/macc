@@ -20,6 +20,7 @@ pub(super) fn recover(
                     .as_deref()
                     .is_some_and(|m| {
                         m.contains(macc_core::session_store::checkpoints::recovery::CODE)
+                            || m.contains("DM_STALE:")
                             || (m.contains("Checkpoint") && m.contains("reconciliation"))
                     })
         })
@@ -49,6 +50,14 @@ pub(super) fn recover(
         // Conflicts and contract changes remain explicit infrastructure incidents;
         // never ask a source repair agent to bypass them.
         let result = (|| {
+            if task
+                .task_runtime
+                .last_error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("DM_STALE:"))
+            {
+                return macc_core::session_store::checkpoints::recovery::ensure_decision_context_ready(&paths.root, &task.id);
+            }
             let transfer = macc_core::session_store::checkpoints::recovery::preserve_task_work(
                 &paths.root,
                 &task.id,
@@ -192,6 +201,20 @@ mod tests {
         (temp, paths, incident)
     }
     #[test]
+    fn stale_decision_context_enters_native_recovery_but_cannot_move_a_checkpoint() {
+        let (_temp, paths, mut incident) = fixture(false);
+        incident.tasks[0].task_runtime.set_last_error_details(
+            "E903",
+            "precondition",
+            "DM_STALE: native decision binding changed",
+        );
+        let dir = paths.macc_dir.join("log/stale-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(recover(&paths, &incident, &dir).is_err());
+        assert!(dir.join("checkpoint-recovery-blocked.json").exists());
+    }
+
+    #[test]
     fn stopped_supervisor_recovers_retained_evidence_without_an_ai_call() {
         let (_temp, paths, incident) = fixture(false);
         let dir = paths.macc_dir.join("log/recovery-test");
@@ -219,4 +242,43 @@ mod tests {
         assert_eq!(report["work_preserved"], true);
         assert!(report["error"].as_str().unwrap().contains("conflicts"));
     }
+}
+
+/// A diagnosis may identify native context recovery without authorizing source changes.
+/// Native evidence, not a model-provided shell command, decides whether to act.
+pub(super) fn after_diagnosis(
+    paths: &ProjectPaths,
+    incident: &Incident,
+    dir: &Path,
+) -> Result<Option<Vec<String>>> {
+    let diagnostics = macc_core::session_store::checkpoints::recovery::diagnostics(&paths.root)?;
+    let roots: Vec<_> = incident
+        .tasks
+        .iter()
+        .filter(|t| macc_core::supervisor::incident::repair_candidate(t))
+        .collect();
+    if roots.is_empty()
+        || !roots.iter().all(|t| {
+            diagnostics.iter().any(|d| {
+                d["task_id"] == t.id
+                    && d["diagnostic"]["needs_context_update"] == true
+                    && d["diagnostic"]["requires_contract_review"] == false
+            })
+        })
+    {
+        return Ok(None);
+    }
+    let mut ids = Vec::new();
+    for task in roots {
+        macc_core::session_store::checkpoints::recovery::ensure_decision_context_ready(
+            &paths.root,
+            &task.id,
+        )?;
+        ids.push(task.id.clone());
+    }
+    super::report::write_json(
+        &dir.join("checkpoint-context-recovered.json"),
+        &serde_json::json!({"tasks":ids,"acceptance_inferred":false}),
+    )?;
+    Ok(Some(ids))
 }

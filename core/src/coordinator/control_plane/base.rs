@@ -1330,6 +1330,15 @@ pub async fn monitor_active_jobs_native(
                     repo_root,
                     &BTreeMap::new(),
                 )?;
+                if evt.completion_details_source.as_deref() == Some("native_context_refresh") {
+                    if let Some(task) = registry
+                        .get_mut("tasks")
+                        .and_then(serde_json::Value::as_array_mut)
+                        .and_then(|tasks| tasks.iter_mut().find(|t| t["id"] == evt.task_id))
+                    {
+                        task["task_runtime"]["native_context_refresh"] = serde_json::json!(true);
+                    }
+                }
                 // Only invocation-scoped native provider evidence may be normalized.
                 let normalizer_input = evt.normalizer_input.clone();
                 let completion = coordinator_engine::apply_job_completion_in_registry(

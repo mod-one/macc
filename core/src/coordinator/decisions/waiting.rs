@@ -118,12 +118,18 @@ pub fn gate_revision(
     Ok(result)
 }
 
-/// Only a real human decision keeps an idle engine waiting. External recovery
-/// belongs to a stopped engine and its supervisor, not an endless idle loop.
+/// Real human decisions keep an idle engine waiting. A scheduled native context
+/// refresh also gets a cycle to run sync; sync clears that marker on refusal or
+/// budget exhaustion. External recovery belongs to a stopped engine/supervisor.
 pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> usize {
     if registry.tasks.iter().any(|t| {
         t.state == "blocked"
             && t.task_runtime.extra.contains_key("decision_wait")
+            && t.task_runtime
+                .extra
+                .get("native_context_refresh")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
             && t.task_runtime
                 .extra
                 .get("decision_wait_status")
@@ -132,7 +138,19 @@ pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> u
     }) {
         return 0;
     }
-    registry.waiting_approval_count()
+    registry
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.state == "blocked"
+                && t.task_runtime
+                    .extra
+                    .get("native_context_refresh")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        })
+        .count()
+        + registry.waiting_approval_count()
         + registry
             .tasks
             .iter()
@@ -159,6 +177,25 @@ mod handoff_tests {
             TaskRegistry::from_value(&serde_json::json!({"tasks":[{"id":"A","state":"blocked","task_runtime":{"decision_wait":"request","decision_wait_status":status}}]})).unwrap()
         };
         assert_eq!(human_wait_count(&registry("pending_human")), 1);
+        let mut refreshing = registry("context_refresh");
+        refreshing.tasks[0]
+            .task_runtime
+            .extra
+            .insert("native_context_refresh".into(), serde_json::json!(true));
+        assert_eq!(
+            human_wait_count(&refreshing),
+            1,
+            "allow native sync one cycle before terminal stall evaluation"
+        );
+        refreshing.tasks[0]
+            .task_runtime
+            .extra
+            .remove("native_context_refresh");
+        assert_eq!(
+            human_wait_count(&refreshing),
+            0,
+            "failed refresh must hand off instead of idling forever"
+        );
         let blocked = registry("blocked_external");
         assert_eq!(human_wait_count(&blocked), 0);
         let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {

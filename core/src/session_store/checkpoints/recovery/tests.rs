@@ -455,3 +455,84 @@ fn retained_copy_does_not_undo_a_tracked_deletion_in_the_destination() {
         "retained"
     );
 }
+
+#[test]
+fn decision_only_recovery_refuses_worker_moves_and_new_uncheckpointed_work() {
+    let (tmp, id, request) = setup();
+    let root = tmp.path();
+    assert!(ensure_decision_context_ready(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("worktree changed"));
+    let preview = reconcile(root, &id, None).unwrap();
+    reconcile(root, &id, preview["current_sha256"].as_str()).unwrap();
+    ensure_decision_context_ready(root, "A").unwrap();
+    let target = root.join(".macc/worktree/worker-01");
+    std::fs::write(target.join("new-user-work.txt"), "preserve").unwrap();
+    assert!(ensure_decision_context_ready(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("worktree_dirty_digest"));
+    assert_eq!(
+        std::fs::read_to_string(target.join("new-user-work.txt")).unwrap(),
+        "preserve"
+    );
+    let _ = request;
+}
+
+#[test]
+fn resolved_autonomous_decision_refreshes_checkpoint_without_accepting_new_requirements() {
+    use crate::coordinator::decisions as dm;
+    let (tmp, id, _) = setup();
+    let root = tmp.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
+    let p = dm::Policy {
+        enabled: true,
+        human_question_min_risk: dm::Consultation::NeverAsk,
+        ..Default::default()
+    };
+    config
+        .automation
+        .coordinator
+        .get_or_insert_with(Default::default)
+        .decisions = Some(p.clone());
+    crate::save_canonical_config(&paths, &config).unwrap();
+    let registry = crate::coordinator::model::TaskRegistry::from_value(
+        &serde_json::from_slice::<Value>(&std::fs::read(root.join("prd.json")).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut store = dm::Store::open(root).unwrap();
+    let plan = store
+        .ensure_plan(root, Path::new("prd.json"), "main", &registry)
+        .unwrap();
+    let preview = reconcile(root, &id, None).unwrap();
+    reconcile(root, &id, preview["current_sha256"].as_str()).unwrap();
+    let request=serde_json::from_value(json!({"idempotency_key":"refresh-test","task_id":"A","kind":"decision","question":"Which equivalent internal label?","context":"Read the task and implementation conventions","investigated":["Read task"],"recommendation":"Use the existing label","risk":"low","impact":{"evidence":["Existing local naming convention"]},"options":[{"id":"existing","label":"Existing label","consequences":["Keep the existing convention"]}],"recommended_option_id":"existing"})).unwrap();
+    let d = store
+        .submit(&plan, request, "agent:A", "agent", &p)
+        .unwrap();
+    assert_eq!(d.status, "resolved");
+    ensure_decision_context_ready(root, "A").unwrap();
+    let target = root.join(".macc/worktree/worker-01");
+    assert!(prepare(root, &request_for(root, &target)).is_ok());
+    let prd = root.join("prd.json");
+    let original_prd = std::fs::read_to_string(&prd).unwrap();
+    std::fs::write(
+        &prd,
+        original_prd.replace("Validate", "Changed requirement"),
+    )
+    .unwrap();
+    assert!(ensure_decision_context_ready(root, "A").is_err());
+    std::fs::write(&prd, original_prd).unwrap();
+    let external=serde_json::from_value(json!({"idempotency_key":"external-refresh-test","task_id":"A","kind":"intervention","question":"Connect the unavailable test device","context":"Device connection is unavailable","investigated":["Checked device visibility"],"recommendation":"Connect the device before verification","risk":"low","impact":{"evidence":["No test device visible"]},"intervention":{"action":"Connect test device","inaccessible_reason":"No physical access","expected_result":"Device visible"}})).unwrap();
+    let (mut active_store, active_plan) = dm::active_plan(root).unwrap();
+    let d = active_store
+        .submit(&active_plan, external, "agent:A", "agent", &p)
+        .unwrap();
+    assert_eq!(d.status, "blocked_external");
+    assert!(ensure_decision_context_ready(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("unresolved"));
+}

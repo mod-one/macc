@@ -247,10 +247,23 @@ pub fn finish(root: &Path, request: &FinishRequest) -> Result<Checkpoint> {
             .push("Fresh-session checkpoint acknowledgement was not verified".into());
     }
     let mut sources_changed = false;
+    let mut drift_reasons = Vec::new();
     let mut content_limit = policy::load(root)?.checkpoints.max_finish_content_bytes;
     // Preserve all unresolved evidence, including failed attempts across retries.
     if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {
         sources_changed = !same_source(&previous, &c);
+        if !crate::coordinator::decisions::compatible_checkpoint_binding(
+            &previous.decision_context,
+            &c.decision_context,
+        ) {
+            drift_reasons.push("native decision binding changed");
+        }
+        if !same_task_sources(&previous, &c) {
+            drift_reasons.push("mandatory PRD/specification sources or execution worktree changed");
+        }
+        if previous.branch != c.branch {
+            drift_reasons.push("execution branch changed");
+        }
         if let Some(limit) = previous.validation["max_finish_content_bytes"].as_u64() {
             content_limit = limit.clamp(2048, 262144);
         }
@@ -280,7 +293,12 @@ pub fn finish(root: &Path, request: &FinishRequest) -> Result<Checkpoint> {
     }
     sql(tx.commit())?;
     if sources_changed {
-        return Err(error(format!("Checkpoint {} requires reconciliation: mandatory task sources changed during invocation",c.id)));
+        return Err(error(format!(
+            "{}: Checkpoint {} requires reconciliation: {} during invocation",
+            super::recovery::CODE,
+            c.id,
+            drift_reasons.join("; ")
+        )));
     }
     Ok(c)
 }

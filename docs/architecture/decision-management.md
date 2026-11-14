@@ -667,3 +667,23 @@ external access, physical actions and legacy requests without a declared source
 recovery scope remain external until explicitly reconciled; neither an unrelated
 Git change nor a repeated restart can satisfy them. Ambiguous classification
 retains the diagnosis and work and exposes the exact required intervention.
+
+### Native decision-context refresh
+
+A lease-fenced `DM_STALE` receipt caused by a decision binding change is routed
+separately from an unavailable application precondition. Completion retains the
+worker, branch, tool and phase; it does not enter retry salvage or merge. Native
+sync refreshes the checkpoint before redispatch, with at most three automatic
+refreshes per decision revision; a new revision has its own bounded budget. Pending human/external decisions remain waits, not refreshes.
+
+Decision-only reconciliation requires the same plan and task contract, PRD and
+specification hashes, worker/branch/revision and exact retained Git digest. It
+rejects unresolved decisions, active leases and stale preview hashes. It neither
+accepts implementation nor weakens independent review. Genuine source or contract
+changes still require reviewed reconciliation. Diagnostics distinguish decision
+binding drift from source and execution-context drift.
+
+The stopped supervisor recognizes legacy `DM_STALE` incidents as native recovery
+candidates. It can reconcile and resume without source repair, including after a
+non-repairable/non-human AI diagnosis when native evidence proves a pending safe
+context update. Model-provided shell commands are never executed as recovery.

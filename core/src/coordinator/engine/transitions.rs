@@ -468,6 +468,34 @@ pub(super) fn apply_state_transitions(
                 error_code,
                 attempts,
             } => {
+                if *completion_kind == PerformerCompletionKind::PreconditionUnmet
+                    && task
+                        .task_runtime
+                        .extra
+                        .get("native_context_refresh")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                {
+                    task.set_workflow_state(WorkflowState::Blocked);
+                    preserve_active_session_chain(task);
+                    let runtime = task.ensure_runtime();
+                    runtime.pid = None;
+                    runtime.set_status(RuntimeStatus::Idle);
+                    runtime
+                        .extra
+                        .insert("decision_wait".into(), serde_json::json!("context_refresh"));
+                    runtime.set_last_error_details("E903","decision_context_refresh","DM_STALE: native context refresh required; retained phase and worktree preserved");
+                    task.touch_state_changed(now);
+                    // Resumption goes through decision sync, never retry salvage/merge.
+                    return JobCompletionResult {
+                        should_retry: false,
+                        status_label: "context_refresh",
+                        detail: "Native decision context changed; refreshing the retained phase"
+                            .into(),
+                        completion_kind: Some(*completion_kind),
+                        tool_error: None,
+                    };
+                }
                 // A precondition stop is a correct outcome, not a tool error:
                 // record it as "cannot be implemented because …" with the
                 // conditions listed, never as "tool execution failed".
@@ -690,5 +718,36 @@ mod quota_scope_tests {
         assert_eq!(throttle.tool_id, "test-tool::pool-a");
         assert_eq!(throttle.throttled_until, 231627);
         assert!(task.task_runtime.delayed_until.is_none());
+    }
+}
+
+#[cfg(test)]
+mod context_refresh_tests {
+    use super::*;
+    #[test]
+    fn native_refresh_preserves_phase_and_assignment_without_entering_salvage() {
+        let mut task:Task=serde_json::from_value(serde_json::json!({"id":"A","state":"in_progress","tool":"codex","assignee":"worker-01","worktree":{"worktree_path":"/tmp/retained","branch":"ai/A"},"task_runtime":{"current_phase":"fix","native_context_refresh":true}})).unwrap();
+        let before = task.worktree.clone();
+        let result = apply_state_transitions(
+            &mut task,
+            &RetryStrategy::Block {
+                reason: "native context changed".into(),
+                outcome: BlockOutcome::ToolReportedTerminal {
+                    completion_kind: PerformerCompletionKind::PreconditionUnmet,
+                    error_code: "E903",
+                    attempts: 1,
+                },
+            },
+            "2026-11-14T12:00:00Z",
+        );
+        assert_eq!(result.status_label, "context_refresh");
+        assert!(
+            !result.should_retry,
+            "generic retries can salvage and merge; refresh must use native sync"
+        );
+        assert_eq!(task.worktree, before);
+        assert_eq!(task.tool.as_deref(), Some("codex"));
+        assert_eq!(task.task_runtime.current_phase.as_deref(), Some("fix"));
+        assert_eq!(task.task_runtime.extra["decision_wait"], "context_refresh");
     }
 }

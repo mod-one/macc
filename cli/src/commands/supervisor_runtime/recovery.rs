@@ -170,6 +170,19 @@ pub(super) async fn intervene(
         };
         return restart_only(paths, canonical, report, lock, &progress, &ids).await;
     }
+    if !diagnosis.requires_human
+        && !diagnosis.repairable
+        && config.repair_enabled
+        && config.auto_restart
+        && restart_allowed
+    {
+        if let Some(ids) =
+            super::checkpoint_recovery::after_diagnosis(paths, &report.incident, dir)?
+        {
+            report.detail="Native checkpoint decision context reconciled; resuming retained phases without source repair".into();
+            return restart_only(paths, canonical, report, lock, &progress, &ids).await;
+        }
+    }
     if diagnosis.requires_human || !diagnosis.repairable {
         return Err(MaccError::Validation(format!(
             "Intervention escalated: {}",

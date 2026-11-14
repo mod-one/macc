@@ -1375,7 +1375,7 @@ pub fn spawn_performer_job(
             &repo_root_owned, &task_id_owned, &event_source_owned,
         ) {
             Ok(Some(wait)) => {
-                completion_details_source = Some("native_decision_wait".into());
+                completion_details_source = Some(if wait.decision.is_none() && wait.reason.starts_with("DM_STALE:") { "native_context_refresh" } else { "native_decision_wait" }.into());
                 Some(CompletionDetails {
                     result_kind: Some(PerformerCompletionKind::PreconditionUnmet),
                     message: Some(wait.reason.clone()),

@@ -330,3 +330,66 @@ fn task_checkpoint_ids(
     let rows = sql(q.query_map(params![project, task], |r| r.get::<_, String>(0)))?;
     rows.map(sql).collect()
 }
+
+/// Refresh decision bindings only when the task and exact retained Git state match.
+/// Current unresolved decisions remain prerequisites, regardless of consultation mode.
+pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
+    if crate::coordinator::decisions::pending_for_task(root, task)?.is_some() {
+        return Err(error(
+            "A native decision is still unresolved; context refresh cannot answer it",
+        ));
+    }
+    if !root.join(".macc/memory.db").exists()
+        || !authority(root)?.is_some_and(|a| a.mode == "sqlite")
+    {
+        return Ok(());
+    }
+    let ids = {
+        let _guard = lock(root)?;
+        let (db, a) = db::active(root)?;
+        if !ready(&db)? {
+            return Ok(());
+        }
+        task_checkpoint_ids(&db, &a.project_id, task)?
+    };
+    let mut plans = Vec::new();
+    for id in ids {
+        let preview = reconcile(root, &id, None)?;
+        for field in [
+            "worktree",
+            "branch",
+            "source_revision",
+            "worktree_dirty_digest",
+            "source_hashes",
+        ] {
+            if preview["previous"][field] != preview["current"][field] {
+                return Err(error(format!(
+                    "{}: decision-only refresh refused: {field} changed",
+                    CODE
+                )));
+            }
+        }
+        for field in ["plan_id", "contract_digest"] {
+            if preview["previous"]["decision_context"][field]
+                != preview["current"]["decision_context"][field]
+            {
+                return Err(error(format!(
+                    "{}: decision-only refresh refused: {field} changed",
+                    CODE
+                )));
+            }
+        }
+        if preview["diagnostic"]["requires_contract_review"] == true {
+            return Err(error(
+                "Decision refresh requires reviewed task reconciliation",
+            ));
+        }
+        plans.push((id, preview));
+    }
+    for (id, preview) in plans {
+        if preview["diagnostic"]["needs_context_update"] == true {
+            reconcile_mode(root, &id, preview["current_sha256"].as_str(), true)?;
+        }
+    }
+    Ok(())
+}

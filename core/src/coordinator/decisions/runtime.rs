@@ -42,6 +42,16 @@ pub fn publication_lock(root: &Path) -> Result<Option<crate::fs_lock::AdvisoryLo
 pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> {
     let p = policy(root)?;
     if !p.enabled {
+        for task in &mut registry.tasks {
+            if task
+                .task_runtime
+                .extra
+                .remove("native_context_refresh")
+                .is_some()
+            {
+                task.task_runtime.set_last_error_details("E903","decision_context_refresh","DM_STALE: decision control disabled; reconcile changed authority before resuming");
+            }
+        }
         return Ok(());
     }
     let cfg = crate::load_canonical_config(&crate::ProjectPaths::from_root(root).config_path)?;
@@ -142,6 +152,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
         }
         task.task_runtime.extra.remove("decision_planning");
         if let Some(decision) = pending {
+            task.task_runtime.extra.remove("native_context_refresh");
             task.task_runtime
                 .extra
                 .insert("decision_wait_status".into(), json!(decision.status));
@@ -168,6 +179,41 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                 .as_deref()
                 .is_some_and(|s| s.contains("DM_STALE"));
         if refresh && !active && !task.is_human_approval_gate() {
+            let revision = json!([plan.id, plan.graph_version, plan.decision_epoch]);
+            let count =
+                if task.task_runtime.extra.get("context_refresh_revision") == Some(&revision) {
+                    task.task_runtime
+                        .extra
+                        .get("context_refresh_attempts")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+            if count >= 3 {
+                task.task_runtime.extra.remove("native_context_refresh");
+                task.task_runtime.set_last_error_details("E903","decision_context_refresh","DM_STALE: native context refresh retry budget exhausted; inspect checkpoint recovery diagnostics");
+                continue;
+            }
+            if let Err(error) =
+                crate::session_store::checkpoints::recovery::ensure_decision_context_ready(
+                    root, &task.id,
+                )
+            {
+                task.task_runtime.extra.remove("native_context_refresh");
+                task.task_runtime.set_last_error_details(
+                    "E903",
+                    "decision_context_refresh",
+                    format!("DM_STALE: native context reconciliation blocked: {error}"),
+                );
+                continue;
+            }
+            task.task_runtime
+                .extra
+                .insert("context_refresh_attempts".into(), json!(count + 1));
+            task.task_runtime
+                .extra
+                .insert("context_refresh_revision".into(), revision);
             if task.has_worktree_attached() {
                 let Some(base) =
                     crate::coordinator::retained_reconciliation::reconcile(root, task, &reference)
@@ -184,6 +230,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             task.task_runtime.last_error = None;
             task.task_runtime.extra.remove("decision_wait");
             task.task_runtime.extra.remove("decision_wait_status");
+            task.task_runtime.extra.remove("native_context_refresh");
         }
         if p.human_question_min_risk != Consultation::NeverAsk {
             task.task_runtime.extra.remove("delegated_gate_resolution");
