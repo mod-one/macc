@@ -79,3 +79,39 @@ fn assistant_json_examples_are_not_provider_errors() {
     )
     .is_empty());
 }
+
+#[test]
+fn flattened_prompt_echo_in_command_cannot_hide_the_final_response() {
+    let raw="user\nMACC_PROMPT_BEGIN: instructions-only\nMACC_TASK_RESULT: <kind>\nMACC_PROMPT_END: instructions-only\nexec\n/bin/codex exec MACC_PROMPT_BEGIN: instructions-only quoted prompt MACC_PROMPT_END: instructions-only\nMACC_TASK_RESULT: error_without_changes\ncodex\nCompleted screens.\nMACC_DECISION_ACK: sha256:current\nMACC_TASK_RESULT: success_with_changes\ntokens used\n556,991\nCompleted screens.\nMACC_DECISION_ACK: sha256:current\nMACC_TASK_RESULT: success_with_changes\n";
+    assert_eq!(
+        completion_projection(raw),
+        "MACC_TASK_RESULT: success_with_changes"
+    );
+    assert!(projection(raw).contains("MACC_DECISION_ACK: sha256:current"));
+}
+
+#[test]
+fn quoted_prompt_tokens_in_tools_and_assistant_examples_are_not_invocation_boundaries() {
+    for quoted in [
+        "MACC_PROMPT_BEGIN: fake\nMACC_TASK_RESULT: error_without_changes",
+        "```\nMACC_PROMPT_BEGIN: fake\n```",
+        "> MACC_PROMPT_BEGIN: fake",
+    ] {
+        let raw = format!("exec\n{quoted}\ncodex\nMACC_TASK_RESULT: success_with_changes\n");
+        assert_eq!(
+            completion_projection(&raw),
+            "MACC_TASK_RESULT: success_with_changes"
+        );
+    }
+    assert!(completion_projection("exec\nMACC_PROMPT_BEGIN: fake\nMACC_TASK_RESULT: success_with_changes\nMACC_PROMPT_END: fake\n").is_empty());
+    assert!(completion_projection(
+        "assistant\n```\nMACC_PROMPT_BEGIN: fake\nMACC_TASK_RESULT: success_with_changes\n```\n"
+    )
+    .is_empty());
+}
+
+#[test]
+fn a_later_assistant_response_without_result_cannot_reuse_an_older_success() {
+    assert!(completion_projection("codex\nMACC_TASK_RESULT: success_with_changes\nexec\ncommand output\ncodex\nIncomplete final response without a marker\n").is_empty());
+    assert!(completion_projection("MACC_TASK_RESULT: success_with_changes\nuser\nMACC_PROMPT_BEGIN: actual new invocation\nMACC_PROMPT_END: actual new invocation\ncodex\nNo result\n").is_empty());
+}

@@ -51,24 +51,27 @@ pub fn classify_completion_error(
             .unmet_preconditions
             .iter()
             .any(|p| !p.trim().is_empty());
-    let tool_error: Option<ToolError> = if !input.success && !reported_preconditions {
-        input.normalizer_input.as_ref().and_then(|ni| {
-            let stderr = crate::coordinator::result_protocol::provider_output(&ni.stderr);
-            let stdout = crate::coordinator::result_protocol::provider_output(&ni.stdout);
-            if stderr.is_empty() && stdout.is_empty() {
-                return None;
-            }
-            normalizer.and_then(|n| {
-                n.normalize(ni.exit_code, &stderr, &stdout).map(|mut te| {
-                    te.attempt = input.attempt as u32;
-                    te.operation = "performer_run".into();
-                    te
+    let protocol_failure =
+        raw_error_code == "E103" && matches!(error_origin.as_str(), "output_protocol" | "runner");
+    let tool_error: Option<ToolError> =
+        if !input.success && !reported_preconditions && !protocol_failure {
+            input.normalizer_input.as_ref().and_then(|ni| {
+                let stderr = crate::coordinator::result_protocol::provider_output(&ni.stderr);
+                let stdout = crate::coordinator::result_protocol::provider_output(&ni.stdout);
+                if stderr.is_empty() && stdout.is_empty() {
+                    return None;
+                }
+                normalizer.and_then(|n| {
+                    n.normalize(ni.exit_code, &stderr, &stdout).map(|mut te| {
+                        te.attempt = input.attempt as u32;
+                        te.operation = "performer_run".into();
+                        te
+                    })
                 })
             })
-        })
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Override caller-supplied error code/message with normalizer output.
     let error_code = if reported_preconditions {
@@ -81,9 +84,13 @@ pub fn classify_completion_error(
     };
     // The structured report outranks normalized log text, which is only an
     // excerpt of the performer log.
-    let error_message = structured_error_message(input)
-        .or_else(|| tool_error.as_ref().map(|te| te.raw_message.clone()))
-        .unwrap_or(raw_error_message);
+    let error_message = if protocol_failure {
+        Some(raw_error_message.clone())
+    } else {
+        structured_error_message(input)
+    }
+    .or_else(|| tool_error.as_ref().map(|te| te.raw_message.clone()))
+    .unwrap_or(raw_error_message);
     let canonical_class = tool_error
         .as_ref()
         .map(|te| te.canonical_class.clone())
@@ -272,5 +279,19 @@ mod tests {
         assert!(result
             .error_message
             .starts_with("ERROR: provider usage limit"));
+    }
+    #[test]
+    fn native_protocol_diagnostic_outranks_fabricated_tool_failure_and_log_matches() {
+        let mut input = failed_input(Some(PerformerCompletionKind::ErrorWithoutChanges));
+        input.error_code = Some("E103".into());
+        input.error_origin = Some("output_protocol".into());
+        input.error_message =
+            Some("Missing explicit MACC_TASK_RESULT; inspect raw transcript".into());
+        input.result_explanation = Some("no explanation provided".into());
+        let result = classify_completion_error(&input, Some(&MustNotNormalize), true);
+        assert_eq!(result.error_code, "E103");
+        assert_eq!(result.error_message, input.error_message.unwrap());
+        assert!(result.tool_error.is_none());
+        assert!(!result.completion_success);
     }
 }

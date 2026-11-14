@@ -80,6 +80,12 @@ pub(super) async fn intervene(
         );
     }
     if config.repair_enabled && config.auto_restart && restart_allowed {
+        if let Some(ids) = super::output_protocol_recovery::recover(paths, &report.incident, dir)? {
+            report.detail="MACC output protocol recovery after runtime update/explicit retry; retained work must pass native validation and delivery".into();
+            return restart_only(paths, canonical, report, lock, &progress, &ids).await;
+        }
+    }
+    if config.repair_enabled && config.auto_restart && restart_allowed {
         if let Some(ids) = super::review_protocol_recovery::recover(paths, &report.incident, dir)? {
             report.detail="MACC-REVIEW-PROTOCOL-REFRESH: restarting the retained review after runtime update or explicit retry; no acceptance inferred".into();
             return restart_only(paths, canonical, report, lock, &progress, &ids).await;

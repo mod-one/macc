@@ -994,9 +994,12 @@ run_tool() {
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
     if [[ -z "$result_kind" ]]; then
-      set_last_error E103 output_protocol "Missing explicit MACC_TASK_RESULT; exit status and Git changes cannot prove delivery"
-      result_kind=error_without_changes
-      printf 'MACC_TASK_RESULT_EXP: %s\nMACC_TASK_RESULT: error_without_changes\n' "$LAST_ERROR_MESSAGE" >> "$output_capture"
+      set_last_error E103 output_protocol "Missing explicit MACC_TASK_RESULT; exit status and Git changes cannot prove delivery. Inspect raw transcript: $task_log_file"
+      # Protocol failure is runner evidence, never a fabricated performer report.
+      must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg code "$LAST_ERROR_CODE" --arg message "$LAST_ERROR_MESSAGE" --argjson exit_status "$status" '{error_code:$code,origin:"output_protocol",message:$message,result_exp:$message,exit_status:$exit_status}')"
+      log_task_line "- Output protocol failure (E103): $LAST_ERROR_MESSAGE; raw transcript retained in $task_log_file"
+      rm -f "$output_capture"
+      return 1
     fi
     if [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]]; then
       # The tool emitted an explicit error or precondition result marker

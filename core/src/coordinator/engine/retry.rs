@@ -108,6 +108,21 @@ pub(super) fn resolve_retry_strategy(
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
+    if classification.error_code == "E103"
+        && matches!(
+            classification.error_origin.as_str(),
+            "output_protocol" | "runner"
+        )
+    {
+        return RetryStrategy::Block {
+            reason: classification.error_message.clone(),
+            outcome: BlockOutcome::TerminalFailure {
+                error: error_details,
+                tool_error: Box::new(None),
+                now_ts,
+            },
+        };
+    }
     let availability_failure = matches!(
         error_details.code.as_str(),
         E601_RATE_LIMITED | E602_QUOTA_EXHAUSTED

@@ -23,6 +23,23 @@ pub fn retained_review_protocol(task: &Task) -> bool {
         && task.task_runtime.pid.is_none()
         && task.has_worktree_attached()
 }
+/// Historical runners incorrectly converted this native fault into E906.
+pub fn missing_result_protocol(task: &Task) -> bool {
+    let runtime = &task.task_runtime;
+    (runtime.last_error_code.as_deref() == Some("E103")
+        && matches!(
+            runtime.last_error_origin.as_deref(),
+            Some("output_protocol" | "runner")
+        )
+        || runtime.last_error_code.as_deref() == Some("E906"))
+        && [
+            runtime.last_error.as_deref(),
+            runtime.last_error_message.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|s| s.starts_with("Missing explicit MACC_TASK_RESULT;"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

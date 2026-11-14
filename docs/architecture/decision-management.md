@@ -584,6 +584,20 @@ A fence inside excluded command output cannot suppress the next assistant ACK,
 compliance object or review verdict. Actual provider error records keep their
 adapter's error class, reset hint and model/quota scope.
 
+Invocation boundaries are anchored records in the prompt/provider channel, not
+substrings found with a raw last-occurrence search. A flattened prompt echoed in
+an executed command cannot start another invocation or hide a later final result.
+Each new assistant response resets terminal task fields; old explanations and
+results cannot stand in for a missing final result. Repeated CLI final responses
+remain supported. This covers the GTransport Codex transcript failure reproduced
+on 2026-11-14 with tool output, inline prompt markers and a repeated final response.
+
+A missing terminal result is a native E103 output-protocol failure, never a
+fabricated `error_without_changes` performer report. The phase event preserves
+the original diagnostic and raw transcript path. Coordinator classification
+retains E103, phase, tool and worktree; it does not turn the failure into E906,
+infer success from dirty files or commits, or retry an unchanged parser blindly.
+
 Shell invocations also pass `--project-root`, `--task-id` and `--source` together
 when an invocation source exists. A matching native wait receipt overrides
 terminal/provider interpretation even if output stops inside an excluded tool
@@ -615,6 +629,18 @@ retained worktree/phase through the existing recovery contract. It issues a fres
 review, never rewrites an old acknowledgement/compliance receipt, and does not
 bypass E903 prerequisites. An unchanged runtime without an explicit retry cannot
 trigger this recovery. Runtime-change evidence is retained in `trigger.json`.
+
+The same update/explicit-retry gate allows bounded recovery of a missing task
+result in other retained phases. A historical E906 is eligible only with the
+native missing-result diagnostic. If that old runner detached the worker,
+native unblock corroborates saved path/branch/tool, managed worker metadata,
+repository membership, the original phase and the unchanged scoped PRD before
+restoring the blocked binding. A reused or ambiguous worker stays blocked.
+Checkpoint and protected reconciliation checks then run normally, preserving
+dirty/index/untracked work and recording recovery evidence. Test, fix and review
+failures resume their own phases. No historical result is promoted to delivery,
+no self-review becomes independent approval, and configured verification and
+publication requirements remain in force.
 
 The native unblock operation restores these retained protocol reviews to
 `reviewing`, rather than dispatching development again. Reconciliation preserves

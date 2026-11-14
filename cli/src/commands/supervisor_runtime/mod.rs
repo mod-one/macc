@@ -3,6 +3,7 @@ mod activity;
 mod checkpoint_recovery;
 mod decision_budget_recovery;
 mod external_verification;
+mod output_protocol_recovery;
 mod policy;
 mod product_findings;
 mod prompt;

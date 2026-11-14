@@ -165,3 +165,19 @@ for combination in both model effort absent; do
   [[ -z "${tool_meta:-}" ]]
 done
 echo 'Structured optional metadata tests passed.'
+
+# Protocol failure is native evidence, not a fabricated tool error or success.
+cat > .macc/fake-tool <<'RUNNER'
+#!/usr/bin/env bash
+printf 'exec\nquoted source output\ncodex\nNo terminal protocol provided.\n'
+printf 'partial task work\n' > unfinished-task.txt
+RUNNER
+must_emit_performer_event() {
+  [[ "$1" == phase_result && "$3" == failed ]]
+  printf '%s' "$4" > .macc/protocol-payload
+}
+LAST_ERROR_CODE=""
+if run_tool .macc/prompt 1 1; then exit 1; fi
+jq -e '.error_code == "E103" and .origin == "output_protocol" and (.result_kind == null) and (.result_exp | contains("Missing explicit MACC_TASK_RESULT"))' .macc/protocol-payload >/dev/null
+[[ -f unfinished-task.txt ]]
+printf 'Protocol failure preserves partial work and native diagnostic.\n'

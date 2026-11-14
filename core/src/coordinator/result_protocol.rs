@@ -24,21 +24,27 @@ enum Channel {
     Provider,
     Assistant,
     Transcript,
+    User,
 }
 #[derive(Default)]
 struct State {
     prompt: bool,
     channel: Channel,
     fence: Option<(char, usize)>,
+    epoch: usize,
 }
 impl State {
     fn line(&mut self, line: &str) -> bool {
-        if line.starts_with("MACC_PROMPT_BEGIN:") {
+        if line.starts_with("MACC_PROMPT_BEGIN:")
+            && matches!(self.channel, Channel::Provider | Channel::User)
+            && self.fence.is_none()
+        {
+            self.epoch += 1;
             self.prompt = true;
             self.fence = None;
             return false;
         }
-        if line.starts_with("MACC_PROMPT_END:") {
+        if self.prompt && line.starts_with("MACC_PROMPT_END:") {
             self.prompt = false;
             self.channel = Channel::Provider;
             self.fence = None;
@@ -50,18 +56,22 @@ impl State {
         // Channel boundaries must be handled before Markdown. Tool output is
         // excluded without touching the assistant's Markdown state.
         let channel = match line {
-            "exec" | "tool" | "user" | "system" | "developer" => Some(Channel::Transcript),
+            "exec" | "tool" | "system" | "developer" => Some(Channel::Transcript),
+            "user" => Some(Channel::User),
             "codex" | "assistant" | "final" => Some(Channel::Assistant), // macc:allow-tool-name: emitted transcript role token, never adapter routing.
             _ => None,
         };
-        if let Some(channel) =
-            channel.filter(|_| self.channel == Channel::Transcript || self.fence.is_none())
-        {
+        if let Some(channel) = channel.filter(|_| {
+            matches!(self.channel, Channel::Transcript | Channel::User) || self.fence.is_none()
+        }) {
+            if channel == Channel::Assistant {
+                self.epoch += 1;
+            }
             self.channel = channel;
             self.fence = None;
             return false;
         }
-        if self.channel == Channel::Transcript {
+        if matches!(self.channel, Channel::Transcript | Channel::User) {
             return false;
         }
         let trimmed = line.trim_start();
@@ -106,14 +116,19 @@ pub fn projection(raw: &str) -> String {
 }
 /// A terminal result cannot borrow an explanation from an older result block.
 pub fn completion_projection(raw: &str) -> String {
-    let current = raw
-        .rfind("MACC_PROMPT_BEGIN:")
-        .map(|i| &raw[i..])
-        .unwrap_or(raw);
-    let projected = projection(current);
+    let mut state = State::default();
     let mut fields = Vec::new();
     let mut boundary = false;
-    for line in projected.lines() {
+    for line in raw.lines() {
+        let epoch = state.epoch;
+        let accepted = state.line(line);
+        if epoch != state.epoch {
+            fields.clear();
+            boundary = false;
+        }
+        if !accepted || line.starts_with(char::is_whitespace) || !valid_explanation(line) {
+            continue;
+        }
         if line.starts_with("MACC_TASK_")
             || ["- Result kind:", "- Explanation:", "- Unmet precondition:"]
                 .iter()

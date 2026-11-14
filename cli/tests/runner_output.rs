@@ -69,3 +69,36 @@ fn shell_transport_is_native_and_has_no_awk_log_fallback() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn final_result_survives_flattened_codex_prompt_echo() {
+    let raw="user\nMACC_PROMPT_BEGIN: instructions-only\nMACC_TASK_RESULT: <kind>\nMACC_PROMPT_END: instructions-only\nexec\n/bin/codex exec MACC_PROMPT_BEGIN: instructions-only quoted MACC_PROMPT_END: instructions-only\nMACC_TASK_RESULT: error_without_changes\ncodex\nCompleted.\nMACC_DECISION_ACK: sha256:current\nMACC_TASK_RESULT: success_with_changes\ntokens used\n123\nCompleted.\nMACC_TASK_RESULT: success_with_changes\n";
+    let value = inspect("codex", raw);
+    assert_eq!(
+        value["terminal_output"],
+        "MACC_TASK_RESULT: success_with_changes"
+    );
+    assert!(value["assistant_output"]
+        .as_str()
+        .unwrap()
+        .contains("MACC_DECISION_ACK: sha256:current"));
+    assert_eq!(value["provider_failure"], false);
+}
+
+#[test]
+fn completion_evidence_shell_preserves_missing_marker_as_protocol_error() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let out = Command::new("bash")
+        .arg(root.join("automat/tests/test_completion_evidence.sh"))
+        .env("MACC_PROTOCOL_CLI", env!("CARGO_BIN_EXE_macc"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

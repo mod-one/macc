@@ -95,6 +95,94 @@ fn protocol_unblock_resumes_review_on_the_retained_branch_without_restarting_dev
 }
 
 #[test]
+fn legacy_missing_result_unblock_reattaches_only_the_proven_worker_and_keeps_dirty_work() {
+    let (tmp, mut task) = fixture();
+    let root = tmp.path();
+    let worker = std::path::PathBuf::from(task.worktree_path().unwrap());
+    std::fs::write(
+        root.join("prd.json"),
+        serde_json::json!({"tasks":[{"id":"ROOT","title":"Keep work"}]}).to_string(),
+    )
+    .unwrap();
+    crate::coordinator::helpers::write_worktree_prd_for_task(
+        &root.join("prd.json"),
+        "ROOT",
+        &worker,
+    )
+    .unwrap();
+    std::fs::write(worker.join(".macc/worktree.json"), serde_json::json!({"id":"worker-01","slug":"worker-01","tool":"fake","base":"main","branch":"ai/fake/worker-01"}).to_string()).unwrap();
+    std::fs::write(worker.join("new.txt"), "uncommitted implementation").unwrap();
+    let head = git(&worker, &["rev-parse", "HEAD"]).unwrap();
+    task.task_runtime.last_worktree_path = task.worktree_path().map(str::to_string);
+    task.task_runtime.last_branch = task.branch().map(str::to_string);
+    task.task_runtime.last_session_tool = Some("fake".into());
+    task.task_runtime.extra.insert(
+        "decision_context".into(),
+        serde_json::json!({"phase":"dev"}),
+    );
+    task.task_runtime.set_last_error_details(
+        "E906",
+        "coordinator",
+        "Missing explicit MACC_TASK_RESULT; exit status and Git changes cannot prove delivery",
+    );
+    task.worktree = None;
+    task.tool = None;
+    let paths = ProjectPaths::from_root(root);
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = CoordinatorSnapshot::empty();
+    snapshot.registry.tasks.push(task);
+    db.save_snapshot(&snapshot).unwrap();
+    let cfg = crate::config::CoordinatorConfig {
+        reference_branch: Some("main".into()),
+        prd_file: Some("prd.json".into()),
+        ..Default::default()
+    };
+    // A reused branch must never be adopted, even if its old path still exists.
+    git(&worker, &["branch", "-m", "ai/fake/reassigned"]).unwrap();
+    assert!(
+        crate::service::coordinator_workflow::coordinator_unblock_task(
+            &paths,
+            Some(&cfg),
+            &Default::default(),
+            "ROOT",
+            "Updated parser"
+        )
+        .is_err()
+    );
+    assert_eq!(
+        db.load_snapshot().unwrap().registry.tasks[0].state,
+        "blocked"
+    );
+    assert!(db.load_snapshot().unwrap().registry.tasks[0]
+        .worktree
+        .is_none());
+    git(&worker, &["branch", "-m", "ai/fake/worker-01"]).unwrap();
+    crate::service::coordinator_workflow::coordinator_unblock_task(
+        &paths,
+        Some(&cfg),
+        &Default::default(),
+        "ROOT",
+        "Updated parser",
+    )
+    .unwrap();
+    let registry = db.load_snapshot().unwrap().registry;
+    let task = registry.find_task("ROOT").unwrap();
+    assert_eq!(task.state, "todo");
+    assert_eq!(task.worktree_path(), Some(worker.to_str().unwrap()));
+    assert_eq!(task.tool.as_deref(), Some("fake"));
+    assert!(task.task_runtime.completion_kind.is_none());
+    assert_eq!(
+        std::fs::read_to_string(worker.join("new.txt")).unwrap(),
+        "uncommitted implementation"
+    );
+    assert_eq!(git(&worker, &["rev-parse", "HEAD"]).unwrap(), head);
+    assert!(git(&worker, &["status", "--porcelain"])
+        .unwrap()
+        .contains("?? new.txt"));
+    assert!(task.task_runtime.extra.contains_key(RESUME_KEY));
+}
+
+#[test]
 fn dirty_worker_unblock_survives_real_startup_sweep_and_is_dispatchable_with_zero_retry_budget() {
     let (tmp, mut task) = fixture();
     let root = tmp.path();

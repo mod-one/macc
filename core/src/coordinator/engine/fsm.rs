@@ -3468,6 +3468,39 @@ mod tests {
     }
 
     #[test]
+    fn output_protocol_failure_keeps_assignment_and_phase_instead_of_e906_or_blind_retry() {
+        let mut task = json!({"id":"protocol", "state":"claimed", "tool":"fake",
+            "worktree":{"worktree_path":"/unavailable/retained-worker", "branch":"ai/fake/worker-01"},
+            "task_runtime":{"status":"running","pid":123,"current_phase":"fix"}});
+        let mut input =
+            make_classification_input(false, Some(PerformerCompletionKind::ErrorWithoutChanges));
+        input.error_code = Some("E103".into());
+        input.error_origin = Some("output_protocol".into());
+        input.error_message =
+            Some("Missing explicit MACC_TASK_RESULT; raw transcript retained".into());
+        input.result_explanation = Some("no explanation provided".into());
+        let result = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-11-14T14:36:16Z",
+        );
+        assert!(!result.should_retry);
+        assert_eq!(result.status_label, "failed");
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E103");
+        assert_eq!(
+            task["task_runtime"]["last_error_message"],
+            input.error_message.unwrap()
+        );
+        assert_eq!(task["task_runtime"]["current_phase"], "fix");
+        assert_eq!(task["tool"], "fake");
+        assert_eq!(task["worktree"]["branch"], "ai/fake/worker-01");
+        assert!(task["task_runtime"]["completion_kind"].is_null());
+        assert!(task["task_runtime"]["pid"].is_null());
+    }
+
+    #[test]
     fn classify_completion_error_ipc_with_commits_uses_ipc_authority() {
         let input =
             make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));

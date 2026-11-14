@@ -1,6 +1,8 @@
 //! The same validated unblock/repair operation for offline and owner-loop execution.
 use super::*;
 use crate::coordinator::control::Request;
+#[path = "coordinator_protocol_recovery.rs"]
+mod protocol_recovery;
 pub(super) fn execute(
     paths: &ProjectPaths,
     coordinator_cfg: Option<&CoordinatorConfig>,
@@ -46,6 +48,12 @@ pub(crate) fn apply(
     let value =
         crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
     let mut registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+    let occupied: Vec<String> = registry
+        .tasks
+        .iter()
+        .filter(|t| t.id != task_id)
+        .filter_map(|t| t.worktree_path().map(str::to_string))
+        .collect();
     let task = registry.find_task_mut(task_id).ok_or_else(|| {
         MaccError::Validation(format!("Cannot unblock unknown task '{task_id}'."))
     })?;
@@ -74,6 +82,18 @@ pub(crate) fn apply(
             "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
         )));
     }
+    let restored = protocol_recovery::restore(paths, coordinator_cfg, task, &occupied)?;
+    if restored.is_some() {
+        // Persist only the blocked ownership binding before checkpoint validation.
+        // A later rejection leaves the task blocked and protects this worker.
+        crate::coordinator::state::coordinator_state_registry_save(
+            &paths.root,
+            &state_args,
+            &registry.to_value()?,
+        )?;
+    }
+    drop(restored);
+    let task = registry.find_task_mut(task_id).unwrap();
     crate::coordinator::worktree_recovery::recover_task(&paths.root, task)?;
     // A successful unblock must not immediately redispatch a stale checkpoint.
     crate::session_store::checkpoints::recovery::ensure_task_ready(&paths.root, task_id)?;
@@ -107,6 +127,10 @@ pub(crate) fn apply(
         crate::coordinator::retained_reconciliation::resume_state(&paths.root, task)
     } else if crate::coordinator::phase_diagnostics::retained_review_protocol(task) {
         WorkflowState::Reviewing
+    } else if task.task_runtime.last_error_code.as_deref() == Some("E103")
+        && task.has_worktree_attached()
+    {
+        crate::coordinator::retained_reconciliation::resume_state(&paths.root, task)
     } else {
         WorkflowState::Todo
     };
