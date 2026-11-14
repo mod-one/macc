@@ -8,6 +8,12 @@ pub struct PendingDecision {
     pub status: String,
     pub task_id: String,
     pub question: String,
+    #[serde(default)]
+    pub owner_task_id: String,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub inaccessible_reason: Option<String>,
 }
 pub fn pending_for_task(
     root: &std::path::Path,
@@ -36,6 +42,13 @@ pub fn pending_for_task(
                 status: d.status,
                 task_id: task.into(),
                 question: d.request.question,
+                owner_task_id: d.request.task_id,
+                action: d.request.intervention.as_ref().map(|i| i.action.clone()),
+                inaccessible_reason: d
+                    .request
+                    .intervention
+                    .as_ref()
+                    .map(|i| i.inaccessible_reason.clone()),
             }));
         }
     }
@@ -44,7 +57,7 @@ pub fn pending_for_task(
 impl PendingDecision {
     pub fn reason(&self) -> String {
         if self.status == "blocked_external" {
-            return format!("DM_PENDING: blocked: external intervention required; decision {}: {}. Coordinator must hand off repairable prerequisites to the supervisor; retained work is preserved", self.id, self.question);
+            return format!("DM_PENDING: blocked: external intervention required; decision {}: {}. Action: {}. Unavailable: {}. Retained work is preserved", self.id, self.question, self.action.as_deref().unwrap_or(&self.question), self.inaccessible_reason.as_deref().unwrap_or("Inspect the exact native request"));
         }
         format!(
             "DM_PENDING: Decision {} ({}) awaits operator resolution: {}",
@@ -58,6 +71,10 @@ impl PendingDecision {
         runtime.extra.insert(
             "decision_wait_status".into(),
             serde_json::json!(self.status),
+        );
+        runtime.extra.insert(
+            "decision_wait_owner".into(),
+            serde_json::json!(self.owner_task_id),
         );
         runtime.set_last_error_details("E903", "decisions", self.reason());
         runtime.last_error = Some(self.reason());

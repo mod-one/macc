@@ -611,6 +611,9 @@ async fn run_queue(
             let snapshot = storage.load_snapshot()?;
             let incomplete = incomplete_tasks(&entry, &snapshot.registry);
             if incomplete.is_empty() {
+                // Retire historical checkpoints before the next PRD replaces
+                // this registry. Evidence and delivery state remain intact.
+                crate::session_store::checkpoints::recovery::maintain(root)?;
                 Ok(true)
             } else {
                 if budget::pause(root, &mut progress, storage.get_coordinator_run(&run_id)?.as_ref(), incomplete.len())? {

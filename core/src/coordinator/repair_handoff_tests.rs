@@ -95,6 +95,67 @@ fn protocol_unblock_resumes_review_on_the_retained_branch_without_restarting_dev
 }
 
 #[test]
+fn decision_unblock_recovers_the_interrupted_fix_phase_and_preserves_dirty_work() {
+    let (tmp, mut task) = fixture();
+    let root = tmp.path();
+    let worker = std::path::PathBuf::from(task.worktree_path().unwrap());
+    std::fs::write(worker.join("pending-fix.txt"), "retained correction").unwrap();
+    let head = git(&worker, &["rev-parse", "HEAD"]).unwrap();
+    task.task_runtime.current_phase = Some("review".into());
+    task.task_runtime.set_last_error_details(
+        "E903",
+        "decisions",
+        "DM_PENDING: device evidence required",
+    );
+    task.task_runtime
+        .extra
+        .insert("decision_wait".into(), serde_json::json!("device"));
+    task.task_runtime.extra.insert(
+        "decision_context".into(),
+        serde_json::json!({"phase":"fix"}),
+    );
+    task.task_runtime.extra.insert(
+        "suspended_phase".into(),
+        serde_json::json!({"phase":"fix","decision":"device","outcome":"not_accepted"}),
+    );
+    let paths = ProjectPaths::from_root(root);
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = CoordinatorSnapshot::empty();
+    snapshot.registry.tasks.push(task);
+    db.save_snapshot(&snapshot).unwrap();
+    let cfg = crate::config::CoordinatorConfig {
+        reference_branch: Some("main".into()),
+        ..Default::default()
+    };
+    crate::service::coordinator_workflow::coordinator_unblock_task(
+        &paths,
+        Some(&cfg),
+        &Default::default(),
+        "ROOT",
+        "Resume retained correction; native decision checks still apply",
+    )
+    .unwrap();
+    let registry = db.load_snapshot().unwrap().registry;
+    let task = registry.find_task("ROOT").unwrap();
+    assert_eq!(task.state, "changes_requested");
+    assert_eq!(task.task_runtime.current_phase.as_deref(), Some("fix"));
+    assert!(task
+        .task_runtime
+        .extra
+        .contains_key("review_refresh_correction"));
+    assert!(task
+        .task_runtime
+        .extra
+        .contains_key("previous_suspended_phase"));
+    assert!(!task.task_runtime.extra.contains_key("suspended_phase"));
+    assert_eq!(git(&worker, &["rev-parse", "HEAD"]).unwrap(), head);
+    assert_eq!(
+        std::fs::read_to_string(worker.join("pending-fix.txt")).unwrap(),
+        "retained correction"
+    );
+}
+
+#[test]
 fn legacy_missing_result_unblock_reattaches_only_the_proven_worker_and_keeps_dirty_work() {
     let (tmp, mut task) = fixture();
     let root = tmp.path();

@@ -89,6 +89,52 @@ pub fn diagnose_stall_native(
 mod tests {
     use super::*;
     #[test]
+    fn one_external_intervention_groups_transitive_consumers_but_keeps_unrelated_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let mut tasks = serde_json::json!([
+            {"id":"MOBILE","state":"blocked"},
+            {"id":"REVIEW","state":"blocked","dependencies":["MOBILE"]},
+            {"id":"DOC","state":"blocked","dependencies":["REVIEW"]},
+            {"id":"UNRELATED","state":"blocked","dependencies":["MOBILE"],"task_runtime":{"last_error_code":"E103","last_error_message":"Missing native ACK"}}
+        ]);
+        for task in tasks.as_array_mut().unwrap().iter_mut().take(3) {
+            task["task_runtime"] = serde_json::json!({"last_error_code":"E903","last_error_origin":"decisions","decision_wait":"device","last_error_message":"Connect Android device; No USB access"});
+        }
+        // The older registry format has no owner field: graph fallback must work.
+        let registry = serde_json::json!({"tasks":tasks});
+        crate::coordinator::state::coordinator_state_registry_save(
+            root.path(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap();
+        let summary = diagnose_stall_native(
+            root.path(),
+            &Default::default(),
+            None,
+            &Default::default(),
+            &CoordinatorRunState::new(),
+        );
+        assert!(summary
+            .lines
+            .iter()
+            .any(|l| l.starts_with("MOBILE (") && l.contains("No USB access")));
+        assert!(summary
+            .lines
+            .iter()
+            .any(|l| l.starts_with("UNRELATED (") && l.contains("E103")));
+        assert!(!summary
+            .lines
+            .iter()
+            .any(|l| l.starts_with("REVIEW (") || l.starts_with("DOC (")));
+        assert!(summary
+            .lines
+            .iter()
+            .any(|l| l.contains("Affected dependent task(s)")
+                && l.contains("DOC")
+                && l.contains("REVIEW")));
+    }
+    #[test]
     fn grouped_dependency_fallout_cannot_stop_independent_work_waiting_for_quota() {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = crate::config::CanonicalConfig::default();

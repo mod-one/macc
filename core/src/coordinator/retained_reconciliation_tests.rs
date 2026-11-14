@@ -4,6 +4,67 @@ use crate::coordinator::engine::{
 use crate::coordinator::task_selector::reconcile_task_blocks;
 use serde_json::json;
 #[test]
+fn interrupted_fix_uses_native_phase_pin_then_requires_fresh_tests_and_review() {
+    let root = tempfile::tempdir().unwrap();
+    let mut publishing:super::super::model::Task=serde_json::from_value(json!({"id":"PUBLISH","state":"blocked","task_runtime":{"current_phase":"merge","decision_wait":"device","last_error_origin":"decisions","decision_context":{"phase":"fix"}}})).unwrap();
+    super::resume_state(root.path(), &mut publishing);
+    assert_eq!(
+        publishing.task_runtime.current_phase.as_deref(),
+        Some("merge"),
+        "an old AI pin cannot replace a later publication phase"
+    );
+    for testing in [false, true] {
+        let mut task:super::super::model::Task=serde_json::from_value(json!({"id":"A","state":"blocked","task_runtime":{"current_phase":"review","decision_wait":"device","last_error_origin":"decisions","decision_context":{"phase":"fix"}}})).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::resume_state(root.path(), &mut task),
+            super::WorkflowState::ChangesRequested
+        );
+        assert_eq!(task.task_runtime.current_phase.as_deref(), Some("fix"));
+        task.set_workflow_state(super::WorkflowState::ChangesRequested);
+        let mut registry = json!({"tasks":[task]});
+        let mut phases = crate::config::PhasesConfig::default();
+        phases.testing.enabled = testing;
+        phases.review.enabled = false;
+        for expected in if testing {
+            vec!["fix", "test", "review"]
+        } else {
+            vec!["fix", "review"]
+        } {
+            let actions = build_advance_actions(
+                &registry,
+                &Default::default(),
+                "2026-11-14T21:10:00Z",
+                Some(0),
+                &phases,
+            )
+            .unwrap();
+            let [AdvanceTaskAction::RunPhase {
+                mode, transition, ..
+            }] = actions.as_slice()
+            else {
+                panic!("{actions:?}")
+            };
+            assert_eq!(*mode, expected);
+            apply_phase_outcome_in_registry(
+                &mut registry,
+                "A",
+                expected,
+                *transition,
+                if expected == "review" {
+                    Some(ReviewVerdict::Ok)
+                } else {
+                    None
+                },
+                None,
+                "2026-11-14T21:10:00Z",
+            )
+            .unwrap();
+        }
+        assert_ne!(registry["tasks"][0]["state"], "merged");
+    }
+}
+#[test]
 fn refreshed_review_is_mandatory_and_does_not_consume_an_extra_correction_cycle() {
     for limit in [0, 1] {
         let mut registry = json!({"tasks":[{"id":"A","state":"testing","worktree":{"branch":"ai/future/A","worktree_path":"/tmp/retained"},"task_runtime":{"current_phase":"merge","review_cycles":1,"review_refresh_required":"DM_STALE: reviewed source changed"}}]});

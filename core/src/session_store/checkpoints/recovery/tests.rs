@@ -79,6 +79,134 @@ fn request_for(root: &Path, worker: &Path) -> ContextRequest {
 }
 
 #[test]
+fn checkpoint_recovery_preserves_live_and_unexpired_leases_and_reaps_only_dead_expired_owners() {
+    let (tmp, _, request) = setup();
+    let root = tmp.path();
+    let prepared = prepare(root, &request).unwrap();
+    let id = prepared.checkpoint_id.as_ref().unwrap();
+    let grant = super::super::tests::claim(root, &request, &prepared);
+    let (db, _) = db::active(root).unwrap();
+    assert!(reconcile(root, id, None)
+        .unwrap_err()
+        .to_string()
+        .contains("active lease"));
+    db.execute("UPDATE session_leases SET expires_at=0", [])
+        .unwrap();
+    assert_eq!(maintain(root).unwrap(), 0);
+    assert!(reconcile(root, id, None)
+        .unwrap_err()
+        .to_string()
+        .contains("active lease"));
+    db.execute(
+        "UPDATE session_leases SET owner_process_id=99999999,expires_at=?1",
+        [now() + 3600],
+    )
+    .unwrap();
+    assert_eq!(maintain(root).unwrap(), 0);
+    assert!(reconcile(root, id, None)
+        .unwrap_err()
+        .to_string()
+        .contains("active lease"));
+    let revision_before = revision(root, &["A".into()]).unwrap();
+    db.execute("UPDATE session_leases SET expires_at=0", [])
+        .unwrap();
+    assert_ne!(revision(root, &["A".into()]).unwrap(), revision_before);
+    assert_eq!(maintain(root).unwrap(), 1);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_leases", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT status FROM logical_sessions WHERE id=?1",
+            [&grant.key.session_id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "abandoned"
+    );
+    assert!(!db
+        .query_row(
+            "SELECT exists(SELECT 1 FROM session_events WHERE event_type='checkpoint_completed')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+}
+
+#[test]
+fn delivered_checkpoints_are_retired_without_deleting_evidence_or_reopening_tasks() {
+    let (tmp, id, _) = setup();
+    let root = tmp.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = storage.load_snapshot().unwrap();
+    snapshot.registry.tasks[0].state = "merged".into();
+    storage.save_snapshot(&snapshot).unwrap();
+    let (db, _) = db::active(root).unwrap();
+    let before: (String, String) = db
+        .query_row(
+            "SELECT content_json,content_sha256 FROM task_checkpoints WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(diagnostics(root)
+        .unwrap()
+        .iter()
+        .all(|d| d["task_id"] != "A"));
+    assert!(maintain(root).unwrap() > 0);
+    assert_eq!(maintain(root).unwrap(), 0);
+    let after: (String, String, String) = db
+        .query_row(
+            "SELECT content_json,content_sha256,validation_state FROM task_checkpoints WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((after.0, after.1), before);
+    assert_eq!(after.2, "retired");
+    assert_eq!(
+        storage.load_snapshot().unwrap().registry.tasks[0].state,
+        "merged"
+    );
+    assert!(reconcile(root, &id, None)
+        .unwrap_err()
+        .to_string()
+        .contains("delivered"));
+    // The configured JSON registry also remains authoritative when an old
+    // SQLite coordinator database is still present.
+    let mut config = crate::config::CanonicalConfig::default();
+    let cfg = config
+        .automation
+        .coordinator
+        .get_or_insert_with(Default::default);
+    cfg.storage_mode = Some("json".into());
+    cfg.task_registry_file = Some(".macc/custom-registry.json".into());
+    crate::save_canonical_config(&paths, &config).unwrap();
+    let mut json_paths = CoordinatorStoragePaths::from_project_paths(&paths);
+    json_paths.registry_json_path = root.join(".macc/custom-registry.json");
+    crate::coordinator_storage::JsonStorage::new(json_paths)
+        .save_snapshot(&snapshot)
+        .unwrap();
+    snapshot.registry.tasks[0].state = "blocked".into();
+    storage.save_snapshot(&snapshot).unwrap();
+    db.execute(
+        "UPDATE task_checkpoints SET validation_state='needs_reconciliation' WHERE id=?1",
+        [&id],
+    )
+    .unwrap();
+    assert!(diagnostics(root).unwrap().is_empty());
+    assert!(maintain(root).unwrap() > 0);
+    assert_eq!(
+        storage.load_snapshot().unwrap().registry.tasks[0].state,
+        "blocked"
+    );
+}
+
+#[test]
 fn reconciliation_uses_the_actual_worker_and_changed_authoritative_contract() {
     let (tmp, id, _) = setup();
     let root = tmp.path();

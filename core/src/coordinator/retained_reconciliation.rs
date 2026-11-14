@@ -52,9 +52,13 @@ pub(crate) fn reconcile(
 }
 
 /// Governance freshness is independent of the optional review-cycle budget.
-pub(crate) fn advance_override(task: &Task) -> Option<super::engine::AdvancePlan> {
+pub(crate) fn advance_override(
+    task: &Task,
+    phases: &crate::config::PhasesConfig,
+) -> Option<super::engine::AdvancePlan> {
     use super::engine::{AdvancePlan, PhaseTransition};
-    let (mode, next_state) = if task.workflow_state() == Some(WorkflowState::Testing)
+    let (mode, next_state) = if (task.workflow_state() == Some(WorkflowState::Testing)
+        || (task.workflow_state() == Some(WorkflowState::InProgress) && !phases.testing.enabled))
         && task
             .task_runtime
             .extra
@@ -93,8 +97,41 @@ pub(crate) fn review_completed(
 
 /// A repaired validation/publication failure must not restart implementation.
 pub fn resume_state(root: &std::path::Path, task: &mut Task) -> WorkflowState {
+    // Older interrupted phases left current_phase at the previous completed
+    // phase. The native invocation pin identifies the interrupted phase.
+    if task.task_runtime.extra.contains_key("decision_wait")
+        && task.task_runtime.last_error_origin.as_deref() == Some("decisions")
+        && task.task_runtime.current_phase.as_deref() != Some("merge")
+    {
+        if let Some(phase) = task
+            .task_runtime
+            .extra
+            .get("suspended_phase")
+            .or_else(|| task.task_runtime.extra.get("decision_context"))
+            .and_then(|v| v["phase"].as_str())
+            .filter(|p| matches!(*p, "dev" | "test" | "fix" | "review"))
+        {
+            task.task_runtime.current_phase = Some(phase.into());
+        }
+        if let Some(receipt) = task.task_runtime.extra.remove("suspended_phase") {
+            task.task_runtime
+                .extra
+                .insert("previous_suspended_phase".into(), receipt);
+        }
+    }
     match task.task_runtime.current_phase.as_deref() {
-        Some("fix") => WorkflowState::ChangesRequested,
+        Some("fix") => {
+            if task.task_runtime.extra.contains_key("decision_wait") {
+                task.task_runtime.extra.insert(
+                    "suspended_fix_review_required".into(),
+                    serde_json::json!(true),
+                );
+                task.task_runtime
+                    .extra
+                    .insert("review_refresh_correction".into(), serde_json::json!(true));
+            }
+            WorkflowState::ChangesRequested
+        }
         Some("test") => WorkflowState::InProgress,
         Some("review") => {
             task.task_runtime.extra.insert(

@@ -418,13 +418,12 @@ pub fn build_advance_actions(
         let task_id = task.id.clone();
         let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
         let workflow_state = task.workflow_state();
-        match crate::coordinator::retained_reconciliation::advance_override(task).unwrap_or_else(
-            || {
+        match crate::coordinator::retained_reconciliation::advance_override(task, phases)
+            .unwrap_or_else(|| {
                 workflow_state
                     .map(|s| plan_advance(s, max_review_cycles, review_cycles, phases))
                     .unwrap_or(AdvancePlan::Noop)
-            },
-        ) {
+            }) {
             AdvancePlan::RunPhase(transition) => {
                 actions.push(AdvanceTaskAction::RunPhase {
                     task_id,
@@ -815,6 +814,16 @@ pub(crate) fn apply_phase_success_typed(
     runtime.current_phase = Some(transition.runtime_phase.to_string());
     if transition.mode == "fix" {
         runtime.extra.remove("review_refresh_correction");
+        if runtime
+            .extra
+            .remove("suspended_fix_review_required")
+            .is_some()
+        {
+            runtime.extra.insert(
+                "review_refresh_required".into(),
+                serde_json::json!("Resumed correction requires a fresh independent review"),
+            );
+        }
     }
     runtime.pid = None;
     runtime.delayed_until = None;

@@ -725,20 +725,66 @@ pub async fn advance_tasks_native(
             .is_some_and(|task| job.matches_task(task))
         {
             let mut job = state.phase_job.take().expect("active phase exists");
+            let waiting = if let Some(task) = current
+                .find_task(&job.task.id)
+                .filter(|t| job.same_assignment(t) && t.state == "blocked")
+            {
+                crate::coordinator::decisions::pending_for_task(repo_root, &task.id)?.filter(|p| {
+                    task.task_runtime
+                        .extra
+                        .get("decision_wait")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(p.id.as_str())
+                })
+            } else {
+                None
+            };
             job.cancel_and_wait().await;
             job.drain_logs(logger);
-            append_coordinator_event(
-                repo_root,
-                "phase_result_stale",
-                &job.task.id,
-                job.mode,
-                "discarded",
-                "Task state, branch or worktree changed during phase; worker cancelled",
-            )?;
             registry = crate::coordinator::state::coordinator_state_registry_load(
                 repo_root,
                 &BTreeMap::new(),
             )?;
+            let mut suspended = false;
+            if let Some(pending) = waiting {
+                let mut retained = TaskRegistry::from_value(&registry)?;
+                if let Some(task) = retained.find_task_mut(&job.task.id).filter(|t| {
+                    job.same_assignment(t)
+                        && t.state == "blocked"
+                        && t.task_runtime
+                            .extra
+                            .get("decision_wait")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(pending.id.as_str())
+                }) {
+                    super::phase_job::suspend(task, job.mode, &pending);
+                    crate::coordinator::state::coordinator_state_registry_save(
+                        repo_root,
+                        &BTreeMap::new(),
+                        &retained.to_value()?,
+                    )?;
+                    append_coordinator_event(
+                        repo_root,
+                        "phase_suspended",
+                        &job.task.id,
+                        job.mode,
+                        "waiting_decision",
+                        &pending.reason(),
+                    )?;
+                    registry = retained.to_value()?;
+                    suspended = true;
+                }
+            }
+            if !suspended {
+                append_coordinator_event(
+                    repo_root,
+                    "phase_result_stale",
+                    &job.task.id,
+                    job.mode,
+                    "discarded",
+                    "Task state, branch or worktree changed during phase; worker cancelled",
+                )?;
+            }
         }
     }
 
@@ -1177,6 +1223,15 @@ pub async fn advance_tasks_native(
         if let Some(log) = logger {
             let _ = log.note("- Advance done".to_string());
         }
+    }
+    if let Some((task, mode, _)) = pending_phase.as_mut() {
+        // Publish the running phase in the same snapshot as the launch intent.
+        task.task_runtime.current_phase = Some((*mode).into());
+        let mut current = TaskRegistry::from_value(&registry)?;
+        if let Some(stored) = current.find_task_mut(&task.id) {
+            stored.task_runtime.current_phase = Some((*mode).into());
+        }
+        registry = current.to_value()?;
     }
     recompute_resource_locks_from_tasks(&mut registry);
     set_registry_updated_at(&mut registry);

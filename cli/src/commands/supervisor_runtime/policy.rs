@@ -242,12 +242,26 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
             max_attempts
         ));
     }
-    let kept = report
-        .worktree
-        .as_ref()
-        .filter(|path| path.exists())
-        .map(|path| format!(" Repair work is kept in {}.", path.display()))
-        .unwrap_or_default();
+    let mut paths: Vec<_> = report
+        .incident
+        .tasks
+        .iter()
+        .filter_map(|t| t.worktree_path().map(std::path::Path::new))
+        .filter(|p| p.exists())
+        .map(|p| p.display().to_string())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let mut kept = if paths.is_empty() {
+        String::new()
+    } else {
+        format!(" Retained task work: {}.", paths.join(", "))
+    };
+    if report.repair_rounds > 0 || report.commit.is_some() {
+        if let Some(path) = report.worktree.as_ref().filter(|p| p.exists()) {
+            kept.push_str(&format!(" Supervisor repair work: {}.", path.display()));
+        }
+    }
     let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
         || report.detail.contains(super::repair::HUMAN_DECISION);
     let action = if report
@@ -267,7 +281,23 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
         .as_ref()
         .is_some_and(|d| !d.external_prerequisites.is_empty())
     {
-        format!("Supply the recorded external devices, environment or authority, then run `{RETRY}`. Source repair cannot replace these verification requirements.")
+        let ids: std::collections::BTreeSet<_> = report
+            .incident
+            .tasks
+            .iter()
+            .filter_map(|t| {
+                t.task_runtime
+                    .extra
+                    .get("decision_wait")
+                    .and_then(Value::as_str)
+            })
+            .collect();
+        let evidence = if ids.is_empty() {
+            String::new()
+        } else {
+            format!(" Open Decisions and attach the requested evidence to {} for independent verification.",ids.into_iter().collect::<Vec<_>>().join(", "))
+        };
+        format!("Supply the recorded external devices, environment or authority.{evidence} Then run `{RETRY}`. Source repair cannot replace these verification requirements.")
     } else if human {
         format!("Make the human decision named in the reason, then run `{RETRY}`.")
     } else if let Some(time) = pending
@@ -316,6 +346,24 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_handoff_points_to_the_native_request_and_actual_retained_work() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = root.path().join("worker-04");
+        let supervisor = root.path().join("supervisor-03");
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::create_dir_all(&supervisor).unwrap();
+        let mut report:Intervention=serde_json::from_value(json!({"incident":{"id":"incident","run_id":"run","epoch":1,"reason":"blocked","tasks":[{"id":"MOBILE","state":"blocked","worktree":{"worktree_path":worker},"task_runtime":{"decision_wait":"device-request"}}],"recent_events":[]},"attempt":1,"status":"escalated","tool":"fake","diagnosis":{"summary":"Device required","repairable":false,"requires_human":true,"external_prerequisites":["Android observation"]},"worktree":supervisor,"validation":[],"commit":null,"restart_pid":null,"detail":""})).unwrap();
+        let action = next_action(&Pending::default(), &report, 3).unwrap();
+        assert!(action.contains("device-request") && action.contains("independent verification"));
+        assert!(action.contains(worker.to_str().unwrap()));
+        assert!(!action.contains(supervisor.to_str().unwrap()));
+        report.repair_rounds = 1;
+        assert!(next_action(&Pending::default(), &report, 3)
+            .unwrap()
+            .contains(supervisor.to_str().unwrap()));
+    }
 
     #[test]
     fn settings_only_changes_reuse_diagnosis_but_source_changes_invalidate_it() {

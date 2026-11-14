@@ -1,6 +1,8 @@
 //! Reviewed recovery of checkpoint/dispatch context drift. No provider-specific behavior.
 mod context;
+mod maintenance;
 mod retained;
+pub use maintenance::maintain;
 #[cfg(test)]
 pub(crate) mod tests;
 use super::*;
@@ -168,6 +170,7 @@ pub fn ensure_task_ready(root: &Path, task_id: &str) -> Result<()> {
     {
         return Ok(());
     }
+    maintain(root)?;
     let ids = {
         let _guard = lock(root)?;
         let (db, a) = db::active(root)?;
@@ -233,6 +236,18 @@ pub fn revision(root: &Path, task_ids: &[String]) -> Result<Value> {
                 json!({"task_id":task,"id":id,"role":role,"sha256":sha,"validation_state":state}),
             );
         }
+        let mut leases = sql(db.prepare("SELECT l.owner_process_id,l.expires_at,l.heartbeat_at FROM session_leases l JOIN logical_sessions s ON s.id=l.logical_session_id WHERE s.project_id=?1 AND s.task_id=?2 ORDER BY l.logical_session_id"))?;
+        for record in sql(leases.query_map(params![a.project_id, task], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        }))? {
+            let (pid, expires, heartbeat) = sql(record)?;
+            let alive = crate::coordinator::helpers::is_pid_running(pid);
+            rows.push(json!({"task_id":task,"lease_owner_pid":pid,"expires_at":expires,"heartbeat_at":heartbeat,"owner_alive":alive,"recovery_ready":!alive && expires<=now()}));
+        }
     }
     Ok(json!(rows))
 }
@@ -244,6 +259,7 @@ pub fn diagnostics(root: &Path) -> Result<Vec<Value>> {
     {
         return Ok(vec![]);
     }
+    let registry = maintenance::registry(root)?;
     let ids = {
         let _guard = lock(root)?;
         let (db, _) = db::active(root)?;
@@ -253,6 +269,12 @@ pub fn diagnostics(root: &Path) -> Result<Vec<Value>> {
         let mut seen = std::collections::BTreeSet::new();
         super::list(&db)?
             .into_iter()
+            .filter(|c| {
+                c.validation_state != "retired"
+                    && !registry
+                        .find_task(&c.task_id)
+                        .is_some_and(maintenance::delivered)
+            })
             .filter(|c| seen.insert((c.task_id.clone(), c.role.clone())))
             .collect::<Vec<_>>()
     };

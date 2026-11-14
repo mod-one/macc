@@ -79,7 +79,7 @@ pub(super) fn validate_import_identity(root: &Path, value: &Value) -> Result<()>
     }
     Ok(())
 }
-fn recover_in(db: &rusqlite::Connection) -> Result<usize> {
+pub(super) fn recover_in(db: &rusqlite::Connection) -> Result<usize> {
     let mut q=sql(db.prepare("SELECT logical_session_id,owner_process_id,process_identity,expires_at FROM session_leases"))?;
     let rows = sql(q.query_map([], |r| {
         Ok((
@@ -117,6 +117,24 @@ fn recover_in(db: &rusqlite::Connection) -> Result<usize> {
         )?;
     }
     Ok(orphaned.len())
+}
+
+/// Read-only checkpoint checks ignore only leases eligible for native recovery.
+/// A live process, PID reuse or a dead owner before expiry still excludes takeover.
+pub(super) fn checkpoint_idle(db: &rusqlite::Connection, worktree: &str) -> Result<()> {
+    let mut query = sql(db.prepare(
+        "SELECT owner_process_id,expires_at FROM session_leases WHERE owner_worktree_id=?1",
+    ))?;
+    let rows = sql(query.query_map([worktree], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    }))?;
+    for row in rows {
+        let (pid, expires) = sql(row)?;
+        if crate::coordinator::helpers::is_pid_running(pid) || expires > now() {
+            return Err(error(format!("Checkpoint requires an idle retained worktree; active lease exists (owner pid={pid}, expires_at={expires}); stop the verified owner or wait for dead-owner expiry before recovery")));
+        }
+    }
+    Ok(())
 }
 pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
     let _guard = lock(root)?;

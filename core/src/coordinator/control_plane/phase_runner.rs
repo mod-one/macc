@@ -280,14 +280,30 @@ fn phase_output(
             let mut bytes = Vec::new();
             stderr.read_to_end(&mut bytes).map(|_| bytes)
         });
+        let runner_pid = child.id();
+        #[cfg(not(unix))]
+        let _ = runner_pid;
+        let mut cancelling_since = None;
+        let mut terminate = |parent_exited: bool| {
+            let first = cancelling_since.is_none();
+            let since = cancelling_since.get_or_insert_with(std::time::Instant::now);
+            #[cfg(unix)]
+            unsafe {
+                // Let the runner's EXIT trap stop its provider and release the
+                // fenced lease before forcing the remaining process group down.
+                if first {
+                    libc::kill(runner_pid as libc::pid_t, libc::SIGTERM);
+                }
+                if parent_exited || since.elapsed() >= std::time::Duration::from_secs(3) {
+                    libc::killpg(runner_pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        };
         let status = loop {
             if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
-                #[cfg(unix)]
-                unsafe {
-                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-                }
+                terminate(false);
+                #[cfg(not(unix))]
                 let _ = child.kill();
-                break child.wait();
             }
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status),
@@ -307,10 +323,7 @@ fn phase_output(
         // Keep cancellation responsive during pipe drain as well as wait().
         while !out.is_finished() || !err.is_finished() {
             if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
-                #[cfg(unix)]
-                unsafe {
-                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-                }
+                terminate(true);
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -587,12 +600,6 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .map(|v| v.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let output = phase_output(&mut command, self.cancelled);
-            if self
-                .cancelled
-                .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Acquire))
-            {
-                return Ok(Err("phase cancelled by coordinator".into()));
-            }
             let Ok(out) = output else {
                 last_reason = format!(
                     "phase '{}' failed to execute runner '{}'",
@@ -632,6 +639,18 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     .as_ref()
                     .map(|(c, _)| c.context_digest.as_str()),
             )?;
+            if self
+                .cancelled
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            {
+                evidence.settle(
+                    "suspended",
+                    Some("Phase interrupted; work and raw output retained; no acceptance inferred"),
+                )?;
+                return Ok(Err(
+                    "phase suspended by coordinator; work and evidence retained".into(),
+                ));
+            }
             if let Some(wait) = crate::session_store::decision_wait::waiting_for_invocation(
                 self.repo_root,
                 task_id,
@@ -888,6 +907,34 @@ mod cancellation_tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn cancellation_allows_runner_cleanup_and_retains_its_final_output() {
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let receipt = root.path().join("released");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let marker = ready.clone();
+        let released = receipt.clone();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg("trap 'printf released > \"$2\"; printf \"cleanup evidence\\n\"; exit 143' TERM; touch \"$1\"; sleep 30 & wait").arg("fixture").arg(marker).arg(released);
+            phase_output(&mut command, Some(&flag)).unwrap()
+        });
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists());
+        cancelled.store(true, Ordering::Release);
+        let output = worker.join().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(std::fs::read_to_string(receipt).unwrap(), "released");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("cleanup evidence"));
+    }
 
     #[test]
     fn phase_process_cancellation_reaps_child_and_descendants() {

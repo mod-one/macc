@@ -127,7 +127,13 @@ impl PhaseJob {
     }
 
     pub fn matches_task(&self, task: &Task) -> bool {
-        self.task.state == task.state
+        self.task.state == task.state && self.same_assignment(task)
+    }
+
+    pub fn same_assignment(&self, task: &Task) -> bool {
+        self.task.id == task.id
+            && self.task.task_runtime.claim_id == task.task_runtime.claim_id
+            && self.task.tool == task.tool
             && self.task.worktree_path() == task.worktree_path()
             && self.task.branch() == task.branch()
             && self.task.base_branch("master") == task.base_branch("master")
@@ -167,6 +173,29 @@ impl PhaseJob {
     }
 }
 
+pub(super) fn suspend(
+    task: &mut Task,
+    phase: &str,
+    pending: &crate::coordinator::decisions::PendingDecision,
+) {
+    let evidence = serde_json::json!({"phase":phase,"decision":pending.id,"worktree":task.worktree_path(),"branch":task.branch(),"outcome":"not_accepted"});
+    task.task_runtime
+        .extra
+        .insert("suspended_phase".into(), evidence);
+    task.task_runtime.current_phase = Some(phase.into());
+    task.task_runtime.pid = None;
+    pending.apply(&mut task.task_runtime);
+    if phase == "fix" {
+        task.task_runtime.extra.insert(
+            "suspended_fix_review_required".into(),
+            serde_json::json!(true),
+        );
+        task.task_runtime
+            .extra
+            .insert("review_refresh_correction".into(), serde_json::json!(true));
+    }
+}
+
 impl Drop for PhaseJob {
     fn drop(&mut self) {
         // spawn_blocking cannot be aborted once started. The process runner
@@ -194,6 +223,131 @@ mod tests {
 
     fn task() -> Task {
         serde_json::from_value(serde_json::json!({"id":"REVIEW", "state":"testing"})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_intervention_suspends_the_fix_without_losing_assignment_or_accepting_output() {
+        use crate::coordinator::decisions as dm;
+        let root = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+        ] {
+            assert!(
+                crate::git::run_git_output_mapped(root.path(), &args, "phase wait fixture")
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        let paths = crate::ProjectPaths::from_root(root.path());
+        std::fs::create_dir_all(&paths.macc_dir).unwrap();
+        let mut config = crate::config::CanonicalConfig::default();
+        let p = dm::Policy {
+            enabled: true,
+            human_question_min_risk: dm::Consultation::NeverAsk,
+            ..Default::default()
+        };
+        let cfg = config
+            .automation
+            .coordinator
+            .get_or_insert_with(Default::default);
+        cfg.decisions = Some(p.clone());
+        cfg.prd_file = Some("prd.json".into());
+        cfg.reference_branch = Some("main".into());
+        crate::save_canonical_config(&paths, &config).unwrap();
+        let prd = root.path().join("prd.json");
+        std::fs::write(
+            &prd,
+            serde_json::json!({"tasks":[{"id":"REVIEW","title":"Native task"}]}).to_string(),
+        )
+        .unwrap();
+        let worker = root.path().join("retained-worker");
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::write(worker.join("partial.txt"), "unfinished fix").unwrap();
+        let original:Task=serde_json::from_value(serde_json::json!({"id":"REVIEW","state":"changes_requested","tool":"future-tool","worktree":{"branch":"retained","worktree_path":worker},"task_runtime":{"current_phase":"review","completion_kind":"success_with_changes"}})).unwrap();
+        let mut registry = crate::coordinator::model::TaskRegistry {
+            tasks: vec![original.clone()],
+            ..Default::default()
+        };
+        let mut store = dm::Store::open(root.path()).unwrap();
+        let plan = store
+            .ensure_plan(root.path(), &prd, "main", &registry)
+            .unwrap();
+        let request = serde_json::from_value(serde_json::json!({"idempotency_key":"device","task_id":"REVIEW","kind":"intervention","question":"Connect device?","context":"No USB access","recommendation":"Use isolated device","investigated":["Checked local access"],"risk":"high","impact":{"evidence":["No USB"]},"intervention":{"action":"Connect isolated device","inaccessible_reason":"No USB access","expected_result":"Device visible","verification":"Independent probe"}})).unwrap();
+        let d = store
+            .submit(&plan, request, "agent:REVIEW:fix", "agent", &p)
+            .unwrap();
+        assert_eq!(d.status, "blocked_external");
+        let pending = dm::pending_for_task(root.path(), "REVIEW")
+            .unwrap()
+            .unwrap();
+        let current = &mut registry.tasks[0];
+        current.state = "blocked".into();
+        pending.apply(&mut current.task_runtime);
+        coordinator_state_registry_save(
+            root.path(),
+            &BTreeMap::new(),
+            &registry.to_value().unwrap(),
+        )
+        .unwrap();
+        let (mut job, _release) = slow_job(original);
+        job.mode = "fix";
+        let mut state = CoordinatorRunState::new();
+        state.phase_job = Some(job);
+        advance_tasks_native(
+            root.path(),
+            &Default::default(),
+            config.automation.coordinator.as_ref(),
+            None,
+            1,
+            &mut state,
+            None,
+        )
+        .await
+        .unwrap();
+        let value = coordinator_state_registry_load(root.path(), &BTreeMap::new()).unwrap();
+        let task = &value["tasks"][0];
+        assert!(state.phase_job.is_none());
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["current_phase"], "fix");
+        assert_eq!(
+            task["task_runtime"]["completion_kind"],
+            "precondition_unmet"
+        );
+        assert_eq!(task["task_runtime"]["suspended_phase"]["decision"], d.id);
+        assert_eq!(task["worktree"]["branch"], "retained");
+        assert_eq!(
+            std::fs::read_to_string(worker.join("partial.txt")).unwrap(),
+            "unfinished fix"
+        );
+        let db = crate::coordinator_storage::SqliteStorage::new(
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths),
+        );
+        let mut kinds = Vec::new();
+        db.scan_events_newest_first(
+            crate::coordinator_storage::EventQuery {
+                task_id: Some("REVIEW"),
+                event_type: None,
+                skip_heartbeats: true,
+            },
+            |event| {
+                kinds.push(event.event_type.clone());
+                std::ops::ControlFlow::Continue(())
+            },
+        )
+        .unwrap();
+        assert!(kinds.iter().any(|k| k == "phase_suspended"));
+        assert!(!kinds.iter().any(|k| k == "phase_result_stale"));
     }
 
     fn slow_job(task: Task) -> (PhaseJob, std::sync::mpsc::Sender<()>) {

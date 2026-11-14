@@ -2,17 +2,7 @@ use super::*;
 use rusqlite::{params, TransactionBehavior};
 
 pub(super) fn idle(db: &rusqlite::Connection, worktree: &str) -> Result<()> {
-    let active: i64 = sql(db.query_row(
-        "SELECT count(*) FROM session_leases WHERE owner_worktree_id=?1",
-        [worktree],
-        |r| r.get(0),
-    ))?;
-    if active != 0 {
-        return Err(error(
-            "Checkpoint requires an idle retained worktree; active lease exists",
-        ));
-    }
-    Ok(())
+    super::super::leases::checkpoint_idle(db, worktree)
 }
 pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext> {
     let freshness = super::memory_context::preflight(root, request)?;
@@ -31,6 +21,7 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
     c.validation["max_content_bytes"] = json!(policy.checkpoints.max_content_bytes);
     c.validation["max_finish_content_bytes"] = json!(policy.checkpoints.max_finish_content_bytes);
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
+    super::super::leases::recover_in(&tx)?;
     idle(&tx, &c.worktree)?;
     let mut content_limit = policy.checkpoints.max_content_bytes;
     if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {

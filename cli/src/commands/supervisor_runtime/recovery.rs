@@ -38,6 +38,7 @@ pub(super) async fn intervene(
         )));
     }
     stop_orphan_jobs(&report.incident).await?;
+    macc_core::session_store::checkpoints::recovery::maintain(&paths.root)?;
     if let Some(diagnosis) =
         super::external_verification::pending_diagnosis(&paths.root, &report.incident)?
     {
