@@ -319,3 +319,139 @@ fn public_unblock_relocates_a_reserved_worker_before_checkpoint_branch_validatio
         .contains_key("review_refresh_required"));
     ensure_task_ready(root, "A").unwrap();
 }
+
+#[test]
+fn supervisor_preserves_missing_evidence_across_a_published_prerequisite_repair() {
+    let (tmp, id, _) = setup();
+    let root = tmp.path();
+    let old = root.join(".macc/worktree/worker-02");
+    let target = root.join(".macc/worktree/worker-01");
+    // The destination includes the supervisor's source repair, so whole-tree
+    // hashes differ even after the retained evidence has been copied correctly.
+    std::fs::write(target.join("prerequisite.rs"), "pub fn repaired() {}\n").unwrap();
+    git(&target, &["add", "prerequisite.rs"]);
+    git(&target, &["commit", "-m", "supervisor prerequisite"]);
+    std::fs::create_dir_all(old.join("evidence")).unwrap();
+    std::fs::write(old.join("evidence/result.json"), "{\"verified\":false}").unwrap();
+    assert!(reconcile(root, &id, None).is_err());
+    let diagnostics = diagnostics(root).unwrap();
+    assert!(diagnostics
+        .iter()
+        .any(|d| d["task_id"] == "A" && d["error"].is_string()));
+    let receipt = preserve_task_work(root, "A").unwrap();
+    assert_eq!(receipt["copied"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read(old.join("evidence/result.json")).unwrap(),
+        std::fs::read(target.join("evidence/result.json")).unwrap()
+    );
+    assert!(
+        git_state::text(&target, &["ls-files", "--", "evidence/result.json"])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(preserve_task_work(root, "A").unwrap()["copied"], json!([]));
+    ensure_task_ready(root, "A").unwrap();
+    assert!(prepare(root, &request_for(root, &target)).is_ok());
+    let (db, _) = db::active(root).unwrap();
+    let events:i64=db.query_row("SELECT count(*) FROM session_events WHERE event_type='checkpoint_retained_file_copied'",[],|r|r.get(0)).unwrap();
+    assert_eq!(events, 1);
+}
+
+#[test]
+fn retained_transfer_preflights_conflicts_and_never_overwrites_or_copies_partially() {
+    let (tmp, _, _) = setup();
+    let root = tmp.path();
+    let old = root.join(".macc/worktree/worker-02");
+    let target = root.join(".macc/worktree/worker-01");
+    std::fs::write(old.join("a-missing.txt"), "retain").unwrap();
+    std::fs::write(old.join("z-conflict.txt"), "old").unwrap();
+    std::fs::write(target.join("z-conflict.txt"), "new").unwrap();
+    assert!(preserve_task_work(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("conflicts"));
+    assert!(!target.join("a-missing.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(target.join("z-conflict.txt")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        std::fs::read_to_string(old.join("a-missing.txt")).unwrap(),
+        "retain"
+    );
+}
+
+#[test]
+fn retained_transfer_refuses_changed_requirements_and_active_source_leases() {
+    let (tmp, id, request) = setup();
+    let root = tmp.path();
+    let old = root.join(".macc/worktree/worker-02");
+    let target = root.join(".macc/worktree/worker-01");
+    let grant = crate::session_store::acquire(
+        root,
+        &crate::session_store::AcquireRequest {
+            identity: request.identity.clone(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            owner_pid: std::process::id() as i64,
+            preferred_provider_id: None,
+            generate_provider_id: true,
+            checkpoint_id: Some(id),
+        },
+    )
+    .unwrap();
+    std::fs::write(old.join("retained.txt"), "retain").unwrap();
+    assert!(preserve_task_work(root, "A").is_err());
+    assert!(!target.join("retained.txt").exists());
+    crate::session_store::release(root, &grant.key, false).unwrap();
+    let prd = root.join("prd.json");
+    let before = std::fs::read_to_string(&prd).unwrap();
+    std::fs::write(&prd, before.replace("Validate", "New requirements")).unwrap();
+    assert!(preserve_task_work(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("changed task requirements"));
+    assert!(!target.join("retained.txt").exists());
+}
+
+#[test]
+fn retained_transfer_refuses_tracked_edits_and_symlinks() {
+    let (tmp, _, _) = setup();
+    let root = tmp.path();
+    let old = root.join(".macc/worktree/worker-02");
+    let target = root.join(".macc/worktree/worker-01");
+    let tracked = git_state::text(&old, &["ls-files"])
+        .unwrap()
+        .lines()
+        .find(|p| *p != "worktree.prd.json" && !p.starts_with(".macc/"))
+        .unwrap()
+        .to_owned();
+    let before = std::fs::read(target.join(&tracked)).unwrap();
+    std::fs::write(old.join(&tracked), "unfinished edit").unwrap();
+    assert!(preserve_task_work(root, "A").is_err());
+    assert_eq!(std::fs::read(target.join(&tracked)).unwrap(), before);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target.join(&tracked), old.join("linked-file")).unwrap();
+        assert!(preserve_task_work(root, "A").is_err());
+        assert!(!target.join("linked-file").exists());
+    }
+}
+
+#[test]
+fn retained_copy_does_not_undo_a_tracked_deletion_in_the_destination() {
+    let (tmp, _, _) = setup();
+    let root = tmp.path();
+    let old = root.join(".macc/worktree/worker-02");
+    let target = root.join(".macc/worktree/worker-01");
+    std::fs::write(old.join("later.txt"), "retained").unwrap();
+    std::fs::write(target.join("later.txt"), "new implementation").unwrap();
+    git(&target, &["add", "later.txt"]);
+    git(&target, &["commit", "-m", "new prerequisite file"]);
+    std::fs::remove_file(target.join("later.txt")).unwrap();
+    assert!(preserve_task_work(root, "A").is_err());
+    assert!(!target.join("later.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(old.join("later.txt")).unwrap(),
+        "retained"
+    );
+}

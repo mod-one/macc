@@ -9,6 +9,14 @@ pub(super) struct Context {
 }
 
 pub(super) fn resolve(root: &Path, previous: &Checkpoint) -> Result<Context> {
+    resolve_mode(root, previous, false)
+}
+
+pub(super) fn resolve_mode(
+    root: &Path,
+    previous: &Checkpoint,
+    allow_transfer: bool,
+) -> Result<Context> {
     let mut target = Path::new(&previous.worktree).to_path_buf();
     let mut payload = None;
     let mut owner = Value::Null;
@@ -101,7 +109,12 @@ pub(super) fn resolve(root: &Path, previous: &Checkpoint) -> Result<Context> {
     };
     if target != Path::new(&previous.worktree) {
         git_state::verify_repository(root, Path::new(&previous.worktree))?;
-        if (!prior_git.changed.is_empty() && prior_git.content_digest != git.content_digest)
+        if (!allow_transfer
+            && !super::retained::matches(
+                Path::new(&previous.worktree),
+                &target,
+                &prior_git.changed,
+            )?)
             || !git_state::descends_from(&target, &prior_git.revision)
         {
             return Err(error(format!("{CODE}: retained work in {} is not integrated into {}; preserve and integrate it before moving the checkpoint",previous.worktree,target.display())));

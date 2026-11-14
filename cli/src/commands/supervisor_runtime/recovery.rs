@@ -92,7 +92,19 @@ pub(super) async fn intervene(
         }
     }
     if config.repair_enabled && config.auto_restart && restart_allowed {
-        if let Some(ids) = super::checkpoint_recovery::recover(paths, &report.incident, dir)? {
+        let checkpoint_recovery = super::checkpoint_recovery::recover(paths, &report.incident, dir);
+        if let Err(error) = &checkpoint_recovery {
+            report.diagnosis = Some(repair::Diagnosis {
+                summary: format!("MACC-CHECKPOINT-CONTEXT-DRIFT: retained work could not be transferred safely: {error}"),
+                repairable: false, requires_human: true, restart_only: false,
+                task_ids: report.incident.tasks.iter().filter(|t| incident::repair_candidate(t)).map(|t|t.id.clone()).collect(),
+                external_prerequisites: vec!["Review conflicting retained files or changed task requirements; source work has been preserved".into()],
+                retry_at: None, unavailable_tool: None, related_task_ids: vec![],
+                macc_findings: vec!["Checkpoint ownership recovery stopped before application repair; inspect checkpoint-recovery-blocked.json".into()],
+                macc_repair_required: false,
+            });
+        }
+        if let Some(ids) = checkpoint_recovery? {
             report.detail = format!("MACC-CHECKPOINT-CONTEXT-DRIFT: execution context recovered without changing task requirements for {}",ids.join(", "));
             return restart_only(paths, canonical, report, lock, &progress, &ids).await;
         }

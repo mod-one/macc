@@ -47,3 +47,14 @@ in a root bundle that references tools and skills absent from that worktree.
 No migration deletes branches, resets task work, removes user files or silently
 withdraws an existing decision. An obsolete durable request remains attributed
 until native reconciliation establishes why it no longer applies.
+
+Checkpoint recovery preserves unfinished files when the assigned worker changes.
+With the coordinator stopped and both workers idle, native recovery may copy
+missing untracked regular files into an ancestor-compatible destination. It checks
+unchanged task/source contracts on both workers, preflights every destination and
+never overwrites, stages, commits or removes the source files. Each copied file
+has a session-journal receipt. A conflicting file, tracked edit, live lease,
+symlink or changed contract requires explicit reviewed integration; the supervisor
+records an infrastructure diagnosis rather than attempting an unrelated source
+repair. Recovery compares the retained paths, not whole trees, so a published
+prerequisite repair in the destination does not invalidate an otherwise exact copy.

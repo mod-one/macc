@@ -1,5 +1,6 @@
 //! Reviewed recovery of checkpoint/dispatch context drift. No provider-specific behavior.
 mod context;
+mod retained;
 #[cfg(test)]
 pub(crate) mod tests;
 use super::*;
@@ -173,9 +174,7 @@ pub fn ensure_task_ready(root: &Path, task_id: &str) -> Result<()> {
         if !ready(&db)? {
             return Ok(());
         }
-        let mut q = sql(db.prepare("SELECT id FROM task_checkpoints c WHERE project_id=?1 AND task_id=?2 AND role!='merge_fix' AND rowid=(SELECT rowid FROM task_checkpoints n WHERE n.project_id=c.project_id AND n.task_id=c.task_id AND n.role=c.role ORDER BY created_at DESC,rowid DESC LIMIT 1)"))?;
-        let rows = sql(q.query_map(params![a.project_id, task_id], |r| r.get::<_, String>(0)))?;
-        rows.map(sql).collect::<Result<Vec<_>>>()?
+        task_checkpoint_ids(&db, &a.project_id, task_id)?
     };
     for id in ids {
         let preview = reconcile(root, &id, None)?;
@@ -262,9 +261,72 @@ pub fn diagnostics(root: &Path) -> Result<Vec<Value>> {
         let id = checkpoint.id;
         match reconcile(root,&id,None) {
             Ok(v) if checkpoint.validation_state=="needs_reconciliation" || v["diagnostic"]["requires_contract_review"]==true || v["diagnostic"]["previous_worktree"]!=v["diagnostic"]["execution_worktree"] => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"diagnostic":v["diagnostic"],"next_command":format!("macc session-store reconcile {id} --expected-sha256 {}",v["current_sha256"].as_str().unwrap_or_default())})),
-            Err(e) if checkpoint.validation_state=="needs_reconciliation" => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"error":e.to_string()})),
+            Err(e) => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"error":e.to_string()})),
             _ => {},
         }
     }
     Ok(diagnostics)
+}
+
+/// Copy only missing untracked retained files, never overwrite or publish task work.
+/// The supervisor calls this with the coordinator stopped, before reconciliation.
+pub fn preserve_task_work(root: &Path, task: &str) -> Result<Value> {
+    let _guard = lock(root)?;
+    let (db, a) = db::active(root)?;
+    let ownership = crate::process_ownership::OwnershipStore::load(root)?;
+    if ownership.records.iter().any(|r| {
+        r.process.kind == crate::process_ownership::ProcessKind::Coordinator
+            && r.process
+                .pid
+                .is_some_and(|pid| crate::coordinator::helpers::is_pid_running(pid as i64))
+    }) {
+        return Err(error(
+            "Stop the coordinator before transferring checkpoint work",
+        ));
+    }
+    let mut transfers = Vec::new();
+    for id in task_checkpoint_ids(&db, &a.project_id, task)? {
+        let previous = load(&db, &id)?;
+        super::lifecycle::idle(&db, &previous.worktree)?;
+        let current = context::resolve_mode(root, &previous, true)?.current;
+        super::lifecycle::idle(&db, &current.worktree)?;
+        if previous.source_hashes != current.source_hashes {
+            return Err(error(format!(
+                "{CODE}: retained work transfer cannot accept changed task requirements"
+            )));
+        }
+        if previous.worktree != current.worktree {
+            let (_, retained_sources) =
+                git_state::task_sources(Path::new(&previous.worktree), &previous.task_id)?;
+            if retained_sources != previous.source_hashes {
+                return Err(error(format!("{CODE}: retained worker task contract changed or was reassigned; no files copied")));
+            }
+            transfers.extend(retained::prepare(
+                Path::new(&previous.worktree),
+                Path::new(&current.worktree),
+            )?);
+        }
+    }
+    let mut copied = Vec::new();
+    for transfer in transfers {
+        let receipt = transfer.copy()?;
+        db::event(
+            &db,
+            task,
+            "checkpoint_retained_file_copied",
+            receipt.clone(),
+        )?;
+        copied.push(receipt);
+    }
+    Ok(json!({"task_id":task,"copied":copied,"source_preserved":true,"acceptance_inferred":false}))
+}
+
+fn task_checkpoint_ids(
+    db: &rusqlite::Connection,
+    project: &str,
+    task: &str,
+) -> Result<Vec<String>> {
+    let mut q = sql(db.prepare("SELECT id FROM task_checkpoints c WHERE project_id=?1 AND task_id=?2 AND role!='merge_fix' AND rowid=(SELECT rowid FROM task_checkpoints n WHERE n.project_id=c.project_id AND n.task_id=c.task_id AND n.role=c.role ORDER BY created_at DESC,rowid DESC LIMIT 1)"))?;
+    let rows = sql(q.query_map(params![project, task], |r| r.get::<_, String>(0)))?;
+    rows.map(sql).collect()
 }
