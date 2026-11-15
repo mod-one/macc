@@ -1074,6 +1074,21 @@ pub async fn advance_tasks_native(
                         }
                     }
                 }
+                if job.needs_context_refresh() {
+                    let mut typed = TaskRegistry::from_value(&registry)?;
+                    if let Some(task) = typed
+                        .find_task_mut(&task_id)
+                        .filter(|t| t.state == "blocked")
+                    {
+                        task.task_runtime
+                            .extra
+                            .insert("native_context_refresh".into(), serde_json::json!(true));
+                        task.task_runtime
+                            .extra
+                            .insert("decision_wait".into(), serde_json::json!("context_refresh"));
+                    }
+                    registry = typed.to_value()?;
+                }
                 if crate::coordinator::decisions::policy(repo_root)?.enabled {
                     let current = crate::coordinator::decisions::registry(repo_root)?;
                     let mut typed = TaskRegistry::from_value(&registry)?;

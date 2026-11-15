@@ -3848,6 +3848,15 @@ fn pause_overlay_content(
     // was normalized to: the retry menu would only repeat the same refusal.
     let is_precondition_stop =
         error_code == Some("E903") || message.contains("[E903]") || !unmet_preconditions.is_empty();
+    if is_precondition_stop
+        && (message.contains("DM_STALE:")
+            || unmet_preconditions.iter().any(|p| p.contains("DM_STALE:")))
+        && !message.contains("DM_PENDING:")
+        && !message.contains("DM_EXTERNAL_VERIFICATION:")
+    {
+        let body = format!("{}: the retained phase needs an updated decision context. Work is preserved; completion has not been accepted.\n\n{}\n\nNext: {}\n\n- Press 'o': open Logs and inspect checkpoint recovery\n- Press 'k' or Esc: close and keep the run stopped\n\nCommand: {}",blocked_task_id.unwrap_or("The retained task"),message.trim(),next_action.unwrap_or("Use native checkpoint recovery to refresh this phase; inspect any refused checkpoint or changed field before retrying."),command_name);
+        return ("Coordinator Paused — Context Refresh", body, Color::Yellow);
+    }
     if is_precondition_stop {
         let task = blocked_task_id.unwrap_or("The blocked task");
         let mut body = format!(
@@ -4083,6 +4092,21 @@ fn get_last_lines_of_file(path: &std::path::Path, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod pause_overlay_content_tests {
     use super::pause_overlay_content;
+    #[test]
+    fn stale_context_is_recovery_not_an_unsatisfied_human_request() {
+        let (title, body, _) = pause_overlay_content(
+            "E903: DM_STALE: native decision binding changed",
+            "task=VERIFY phase=fix",
+            "run",
+            Some("E903"),
+            Some("VERIFY"),
+            &["DM_STALE: native decision binding changed".into()],
+            None,
+        );
+        assert_eq!(title, "Coordinator Paused — Context Refresh");
+        assert!(body.contains("Work is preserved") && body.contains("checkpoint recovery"));
+        assert!(!body.contains("cannot be implemented") && !body.contains("open Decisions"));
+    }
 
     #[test]
     fn precondition_stop_gets_its_own_title_and_lists_the_conditions() {

@@ -29,6 +29,7 @@ pub(crate) struct PhaseJob {
     pub reviewed_commit: Option<String>,
     pub worker: tokio::task::JoinHandle<Result<PhaseOutcome>>,
     cancelled: Arc<AtomicBool>,
+    context_refresh: Arc<AtomicBool>,
     result: Option<Result<PhaseOutcome>>,
     logs: tokio::sync::mpsc::UnboundedReceiver<String>,
 }
@@ -53,6 +54,8 @@ impl PhaseJob {
     ) -> Self {
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = cancelled.clone();
+        let context_refresh = Arc::new(AtomicBool::new(false));
+        let refresh = context_refresh.clone();
         let (tx, logs) = tokio::sync::mpsc::unbounded_channel();
         let snapshot = task.clone();
         let reviewed_commit = if mode == "review" {
@@ -105,6 +108,7 @@ impl PhaseJob {
                 logger: Some(&logger),
                 cancelled: Some(&cancel),
                 prepared_context: Some(&prepared_context),
+                context_refresh: Some(&refresh),
             };
             if mode == "review" {
                 runtime::run_review_phase(&executor, &snapshot, tool.as_deref(), attempts)
@@ -121,6 +125,7 @@ impl PhaseJob {
             reviewed_commit,
             worker,
             cancelled,
+            context_refresh,
             result: None,
             logs,
         }
@@ -128,6 +133,10 @@ impl PhaseJob {
 
     pub fn matches_task(&self, task: &Task) -> bool {
         self.task.state == task.state && self.same_assignment(task)
+    }
+
+    pub fn needs_context_refresh(&self) -> bool {
+        self.context_refresh.load(Ordering::Acquire)
     }
 
     pub fn same_assignment(&self, task: &Task) -> bool {
@@ -223,6 +232,67 @@ mod tests {
 
     fn task() -> Task {
         serde_json::from_value(serde_json::json!({"id":"REVIEW", "state":"testing"})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_native_phase_freshness_schedules_an_automatic_refresh_cycle() {
+        for native in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let original:Task=serde_json::from_value(serde_json::json!({"id":"REVIEW","state":"changes_requested","task_runtime":{"current_phase":"fix"}})).unwrap();
+            coordinator_state_registry_save(
+                root.path(),
+                &BTreeMap::new(),
+                &serde_json::json!({"tasks":[original]}),
+            )
+            .unwrap();
+            let (mut job, release) = slow_job(original);
+            drop(release);
+            job.wait().await;
+            job.mode = "fix";
+            job.transition = PhaseTransition {
+                mode: "fix",
+                next_state: WorkflowState::InProgress,
+                runtime_phase: "fix",
+            };
+            job.result = Some(Ok(PhaseOutcome::Other(Err(
+                "E903: DM_STALE: native decision binding changed".into(),
+            ))));
+            job.context_refresh.store(native, Ordering::Release);
+            let mut state = CoordinatorRunState::new();
+            state.phase_job = Some(job);
+            advance_tasks_native(
+                root.path(),
+                &Default::default(),
+                None,
+                None,
+                1,
+                &mut state,
+                None,
+            )
+            .await
+            .unwrap();
+            let registry = crate::coordinator::model::TaskRegistry::from_value(
+                &coordinator_state_registry_load(root.path(), &BTreeMap::new()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(registry.tasks[0].state, "blocked");
+            assert_eq!(
+                registry.tasks[0].task_runtime.current_phase.as_deref(),
+                Some("fix")
+            );
+            assert_eq!(
+                crate::coordinator::decisions::human_wait_count(&registry),
+                usize::from(native)
+            );
+            assert_eq!(
+                registry.tasks[0]
+                    .task_runtime
+                    .extra
+                    .get("native_context_refresh")
+                    .and_then(serde_json::Value::as_bool),
+                if native { Some(true) } else { None }
+            );
+        }
     }
 
     #[tokio::test]
@@ -376,6 +446,7 @@ mod tests {
                 reviewed_commit: None,
                 worker,
                 cancelled,
+                context_refresh: Arc::new(AtomicBool::new(false)),
                 logs,
                 result: None,
             },

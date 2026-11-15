@@ -1,4 +1,5 @@
 //! Reviewed recovery of checkpoint/dispatch context drift. No provider-specific behavior.
+mod active;
 mod context;
 mod maintenance;
 mod retained;
@@ -171,13 +172,21 @@ pub fn ensure_task_ready(root: &Path, task_id: &str) -> Result<()> {
         return Ok(());
     }
     maintain(root)?;
+    if maintenance::registry(root)?
+        .find_task(task_id)
+        .is_some_and(crate::coordinator::phase_diagnostics::context_refresh_blocked)
+    {
+        // Requeue/unblock must keep the exact-state guard too: a later edit
+        // cannot be laundered through general checkpoint reconciliation.
+        return ensure_decision_context_ready(root, task_id);
+    }
     let ids = {
         let _guard = lock(root)?;
         let (db, a) = db::active(root)?;
         if !ready(&db)? {
             return Ok(());
         }
-        task_checkpoint_ids(&db, &a.project_id, task_id)?
+        active::ids(root, &db, &a.project_id, task_id, false)?
     };
     for id in ids {
         let preview = reconcile(root, &id, None)?;
@@ -372,9 +381,10 @@ pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
         if !ready(&db)? {
             return Ok(());
         }
-        task_checkpoint_ids(&db, &a.project_id, task)?
+        active::ids(root, &db, &a.project_id, task, true)?
     };
     let mut plans = Vec::new();
+    let mut historical_reviews = Vec::new();
     for id in ids {
         let preview = reconcile(root, &id, None)?;
         for field in [
@@ -382,12 +392,13 @@ pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
             "branch",
             "source_revision",
             "worktree_dirty_digest",
+            "worktree_content_digest",
             "source_hashes",
         ] {
             if preview["previous"][field] != preview["current"][field] {
                 return Err(error(format!(
-                    "{}: decision-only refresh refused: {field} changed",
-                    CODE
+                    "{}: task {task} checkpoint {id} phase={} role={}: decision-only refresh refused: {field} changed; previous={} current={}; original work preserved",
+                    CODE,preview["previous"]["phase"],preview["previous"]["role"],preview["previous"][field],preview["current"][field]
                 )));
             }
         }
@@ -396,8 +407,8 @@ pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
                 != preview["current"]["decision_context"][field]
             {
                 return Err(error(format!(
-                    "{}: decision-only refresh refused: {field} changed",
-                    CODE
+                    "{}: task {task} checkpoint {id} phase={} role={}: decision-only refresh refused: {field} changed",
+                    CODE,preview["previous"]["phase"],preview["previous"]["role"]
                 )));
             }
         }
@@ -407,6 +418,28 @@ pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
             ));
         }
         plans.push((id, preview));
+    }
+    // Keep historical review payloads intact. A new review must recapture the
+    // corrected code and get a new provider context; its old receipt grants nothing.
+    for (_, preview) in &plans {
+        if preview["previous"]["role"] == "performer" && preview["previous"]["phase"] == "fix" {
+            let _guard = lock(root)?;
+            let (db, a) = db::active(root)?;
+            if let Some(review) = latest(&db, &a.project_id, task, "reviewer")? {
+                historical_reviews.push(review.id);
+            }
+        }
+    }
+    if !historical_reviews.is_empty() {
+        let _guard = lock(root)?;
+        let (mut db, _) = db::active(root)?;
+        let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
+        for id in historical_reviews {
+            if sql(tx.execute("UPDATE task_checkpoints SET validation_state='fresh_review_required' WHERE id=?1 AND validation_state NOT IN ('retired','fresh_review_required')",[&id]))? > 0 {
+                db::event(&tx,&id,"fresh_review_required",json!({"task_id":task,"reason":"Retained correction context refreshed; historical review cannot approve current work"}))?;
+            }
+        }
+        sql(tx.commit())?;
     }
     for (id, preview) in plans {
         if preview["diagnostic"]["needs_context_update"] == true {

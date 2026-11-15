@@ -105,7 +105,7 @@ pub(super) async fn intervene(
                 summary: format!("MACC-CHECKPOINT-CONTEXT-DRIFT: retained work could not be transferred safely: {error}"),
                 repairable: false, requires_human: true, restart_only: false,
                 task_ids: report.incident.tasks.iter().filter(|t| incident::repair_candidate(t)).map(|t|t.id.clone()).collect(),
-                external_prerequisites: vec!["Review conflicting retained files or changed task requirements; source work has been preserved".into()],
+                external_prerequisites: vec![],
                 retry_at: None, unavailable_tool: None, related_task_ids: vec![],
                 macc_findings: vec!["Checkpoint ownership recovery stopped before application repair; inspect checkpoint-recovery-blocked.json".into()],
                 macc_repair_required: false,

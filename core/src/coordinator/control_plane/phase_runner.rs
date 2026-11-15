@@ -11,6 +11,7 @@ pub(super) struct NativePhaseExecutor<'a> {
     pub(super) logger: Option<&'a dyn CoordinatorLog>,
     pub(super) cancelled: Option<&'a std::sync::atomic::AtomicBool>,
     pub(super) prepared_context: Option<&'a PreparedPhaseContext>,
+    pub(super) context_refresh: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
 pub(super) struct PreparedPhaseContext {
@@ -656,6 +657,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 task_id,
                 &event_source,
             )? {
+                if wait.decision.is_none() && wait.reason.starts_with("DM_STALE:") {
+                    if let Some(flag) = self.context_refresh {
+                        flag.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
                 evidence.settle("waiting_decision", Some(&wait.reason))?;
                 return Ok(Err(format!("E903: {}", wait.reason)));
             }
@@ -676,6 +682,22 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         &combined_output,
                         &policy,
                     ) {
+                        // Freshness is computed by the native store, not from
+                        // a marker claimed in model output.
+                        if store
+                            .context(
+                                &store.plan(&context.plan_id)?,
+                                task_id,
+                                &decision_attempt,
+                                mode,
+                                &policy,
+                            )
+                            .is_ok_and(|fresh| fresh.context_digest != context.context_digest)
+                        {
+                            if let Some(flag) = self.context_refresh {
+                                flag.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        }
                         evidence.settle("validation_failed", Some(&error.to_string()))?;
                         if error.to_string().contains("DM_COMPLIANCE:") {
                             let diagnostic = store.diagnostic_delivery(
@@ -870,6 +892,7 @@ pub fn run_phase_for_task_native(
         logger,
         cancelled: None,
         prepared_context: None,
+        context_refresh: None,
     };
     coordinator_runtime::run_phase(
         &executor,
@@ -892,6 +915,7 @@ pub fn run_review_phase_for_task_native(
         logger,
         cancelled: None,
         prepared_context: None,
+        context_refresh: None,
     };
     coordinator_runtime::run_review_phase(&executor, task, coordinator_tool_override, max_attempts)
 }

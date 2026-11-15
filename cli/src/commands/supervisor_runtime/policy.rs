@@ -264,7 +264,12 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     }
     let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
         || report.detail.contains(super::repair::HUMAN_DECISION);
-    let action = if report
+    let action = if report.diagnosis.as_ref().is_some_and(|d| {
+        d.summary
+            .starts_with(macc_core::session_store::checkpoints::recovery::CODE)
+    }) {
+        format!("Inspect checkpoint-recovery-blocked.json in the incident log directory: verify the named checkpoint, retained phase, ownership and changed field. Reconcile reviewed changes through `macc session-store reconcile <checkpoint-id>` before retrying native recovery (`{RETRY}`). Original work is retained; this infrastructure guard is not a device or approval request.")
+    } else if report
         .diagnosis
         .as_ref()
         .is_some_and(|d| d.macc_repair_required)
@@ -285,12 +290,7 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
             .incident
             .tasks
             .iter()
-            .filter_map(|t| {
-                t.task_runtime
-                    .extra
-                    .get("decision_wait")
-                    .and_then(Value::as_str)
-            })
+            .filter_map(macc_core::coordinator::phase_diagnostics::decision_wait_id)
             .collect();
         let evidence = if ids.is_empty() {
             String::new()
@@ -346,6 +346,17 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_checkpoint_guard_report_is_not_external_evidence_or_a_context_refresh_question() {
+        let report:Intervention=serde_json::from_value(json!({"incident":{"id":"incident","run_id":"run","epoch":1,"reason":"DM_STALE","tasks":[{"id":"VERIFY","state":"blocked","task_runtime":{"decision_wait":"context_refresh"}}],"recent_events":[]},"attempt":1,"status":"escalated","tool":null,"diagnosis":{"summary":"MACC-CHECKPOINT-CONTEXT-DRIFT: decision-only refresh refused","repairable":false,"requires_human":true,"external_prerequisites":["Review conflicting retained files or changed task requirements"]},"worktree":null,"validation":[],"commit":null,"restart_pid":null,"detail":""})).unwrap();
+        let action = next_action(&Pending::default(), &report, 3).unwrap();
+        assert!(action.contains("checkpoint-recovery-blocked.json"));
+        assert!(
+            !action.contains("Open Decisions")
+                && !action.contains("Supply the recorded external")
+                && !action.contains("to context_refresh")
+        );
+    }
 
     #[test]
     fn external_handoff_points_to_the_native_request_and_actual_retained_work() {

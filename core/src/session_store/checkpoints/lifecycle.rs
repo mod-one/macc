@@ -30,6 +30,16 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
             [&previous.id],
             |r| r.get(0),
         ))?;
+        let fresh_review = prior_validation == "fresh_review_required"
+            && c.role == "reviewer"
+            && c.phase == "review"
+            && previous.worktree == c.worktree
+            && previous.branch == c.branch
+            && previous.source_hashes == c.source_hashes
+            && ["plan_id", "contract_digest"].iter().all(|field| {
+                previous.decision_context.as_ref().map(|v| &v[*field])
+                    == c.decision_context.as_ref().map(|v| &v[*field])
+            });
         let mut reasons = Vec::new();
         if prior_validation == "needs_reconciliation" {
             reasons.push("a prior checkpoint still requires reviewed reconciliation");
@@ -48,7 +58,8 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         if !crate::coordinator::decisions::compatible_checkpoint_binding(
             &previous.decision_context,
             &c.decision_context,
-        ) {
+        ) && !fresh_review
+        {
             reasons.push("binding decisions or task context changed; reconcile before resuming");
         }
         if previous.source_hashes != c.source_hashes {
@@ -71,6 +82,10 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
             tracing::warn!(code=super::recovery::CODE,task_id=%c.task_id,checkpoint=%previous.id,"Checkpoint context drift prevents dispatch");
             sql(tx.commit())?;
             return Err(error(format!("{}: Checkpoint {} needs reconciliation: {}. Inspect with `macc session-store reconcile {}` before dispatch",super::recovery::CODE, previous.id, reasons.join("; "), previous.id)));
+        }
+        if fresh_review {
+            c.blocking_issues.push("Fresh independent review of retained corrections required; historical review is not acceptance".into());
+            sql(tx.execute("UPDATE logical_sessions SET status='rotated' WHERE project_id=?1 AND task_id=?2 AND role='reviewer' AND status='available'",params![a.project_id,c.task_id]))?;
         }
         schema::check_mandatory_size(&c, policy.checkpoints.max_content_bytes)?;
         content_limit = policy.checkpoints.max_finish_content_bytes;

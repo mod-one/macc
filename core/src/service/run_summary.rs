@@ -213,6 +213,12 @@ fn severity_for(
 
 fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: usize) -> String {
     if let Some(task) = blocked {
+        if crate::coordinator::phase_diagnostics::context_refresh_blocked(task) {
+            return format!(
+                "{} needs a native context refresh; retained work is preserved.",
+                task.id
+            );
+        }
         if task.task_runtime.extra.contains_key("diagnostic_delivery") {
             return format!("Diagnostic report complete for {}; external verification pending; feature acceptance withheld.",task.id);
         }
@@ -252,6 +258,9 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
+        if crate::coordinator::phase_diagnostics::context_refresh_blocked(task) {
+            return format!("Refresh the retained {} context for {} through native checkpoint recovery. If recovery is blocked, inspect the named checkpoint and changed field; preserve the worktree and resume this phase after reconciliation. This internal refresh has no question to answer.",task.task_runtime.current_phase.as_deref().unwrap_or("execution"),task.id);
+        }
         if task.task_runtime.extra.contains_key("diagnostic_delivery") {
             return "Open Decisions: independently verify the selected assistance, or explicitly reconcile that selection. Then retry the retained review. An unchanged restart or a diagnostic report cannot supply external evidence or authorize release.".into();
         }
@@ -365,6 +374,29 @@ mod tests {
             version: "test".to_string(),
             stop_reason: Some(reason.to_string()),
         }
+    }
+
+    #[test]
+    fn stale_fix_summary_does_not_ask_for_human_evidence_or_an_internal_question() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(root.path());
+        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        sqlite
+            .upsert_coordinator_run(&run(
+                "stale",
+                "2026-11-15T01:48:00Z",
+                "blocked",
+                "E903: DM_STALE: context changed",
+            ))
+            .unwrap();
+        let registry=TaskRegistry::from_value(&json!({"tasks":[{"id":"VERIFY","state":"blocked","task_runtime":{"current_phase":"fix","last_error_code":"E903","last_error_origin":"decisions","last_error_message":"DM_STALE: context changed","decision_wait":"context_refresh"}}]})).unwrap();
+        let summary = load_latest_run_summary(&sqlite, &registry)
+            .unwrap()
+            .unwrap();
+        assert!(summary.headline.contains("context refresh"));
+        assert!(summary.next_action.contains("retained fix context"));
+        assert!(!summary.next_action.contains("Open Decisions"));
+        assert!(!summary.next_action.contains("Supply evidence"));
     }
 
     #[test]

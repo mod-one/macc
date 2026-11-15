@@ -16,6 +16,39 @@ pub fn effective_code(task: &Task) -> Option<&str> {
         .as_deref()
         .filter(|v| !v.is_empty())
 }
+/// Internal refresh sentinels never identify an answerable native request.
+pub fn decision_wait_id(task: &Task) -> Option<&str> {
+    task.task_runtime
+        .extra
+        .get("decision_wait")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty() && *id != "context_refresh")
+}
+pub fn context_refresh_blocked(task: &Task) -> bool {
+    decision_wait_id(task).is_none()
+        && task.task_runtime.last_error_code.as_deref() == Some("E903")
+        && matches!(
+            task.task_runtime.last_error_origin.as_deref(),
+            Some("decisions" | "decision_context_refresh")
+        )
+        && (task
+            .task_runtime
+            .extra
+            .get("decision_wait")
+            .and_then(serde_json::Value::as_str)
+            == Some("context_refresh")
+            || task
+                .task_runtime
+                .extra
+                .get("native_context_refresh")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            || task
+                .task_runtime
+                .last_error_message
+                .as_deref()
+                .is_some_and(|s| s.contains("DM_STALE:")))
+}
 pub fn retained_review_protocol(task: &Task) -> bool {
     task.task_runtime.last_error_code.as_deref() == Some("E103")
         && task.task_runtime.last_error_origin.as_deref() == Some("output_protocol")

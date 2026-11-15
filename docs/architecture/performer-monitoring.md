@@ -70,3 +70,32 @@ processing a precondition failure during a held review, retaining that outcome
 when the review finishes, cancelling stale phases, reaping process groups, and
 draining large stdout/stderr output. These tests use local fixtures and no AI
 provider or user project.
+
+## Decision context refresh across review and correction
+
+A native `DM_STALE` receipt is a request for updated invocation context, not a
+human question. Phase workers pass that fact through an owned atomic flag; a
+model-written marker alone cannot schedule automatic recovery. The control plane
+keeps a refresh cycle for fix/test/review just as for development. The existing
+per-revision retry bound still applies, and a rejected recovery stops explicitly.
+
+Decision-only recovery selects the latest checkpoint for the retained phase and
+role. It requires the same worker, branch, HEAD, index/content digests, task
+sources, plan and contract, with no unresolved native request or active lease.
+Ambiguous multi-role legacy records, a missing/mismatched phase checkpoint and
+uncheckpointed edits remain blocked with a checkpoint/phase/role/field diagnostic.
+General task readiness also scopes its checks to the active role when known.
+
+In particular, a review made before a correction must not be compared with the
+corrected working tree to decide whether the correction can resume. Its payload,
+hash and objections remain historical evidence. Recovery invalidates that
+historical review for acceptance before updating the fix context, then the fresh
+review invocation recaptures current code under the unchanged contract and a new
+provider context. This does not reuse an old acknowledgement or approval. Source,
+ownership, contract and lease guards remain in force; mandatory tests and the
+fresh independent review still precede publication.
+
+Clients distinguish an internal `context_refresh` sentinel from a decision ID.
+Checkpoint recovery failures point to the incident evidence and native reconcile
+preview, not to a device/approval request. Both the shared Web run summary and the
+TUI pause overlay describe a retained phase needing context refresh.

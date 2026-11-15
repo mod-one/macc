@@ -59,13 +59,16 @@ pub(crate) fn setup() -> (tempfile::TempDir, String, ContextRequest) {
 }
 
 fn request_for(root: &Path, worker: &Path) -> ContextRequest {
+    phase_request(root, worker, "dev")
+}
+fn phase_request(root: &Path, worker: &Path, phase: &str) -> ContextRequest {
     let spec = json!({"id":"future-tool","performer":{"command":"fake","session":{"enabled":true,"scope":"task_role_tool","create":{"command":"fake","args":["new","{session_id}"]}}}});
     ContextRequest {
         identity: crate::coordinator::session_identity::identity(
             root,
             worker,
             "A",
-            "performer",
+            crate::coordinator::session_identity::role_for_phase(phase),
             "future-tool",
             &spec,
             &crate::coordinator::session_identity::SessionRouting {
@@ -74,8 +77,283 @@ fn request_for(root: &Path, worker: &Path) -> ContextRequest {
             },
         )
         .unwrap(),
-        phase: "dev".into(),
+        phase: phase.into(),
     }
+}
+
+#[test]
+fn decision_refresh_recovers_dirty_fix_without_rebinding_historical_review() {
+    use crate::coordinator::{decisions as dm, engine};
+    let (tmp, id, _) = setup();
+    let root = tmp.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let worker = root.join(".macc/worktree/worker-01");
+    let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
+    let p = dm::Policy {
+        enabled: true,
+        human_question_min_risk: dm::Consultation::NeverAsk,
+        ..Default::default()
+    };
+    let cfg = config
+        .automation
+        .coordinator
+        .get_or_insert_with(Default::default);
+    cfg.decisions = Some(p.clone());
+    cfg.reference_branch = Some("main".into());
+    cfg.prd_file = Some("prd.json".into());
+    crate::save_canonical_config(&paths, &config).unwrap();
+    let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = storage.load_snapshot().unwrap();
+    let mut store = dm::Store::open(root).unwrap();
+    let plan = store
+        .ensure_plan(root, Path::new("prd.json"), "main", &snapshot.registry)
+        .unwrap();
+    let preview = reconcile(root, &id, None).unwrap();
+    reconcile(root, &id, preview["current_sha256"].as_str()).unwrap();
+    let review = phase_request(root, &worker, "review");
+    let prepared = prepare(root, &review).unwrap();
+    let old_review = super::super::tests::claim(root, &review, &prepared);
+    let review_context = store
+        .issue(&plan, "A", "historical-review", "review", &worker, &p)
+        .unwrap()
+        .0;
+    store
+        .issued(
+            &plan.id,
+            "historical-review",
+            "review",
+            &review_context.render(),
+            &p,
+        )
+        .unwrap();
+    let historical = finish(
+        root,
+        &FinishRequest {
+            key: old_review.key.clone(),
+            phase: "review".into(),
+            result: "changes_requested".into(),
+            acknowledged: true,
+        },
+    )
+    .unwrap();
+    release(root, &old_review.key, true).unwrap();
+    let (db, _) = db::active(root).unwrap();
+    let before: (String, String) = db
+        .query_row(
+            "SELECT content_json,content_sha256 FROM task_checkpoints WHERE id=?1",
+            [&historical.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let fix = phase_request(root, &worker, "fix");
+    let prepared = prepare(root, &fix).unwrap();
+    let lease = super::super::tests::claim(root, &fix, &prepared);
+    std::fs::write(worker.join("code.txt"), "staged correction").unwrap();
+    git(&worker, &["add", "code.txt"]);
+    std::fs::write(
+        worker.join("code.txt"),
+        "unfinished correction after staged version",
+    )
+    .unwrap();
+    std::fs::write(worker.join("proof.txt"), "untracked validation evidence").unwrap();
+    let question=serde_json::from_value(json!({"idempotency_key":"fix-clarification","task_id":"A","kind":"clarification","question":"Which equivalent internal label?","context":"Read existing conventions","investigated":["Checked existing code"],"recommendation":"Keep the existing label","risk":"low","impact":{"evidence":["Existing convention"]}})).unwrap();
+    assert_eq!(
+        store
+            .submit(&plan, question, "agent:A:fix", "agent", &p)
+            .unwrap()
+            .status,
+        "resolved"
+    );
+    assert_eq!(
+        crate::session_store::decision_wait::heartbeat_state(root, &lease.key, "fix-source")
+            .unwrap()["status"],
+        "waiting_decision"
+    );
+    let finish_error = finish(
+        root,
+        &FinishRequest {
+            key: lease.key.clone(),
+            phase: "fix".into(),
+            result: "interrupted".into(),
+            acknowledged: false,
+        },
+    )
+    .unwrap_err();
+    assert!(finish_error
+        .to_string()
+        .contains("native decision binding changed"));
+    let finished = latest(
+        &db,
+        &db::active(root).unwrap().1.project_id,
+        "A",
+        "performer",
+    )
+    .unwrap()
+    .unwrap();
+    release(root, &lease.key, false).unwrap();
+    let task = &mut snapshot.registry.tasks[0];
+    task.tool = Some("future-tool".into());
+    task.task_runtime.current_phase = Some("fix".into());
+    task.task_runtime.set_last_error_details(
+        "E903",
+        "decisions",
+        "DM_STALE: native binding changed",
+    );
+    task.task_runtime
+        .extra
+        .insert("decision_wait".into(), json!("context_refresh"));
+    storage.save_snapshot(&snapshot).unwrap();
+    ensure_decision_context_ready(root, "A").unwrap();
+    ensure_task_ready(root, "A").unwrap();
+    std::fs::write(
+        worker.join("proof.txt"),
+        "concurrent external edit before requeue",
+    )
+    .unwrap();
+    assert!(ensure_task_ready(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("worktree_dirty_digest"));
+    std::fs::write(worker.join("proof.txt"), "untracked validation evidence").unwrap();
+    let after: (String, String, String) = db
+        .query_row(
+            "SELECT content_json,content_sha256,validation_state FROM task_checkpoints WHERE id=?1",
+            [&historical.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((after.0, after.1), before);
+    assert_eq!(after.2, "fresh_review_required");
+    assert_eq!(
+        git_state::text(&worker, &["show", ":code.txt"]).unwrap(),
+        "staged correction"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker.join("proof.txt")).unwrap(),
+        "untracked validation evidence"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker.join("code.txt")).unwrap(),
+        "unfinished correction after staged version"
+    );
+    let active = latest(
+        &db,
+        &db::active(root).unwrap().1.project_id,
+        "A",
+        "performer",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(active.worktree_dirty_digest, finished.worktree_dirty_digest);
+    crate::service::coordinator_workflow::coordinator_unblock_task(
+        &paths,
+        config.automation.coordinator.as_ref(),
+        &Default::default(),
+        "A",
+        "Native context refreshed; retain fix",
+    )
+    .unwrap();
+    let registry = storage.load_registry().unwrap();
+    assert_eq!(registry.tasks[0].state, "changes_requested");
+    let mut value = registry.to_value().unwrap();
+    let mut phases = crate::config::PhasesConfig::default();
+    phases.testing.enabled = false;
+    phases.review.enabled = false;
+    for mode in ["fix", "review"] {
+        let actions = engine::build_advance_actions(
+            &value,
+            &Default::default(),
+            "2026-11-15T01:48:00Z",
+            Some(0),
+            &phases,
+        )
+        .unwrap();
+        let [engine::AdvanceTaskAction::RunPhase {
+            transition,
+            mode: actual,
+            ..
+        }] = actions.as_slice()
+        else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(*actual, mode);
+        if mode == "fix" {
+            engine::apply_phase_outcome_in_registry(
+                &mut value,
+                "A",
+                mode,
+                *transition,
+                None,
+                None,
+                "2026-11-15T01:48:00Z",
+            )
+            .unwrap();
+        }
+    }
+    assert!(store
+        .complete(
+            &plan.id,
+            "historical-review",
+            "review",
+            &format!("MACC_DECISION_ACK: {}", review_context.context_digest),
+            &p
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("DM_STALE"));
+    let fresh = prepare(root, &review).unwrap();
+    let fresh_review = super::super::tests::claim(root, &review, &fresh);
+    assert_ne!(
+        fresh_review.provider_session_id,
+        old_review.provider_session_id
+    );
+    assert!(fresh.prompt.contains("Fresh independent review"));
+    release(root, &fresh_review.key, false).unwrap();
+    // Later edits cannot be laundered through another context refresh.
+    std::fs::write(worker.join("proof.txt"), "external edit after checkpoint").unwrap();
+    let err = ensure_decision_context_ready(root, "A")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("worktree_dirty_digest")
+            && err.contains("phase=")
+            && err.contains("role=")
+            && err.contains("checkpoint")
+    );
+}
+
+#[test]
+fn decision_refresh_refuses_ambiguous_or_conflicting_phase_metadata() {
+    let (tmp, _, _) = setup();
+    let root = tmp.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = storage.load_snapshot().unwrap();
+    snapshot.registry.tasks[0].task_runtime.current_phase = Some("fix".into());
+    snapshot.registry.tasks[0]
+        .task_runtime
+        .extra
+        .insert("decision_context".into(), json!({"phase":"review"}));
+    storage.save_snapshot(&snapshot).unwrap();
+    assert!(ensure_decision_context_ready(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("disagrees"));
+    snapshot.registry.tasks[0].task_runtime.current_phase = None;
+    snapshot.registry.tasks[0]
+        .task_runtime
+        .extra
+        .remove("decision_context");
+    storage.save_snapshot(&snapshot).unwrap();
+    prepare(
+        root,
+        &phase_request(root, &root.join(".macc/worktree/worker-02"), "review"),
+    )
+    .unwrap();
+    assert!(ensure_decision_context_ready(root, "A")
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous"));
 }
 
 #[test]
