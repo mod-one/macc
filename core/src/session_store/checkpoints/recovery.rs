@@ -2,8 +2,10 @@
 mod active;
 mod context;
 mod maintenance;
+mod restart;
 mod retained;
 pub use maintenance::maintain;
+pub use restart::restart_revision;
 #[cfg(test)]
 pub(crate) mod tests;
 use super::*;
@@ -365,6 +367,15 @@ fn task_checkpoint_ids(
 /// Refresh decision bindings only when the task and exact retained Git state match.
 /// Current unresolved decisions remain prerequisites, regardless of consultation mode.
 pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
+    decision_context_ready(root, task, true)
+}
+
+/// Validate the same exact-state guards without reconciling checkpoints.
+pub fn preview_decision_context(root: &Path, task: &str) -> Result<()> {
+    decision_context_ready(root, task, false)
+}
+
+fn decision_context_ready(root: &Path, task: &str, apply: bool) -> Result<()> {
     if crate::coordinator::decisions::pending_for_task(root, task)?.is_some() {
         return Err(error(
             "A native decision is still unresolved; context refresh cannot answer it",
@@ -418,6 +429,9 @@ pub fn ensure_decision_context_ready(root: &Path, task: &str) -> Result<()> {
             ));
         }
         plans.push((id, preview));
+    }
+    if !apply {
+        return Ok(());
     }
     // Keep historical review payloads intact. A new review must recapture the
     // corrected code and get a new provider context; its old receipt grants nothing.

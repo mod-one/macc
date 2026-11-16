@@ -242,7 +242,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         activity: Some("Incident detected; preparing intervention".into()),
                         restart_only: false,
                     };
-                    let fingerprint = policy::crash_fingerprint(&report.incident);
+                    let fingerprint = policy::recovery_fingerprint(&paths, &report.incident)?;
                     let restart_allowed = ledger.restarts.get(&fingerprint).copied().unwrap_or(0)
                         < policy::MAX_RESTARTS_PER_FINGERPRINT;
                     write_report(&paths, &config, &dir, &report)?;

@@ -79,6 +79,14 @@ model-written marker alone cannot schedule automatic recovery. The control plane
 keeps a refresh cycle for fix/test/review just as for development. The existing
 per-revision retry bound still applies, and a rejected recovery stops explicitly.
 
+Dependency failures (`E905`) do not own a refresh or human wait. The coordinator
+removes inherited `context_refresh` markers from these records and ignores them
+when deciding whether the causal root needs another native sync cycle. Decision
+sync cannot requeue a dependent or consume its refresh budget merely because its
+dependency explanation quotes `DM_STALE`. A separate
+unresolved external prerequisite still stops the engine for supervisor handoff;
+rejected root recovery cannot keep an otherwise idle run alive indefinitely.
+
 Decision-only recovery selects the latest checkpoint for the retained phase and
 role. It requires the same worker, branch, HEAD, index/content digests, task
 sources, plan and contract, with no unresolved native request or active lease.
@@ -99,3 +107,28 @@ Clients distinguish an internal `context_refresh` sentinel from a decision ID.
 Checkpoint recovery failures point to the incident evidence and native reconcile
 preview, not to a device/approval request. Both the shared Web run summary and the
 TUI pause overlay describe a retained phase needing context refresh.
+
+The supervisor's automatic restart limit is scoped to semantic recovery evidence
+for native context refresh incidents: interrupted task/role/phase, retained
+worker, branch, HEAD, index/content and source hashes, and the **current applicable**
+decision binding. A new applicable decision can therefore recover even before a
+checkpoint is reconciled. Neither a regenerated checkpoint UUID, reconciliation
+metadata, a new run/epoch nor an unrelated decision renews this budget. Updating
+the stored binding to the current one does not grant a second restart for the
+same decision. Other incident types keep their existing crash fingerprint limit.
+Existing ledger entries are retained; the versioned native fingerprint permits
+one migration recovery and then enforces the same one-restart bound.
+
+When that bound is exhausted, the supervisor still runs the native exact-state
+preview and records `checkpoint-recovery.json`, without reconciling checkpoints,
+copying retained files or spending an AI diagnosis call. A refused preview records
+`checkpoint-recovery-blocked.json` with the guard that failed. A valid but recurring
+refresh reports `MACC-CONTEXT-REFRESH-RESTART-LIMIT` and an explicit retry action.
+No recovery marks development complete or skips tests, independent review or
+delivery validation.
+
+Regression tests in `decisions/waiting.rs`, `decisions/tests_delegation.rs`,
+checkpoint `recovery/tests.rs` and CLI
+`supervisor_runtime/checkpoint_recovery.rs` cover legacy dependency markers,
+current versus stored decision bindings, unrelated decisions, regenerated
+checkpoints, retained development progress and non-mutating budget inspection.

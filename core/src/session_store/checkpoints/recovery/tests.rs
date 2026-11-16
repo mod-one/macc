@@ -870,11 +870,13 @@ fn decision_only_recovery_refuses_worker_moves_and_new_uncheckpointed_work() {
         .unwrap_err()
         .to_string()
         .contains("worktree changed"));
+    assert!(preview_decision_context(root, "A").is_err());
     let preview = reconcile(root, &id, None).unwrap();
     reconcile(root, &id, preview["current_sha256"].as_str()).unwrap();
     ensure_decision_context_ready(root, "A").unwrap();
     let target = root.join(".macc/worktree/worker-01");
     std::fs::write(target.join("new-user-work.txt"), "preserve").unwrap();
+    assert!(preview_decision_context(root, "A").is_err());
     assert!(ensure_decision_context_ready(root, "A")
         .unwrap_err()
         .to_string()
@@ -898,11 +900,13 @@ fn resolved_autonomous_decision_refreshes_checkpoint_without_accepting_new_requi
         human_question_min_risk: dm::Consultation::NeverAsk,
         ..Default::default()
     };
-    config
+    let coordinator = config
         .automation
         .coordinator
-        .get_or_insert_with(Default::default)
-        .decisions = Some(p.clone());
+        .get_or_insert_with(Default::default);
+    coordinator.decisions = Some(p.clone());
+    coordinator.reference_branch = Some("main".into());
+    coordinator.prd_file = Some("prd.json".into());
     crate::save_canonical_config(&paths, &config).unwrap();
     let registry = crate::coordinator::model::TaskRegistry::from_value(
         &serde_json::from_slice::<Value>(&std::fs::read(root.join("prd.json")).unwrap()).unwrap(),
@@ -914,14 +918,92 @@ fn resolved_autonomous_decision_refreshes_checkpoint_without_accepting_new_requi
         .unwrap();
     let preview = reconcile(root, &id, None).unwrap();
     reconcile(root, &id, preview["current_sha256"].as_str()).unwrap();
+    let tasks = vec!["A".into()];
+    let initial_revision = restart_revision(root, &tasks).unwrap();
     let request=serde_json::from_value(json!({"idempotency_key":"refresh-test","task_id":"A","kind":"decision","question":"Which equivalent internal label?","context":"Read the task and implementation conventions","investigated":["Read task"],"recommendation":"Use the existing label","risk":"low","impact":{"evidence":["Existing local naming convention"]},"options":[{"id":"existing","label":"Existing label","consequences":["Keep the existing convention"]}],"recommended_option_id":"existing"})).unwrap();
     let d = store
         .submit(&plan, request, "agent:A", "agent", &p)
         .unwrap();
     assert_eq!(d.status, "resolved");
-    ensure_decision_context_ready(root, "A").unwrap();
+    let decision_revision = restart_revision(root, &tasks).unwrap();
+    assert_ne!(
+        initial_revision, decision_revision,
+        "a newly applicable decision renews recovery even before checkpoint reconciliation"
+    );
+    let (db, _) = db::active(root).unwrap();
+    let checkpoint_rows = || {
+        let mut query = db.prepare("SELECT id,content_json,content_sha256,validation_state FROM task_checkpoints ORDER BY rowid").unwrap();
+        query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before_preview = checkpoint_rows();
     let target = root.join(".macc/worktree/worker-01");
-    assert!(prepare(root, &request_for(root, &target)).is_ok());
+    let source_before = std::fs::read(target.join("worktree.prd.json")).unwrap();
+    preview_decision_context(root, "A").unwrap();
+    assert_eq!(
+        checkpoint_rows(),
+        before_preview,
+        "preview cannot reconcile, rewrite or invalidate a checkpoint"
+    );
+    assert_eq!(
+        std::fs::read(target.join("worktree.prd.json")).unwrap(),
+        source_before
+    );
+    ensure_decision_context_ready(root, "A").unwrap();
+    assert_eq!(
+        restart_revision(root, &tasks).unwrap(),
+        decision_revision,
+        "reconciliation metadata and UUIDs cannot renew the same budget"
+    );
+    let context = request_for(root, &target);
+    let prepared = prepare(root, &context).unwrap();
+    assert_eq!(
+        restart_revision(root, &tasks).unwrap(),
+        decision_revision,
+        "regenerating the same invocation context cannot renew the budget"
+    );
+    let unrelated = serde_json::from_value(json!({"idempotency_key":"unrelated-refresh","task_id":"B","kind":"clarification","question":"Which internal label for B?","context":"Existing naming convention","investigated":["Read B"],"recommendation":"Keep the label","risk":"low","impact":{"evidence":["Local convention"]}})).unwrap();
+    let (mut active_store, active_plan) = dm::active_plan(root).unwrap();
+    assert_eq!(
+        active_store
+            .submit(&active_plan, unrelated, "agent:B", "agent", &p)
+            .unwrap()
+            .status,
+        "resolved"
+    );
+    assert_eq!(
+        restart_revision(root, &tasks).unwrap(),
+        decision_revision,
+        "unrelated decisions and the global epoch cannot renew this task's budget"
+    );
+    let lease = super::super::tests::claim(root, &context, &prepared);
+    std::fs::write(target.join("code.txt"), "new retained development work").unwrap();
+    finish(
+        root,
+        &FinishRequest {
+            key: lease.key.clone(),
+            phase: "dev".into(),
+            result: "interrupted".into(),
+            acknowledged: false,
+        },
+    )
+    .unwrap();
+    release(root, &lease.key, false).unwrap();
+    assert_ne!(
+        restart_revision(root, &tasks).unwrap(),
+        decision_revision,
+        "a checkpoint of actual new work has a distinct recovery budget"
+    );
     let prd = root.join("prd.json");
     let original_prd = std::fs::read_to_string(&prd).unwrap();
     std::fs::write(
@@ -937,6 +1019,12 @@ fn resolved_autonomous_decision_refreshes_checkpoint_without_accepting_new_requi
         .submit(&active_plan, external, "agent:A", "agent", &p)
         .unwrap();
     assert_eq!(d.status, "blocked_external");
+    assert_eq!(
+        restart_revision(root, &tasks).unwrap(),
+        Value::Null,
+        "pending intervention must not renew an autonomous recovery budget"
+    );
+    assert!(preview_decision_context(root, "A").is_err());
     assert!(ensure_decision_context_ready(root, "A")
         .unwrap_err()
         .to_string()

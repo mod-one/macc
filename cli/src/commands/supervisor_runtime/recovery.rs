@@ -98,8 +98,12 @@ pub(super) async fn intervene(
             return restart_only(paths, canonical, report, lock, &progress, &ids).await;
         }
     }
-    if config.repair_enabled && config.auto_restart && restart_allowed {
-        let checkpoint_recovery = super::checkpoint_recovery::recover(paths, &report.incident, dir);
+    if config.repair_enabled && config.auto_restart {
+        let checkpoint_recovery = if restart_allowed {
+            super::checkpoint_recovery::recover(paths, &report.incident, dir)
+        } else {
+            super::checkpoint_recovery::preview(paths, &report.incident, dir)
+        };
         if let Err(error) = &checkpoint_recovery {
             report.diagnosis = Some(repair::Diagnosis {
                 summary: format!("MACC-CHECKPOINT-CONTEXT-DRIFT: retained work could not be transferred safely: {error}"),
@@ -112,6 +116,26 @@ pub(super) async fn intervene(
             });
         }
         if let Some(ids) = checkpoint_recovery? {
+            if !restart_allowed {
+                let message = format!("{}: native checkpoint recovery validated, but the restart budget for this unchanged work and decision binding is exhausted. Evidence: checkpoint-recovery.json. No checkpoint was reconciled and retained work is preserved; inspect the recurring refresh before explicitly retrying.", super::checkpoint_recovery::RESTART_LIMIT);
+                report.diagnosis = Some(repair::Diagnosis {
+                    summary: message.clone(),
+                    repairable: false,
+                    requires_human: false,
+                    restart_only: false,
+                    task_ids: ids,
+                    external_prerequisites: vec![],
+                    retry_at: None,
+                    unavailable_tool: None,
+                    related_task_ids: vec![],
+                    macc_findings: vec![
+                        "Native context refresh recurred with unchanged semantic recovery evidence"
+                            .into(),
+                    ],
+                    macc_repair_required: true,
+                });
+                return Err(MaccError::Validation(message));
+            }
             report.detail = format!("MACC-CHECKPOINT-CONTEXT-DRIFT: execution context recovered without changing task requirements for {}",ids.join(", "));
             return restart_only(paths, canonical, report, lock, &progress, &ids).await;
         }

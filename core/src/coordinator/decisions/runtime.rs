@@ -187,12 +187,15 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             }
             continue;
         }
-        let refresh = task.task_runtime.extra.contains_key("decision_wait")
-            || task
-                .task_runtime
-                .last_error_message
-                .as_deref()
-                .is_some_and(|s| s.contains("DM_STALE"));
+        // Dependency explanations can quote their root's native DM_STALE.
+        // They neither own that invocation nor authorize requeuing this task.
+        let refresh = task.task_runtime.last_error_code.as_deref() != Some("E905")
+            && (task.task_runtime.extra.contains_key("decision_wait")
+                || task
+                    .task_runtime
+                    .last_error_message
+                    .as_deref()
+                    .is_some_and(|s| s.contains("DM_STALE")));
         if refresh && !active && !task.is_human_approval_gate() {
             let revision = json!([plan.id, plan.graph_version, plan.decision_epoch]);
             let count =

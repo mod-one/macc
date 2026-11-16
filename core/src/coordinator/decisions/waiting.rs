@@ -92,6 +92,27 @@ pub fn refresh_waits(
 ) -> crate::Result<bool> {
     let mut changed = false;
     for task in &mut registry.tasks {
+        if task.task_runtime.last_error_code.as_deref() == Some("E905") {
+            // A dependency explanation is not this task's native invocation.
+            // Repair legacy projected sentinels without touching real requests.
+            if task
+                .task_runtime
+                .extra
+                .get("decision_wait")
+                .and_then(serde_json::Value::as_str)
+                == Some("context_refresh")
+            {
+                for key in [
+                    "decision_wait",
+                    "decision_wait_status",
+                    "decision_wait_owner",
+                    "native_context_refresh",
+                ] {
+                    changed |= task.task_runtime.extra.remove(key).is_some();
+                }
+            }
+            continue;
+        }
         if task.state == "blocked" && !task.task_runtime.extra.contains_key("decision_wait") {
             if let Some(pending) = pending_for_task(root, &task.id)? {
                 pending.apply(&mut task.task_runtime);
@@ -141,6 +162,7 @@ pub fn gate_revision(
 pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> usize {
     if registry.tasks.iter().any(|t| {
         t.state == "blocked"
+            && t.task_runtime.last_error_code.as_deref() != Some("E905")
             && t.task_runtime.extra.contains_key("decision_wait")
             && t.task_runtime
                 .extra
@@ -160,6 +182,7 @@ pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> u
         .iter()
         .filter(|t| {
             t.state == "blocked"
+                && t.task_runtime.last_error_code.as_deref() != Some("E905")
                 && t.task_runtime
                     .extra
                     .get("native_context_refresh")
@@ -172,11 +195,12 @@ pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> u
             .tasks
             .iter()
             .filter(|t| {
-                t.task_runtime
-                    .extra
-                    .get("decision_wait_status")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("pending_human")
+                t.task_runtime.last_error_code.as_deref() != Some("E905")
+                    && t.task_runtime
+                        .extra
+                        .get("decision_wait_status")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("pending_human")
             })
             .count()
 }
@@ -184,6 +208,70 @@ pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> u
 #[cfg(test)]
 mod handoff_tests {
     use super::*;
+    use crate::coordinator::model::TaskRegistry;
+    #[test]
+    fn dependent_refresh_sentinels_do_not_cancel_the_roots_recovery_cycle() {
+        use crate::coordinator::engine::{
+            ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController,
+        };
+        let mut reg=TaskRegistry::from_value(&serde_json::json!({"tasks":[{"id":"ROOT","state":"blocked","task_runtime":{"last_error_code":"E903","last_error_origin":"decision_context_refresh","decision_wait":"context_refresh","native_context_refresh":true}}]})).unwrap();
+        for i in 0..10 {
+            reg.tasks.push(serde_json::from_value(serde_json::json!({"id":format!("CHILD-{i}"),"state":"blocked","dependencies":["ROOT"],"task_runtime":{"last_error_code":"E905","last_error_origin":"dependency","last_error_message":"Dependency ROOT: DM_STALE: binding changed","decision_wait":"context_refresh"}})).unwrap());
+        }
+        assert_eq!(
+            human_wait_count(&reg),
+            1,
+            "legacy dependent markers must not terminate the run"
+        );
+        let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+            timeout: None,
+            max_no_progress_cycles: 5,
+        });
+        let counts = CoordinatorCounts {
+            total: 11,
+            todo: 0,
+            active: 0,
+            blocked: 11,
+            merged: 0,
+            waiting_approval: human_wait_count(&reg),
+        };
+        assert!(controller.on_cycle_counts(counts, None).is_ok());
+        let root = tempfile::tempdir().unwrap();
+        assert!(refresh_waits(root.path(), &mut reg).unwrap());
+        assert!(
+            !refresh_waits(root.path(), &mut reg).unwrap(),
+            "cleanup is idempotent and never recopies the root error into children"
+        );
+        assert!(reg.tasks.iter().skip(1).all(|t| !t
+            .task_runtime
+            .extra
+            .contains_key("decision_wait")
+            && t.state == "blocked"));
+        reg.tasks[0]
+            .task_runtime
+            .extra
+            .remove("native_context_refresh");
+        assert_eq!(
+            human_wait_count(&reg),
+            0,
+            "a rejected root refresh must still stop"
+        );
+        reg.tasks[0]
+            .task_runtime
+            .extra
+            .insert("native_context_refresh".into(), serde_json::json!(true));
+        reg.tasks.push(serde_json::from_value(serde_json::json!({"id":"EXTERNAL","state":"blocked","task_runtime":{"last_error_code":"E903","decision_wait":"real-device-request","decision_wait_status":"blocked_external"}})).unwrap());
+        assert_eq!(
+            human_wait_count(&reg),
+            0,
+            "a separate real external prerequisite still requires handoff"
+        );
+        reg.tasks.last_mut().unwrap().task_runtime.extra.insert(
+            "decision_wait_status".into(),
+            serde_json::json!("pending_human"),
+        );
+        assert_eq!(human_wait_count(&reg), 2);
+    }
     #[test]
     fn external_prerequisite_cannot_masquerade_as_a_human_approval_wait() {
         use crate::coordinator::{

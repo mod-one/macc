@@ -20,8 +20,8 @@ pub struct Ledger {
     pub last_status: String,
     #[serde(default)]
     pub incidents: BTreeMap<String, Pending>,
-    /// Restart-only recoveries per crash fingerprint: the same stop recurring
-    /// after a restart escalates instead of looping.
+    /// Restart-only recoveries per semantic fingerprint: the same stop recurring
+    /// with unchanged retained work and applicable decisions escalates.
     #[serde(default)]
     pub restarts: BTreeMap<String, u32>,
 }
@@ -39,6 +39,37 @@ pub fn crash_fingerprint(incident: &Incident) -> String {
         .collect();
     tasks.sort();
     format!("{}|{}", incident.reason.trim(), tasks.join(","))
+}
+
+pub fn recovery_fingerprint(paths: &ProjectPaths, incident: &Incident) -> Result<String> {
+    let roots: Vec<_> = incident
+        .tasks
+        .iter()
+        .filter(|t| macc_core::supervisor::incident::repair_candidate(t))
+        .collect();
+    if !roots.is_empty()
+        && roots
+            .iter()
+            .all(|t| macc_core::coordinator::phase_diagnostics::context_refresh_blocked(t))
+    {
+        let ids = roots.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        match macc_core::session_store::checkpoints::recovery::restart_revision(&paths.root, &ids) {
+            Ok(revision) if revision.as_array().is_some_and(|r| !r.is_empty()) => {
+                return Ok(format!(
+                    "context-refresh-v2:{}",
+                    macc_core::coordinator::decisions::digest(&revision)
+                ));
+            }
+            // Malformed or unavailable evidence cannot renew a restart budget.
+            // Let native recovery produce the specific durable refusal instead
+            // of aborting the entire supervisor while computing a ledger key.
+            Err(error) => {
+                tracing::warn!(%error, "Cannot fingerprint native recovery evidence; retaining legacy restart budget")
+            }
+            _ => {}
+        }
+    }
+    Ok(crash_fingerprint(incident))
 }
 #[derive(Default, Serialize, Deserialize)]
 pub struct Pending {
@@ -264,7 +295,12 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     }
     let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
         || report.detail.contains(super::repair::HUMAN_DECISION);
-    let action = if report.diagnosis.as_ref().is_some_and(|d| {
+    let action = if report
+        .detail
+        .contains(super::checkpoint_recovery::RESTART_LIMIT)
+    {
+        format!("Inspect checkpoint-recovery.json in the incident log directory: the same work and applicable decision binding already used their automatic restart. No checkpoint was changed by this preview. Investigate the recurring context refresh, then explicitly retry native recovery (`{RETRY}`). A new applicable decision or new checkpointed work has a separate bounded recovery budget.")
+    } else if report.diagnosis.as_ref().is_some_and(|d| {
         d.summary
             .starts_with(macc_core::session_store::checkpoints::recovery::CODE)
     }) {
@@ -356,6 +392,11 @@ mod tests {
                 && !action.contains("Supply the recorded external")
                 && !action.contains("to context_refresh")
         );
+        let mut recurring = report;
+        recurring.detail = super::super::checkpoint_recovery::RESTART_LIMIT.into();
+        let action = next_action(&Pending::default(), &recurring, 3).unwrap();
+        assert!(action.contains("checkpoint-recovery.json") && action.contains("explicitly retry"));
+        assert!(!action.contains("Reconcile reviewed changes") && !action.contains("Open Decisions"), "a validated exhausted budget is distinct from a checkpoint guard failure or unanswered question");
     }
 
     #[test]

@@ -64,6 +64,39 @@ fn fixture() -> (tempfile::TempDir, TaskRegistry) {
 }
 
 #[test]
+fn inherited_stale_context_is_not_a_dependents_own_invocation_recovery() {
+    let (dir, mut registry) = fixture();
+    let root = dir.path();
+    let child = registry.find_task_mut("C").unwrap();
+    child.state = "blocked".into();
+    child.task_runtime.set_last_error_details(
+        "E905",
+        "dependency",
+        "Dependency G: DM_STALE: native decision binding changed",
+    );
+    child
+        .task_runtime
+        .extra
+        .insert("decision_wait".into(), serde_json::json!("context_refresh"));
+    save(root, &registry);
+    for _ in 0..2 {
+        sync(root, &root.join("prd.json"), &mut registry).unwrap();
+        let child = registry.find_task("C").unwrap();
+        assert_eq!(
+            child.state, "blocked",
+            "only dependency reconciliation may release this block"
+        );
+        assert_eq!(child.task_runtime.last_error_code.as_deref(), Some("E905"));
+        assert!(!child
+            .task_runtime
+            .extra
+            .contains_key("context_refresh_attempts"));
+        refresh_waits(root, &mut registry).unwrap();
+        save(root, &registry);
+    }
+}
+
+#[test]
 fn delegated_gate_is_stable_across_native_and_ledger_sync_without_fake_human_votes() {
     let (dir, mut registry) = fixture();
     let root = dir.path();

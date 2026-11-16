@@ -2,10 +2,27 @@
 use macc_core::{supervisor::incident::Incident, ProjectPaths, Result};
 use std::path::Path;
 
+pub(super) const RESTART_LIMIT: &str = "MACC-CONTEXT-REFRESH-RESTART-LIMIT";
+
 pub(super) fn recover(
     paths: &ProjectPaths,
     incident: &Incident,
     dir: &Path,
+) -> Result<Option<Vec<String>>> {
+    run(paths, incident, dir, true)
+}
+pub(super) fn preview(
+    paths: &ProjectPaths,
+    incident: &Incident,
+    dir: &Path,
+) -> Result<Option<Vec<String>>> {
+    run(paths, incident, dir, false)
+}
+fn run(
+    paths: &ProjectPaths,
+    incident: &Incident,
+    dir: &Path,
+    apply: bool,
 ) -> Result<Option<Vec<String>>> {
     let roots: Vec<_> = incident
         .tasks
@@ -24,6 +41,13 @@ pub(super) fn recover(
                             || (m.contains("Checkpoint") && m.contains("reconciliation"))
                     })
         })
+    {
+        return Ok(None);
+    }
+    if !apply
+        && !roots
+            .iter()
+            .all(|t| macc_core::coordinator::phase_diagnostics::context_refresh_blocked(t))
     {
         return Ok(None);
     }
@@ -50,13 +74,25 @@ pub(super) fn recover(
         // Conflicts and contract changes remain explicit infrastructure incidents;
         // never ask a source repair agent to bypass them.
         let result = (|| {
-            if task
-                .task_runtime
-                .last_error_message
-                .as_deref()
-                .is_some_and(|m| m.contains("DM_STALE:"))
+            if !apply
+                || macc_core::coordinator::phase_diagnostics::context_refresh_blocked(task)
+                || task
+                    .task_runtime
+                    .last_error_message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("DM_STALE:"))
             {
-                return macc_core::session_store::checkpoints::recovery::ensure_decision_context_ready(&paths.root, &task.id);
+                return if apply {
+                    macc_core::session_store::checkpoints::recovery::ensure_decision_context_ready(
+                        &paths.root,
+                        &task.id,
+                    )
+                } else {
+                    macc_core::session_store::checkpoints::recovery::preview_decision_context(
+                        &paths.root,
+                        &task.id,
+                    )
+                };
             }
             let transfer = macc_core::session_store::checkpoints::recovery::preserve_task_work(
                 &paths.root,
@@ -241,6 +277,94 @@ mod tests {
         .unwrap();
         assert_eq!(report["work_preserved"], true);
         assert!(report["error"].as_str().unwrap().contains("conflicts"));
+    }
+
+    #[test]
+    fn context_refresh_budget_survives_new_run_and_checkpoint_ids_and_previews_without_transfer() {
+        use super::super::policy;
+        use macc_core::session_store::checkpoints::recovery as native;
+        let (_temp, paths, mut incident) = fixture(false);
+        let dir = paths.macc_dir.join("log/budget-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        recover(&paths, &incident, &dir).unwrap().unwrap();
+        let task = &mut incident.tasks[0];
+        task.task_runtime
+            .set_last_error_details("E903", "decision_context_refresh", native::CODE);
+        task.task_runtime.current_phase = Some("dev".into());
+        task.task_runtime
+            .extra
+            .insert("decision_wait".into(), serde_json::json!("context_refresh"));
+        let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        let mut snapshot = storage.load_snapshot().unwrap();
+        snapshot.registry.tasks[0] = task.clone();
+        storage.save_snapshot(&snapshot).unwrap();
+        let fingerprint = policy::recovery_fingerprint(&paths, &incident).unwrap();
+        assert!(fingerprint.starts_with("context-refresh-v2:"));
+        let mut ledger = policy::Ledger::default();
+        ledger
+            .restarts
+            .insert(policy::crash_fingerprint(&incident), 1);
+        assert_eq!(
+            ledger.restarts.get(&fingerprint),
+            None,
+            "legacy budgets allow one native migration attempt"
+        );
+        ledger.restarts.insert(fingerprint.clone(), 1);
+        incident.id = "another-incident".into();
+        incident.run_id = "another-run".into();
+        incident.epoch += 1;
+        incident.reason = "same native fault with a different outer message".into();
+        assert_eq!(
+            policy::recovery_fingerprint(&paths, &incident).unwrap(),
+            fingerprint
+        );
+        // A code-only native context refresh must use the strict preview branch,
+        // never transfer historical files when a restart is no longer permitted.
+        std::fs::write(
+            paths.macc_dir.join("worktree/worker-01/retained.txt"),
+            "changed historical evidence",
+        )
+        .unwrap();
+        let before = macc_core::session_store::inspect(&paths.root).unwrap();
+        assert_eq!(
+            preview(&paths, &incident, &dir).unwrap(),
+            Some(vec!["A".into()])
+        );
+        let after = macc_core::session_store::inspect(&paths.root).unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap(),
+            "budget inspection must not alter checkpoint or session state"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.macc_dir.join("worktree/worker-02/retained.txt"))
+                .unwrap(),
+            "original evidence"
+        );
+        let before_revision = native::revision(&paths.root, &["A".into()]).unwrap();
+        let id = before_revision[0]["id"].as_str().unwrap();
+        let reconciliation = native::reconcile(&paths.root, id, None).unwrap();
+        native::reconcile(&paths.root, id, reconciliation["current_sha256"].as_str()).unwrap();
+        assert_ne!(
+            native::revision(&paths.root, &["A".into()]).unwrap(),
+            before_revision
+        );
+        let same = policy::recovery_fingerprint(&paths, &incident).unwrap();
+        assert_eq!(
+            same, fingerprint,
+            "new checkpoint UUID and validation metadata cannot grant another restart"
+        );
+        assert!(ledger.restarts[&same] >= policy::MAX_RESTARTS_PER_FINGERPRINT);
+        incident.tasks[0].task_runtime.set_last_error_details(
+            "E103",
+            "output_protocol",
+            "missing result",
+        );
+        assert_eq!(
+            policy::recovery_fingerprint(&paths, &incident).unwrap(),
+            policy::crash_fingerprint(&incident),
+            "other failures retain their existing restart policy"
+        );
     }
 }
 
