@@ -306,10 +306,23 @@ async fn repair_round(
     progress.enter(report, "repairing", activity)?;
     let rework = feedback.map(|reason| format!("\nThe previous state of this repair was rejected. Keep the valid work already in the worktree and address every point of the rejection: {reason}\nAn existing assertion may change only when it pins exactly the defective behaviour named in the diagnosis; justify each such change in .macc/repair-notes.md. If a point needs a decision outside your authority, do not guess: state it in .macc/repair-notes.md and leave that point unchanged.")).unwrap_or_default();
     let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Repair only prerequisites. Do not copy, import or commit unfinished implementations or evidence from performer worktrees; those remain task deliveries and must resume in their original workers. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.{rework}",diagnosis.summary,root.join(".macc/log").display(),commands);
-    let prompt = format!("{prompt}\nAuthorized incident targets: {:?}. Related tasks {:?} are read-only context; do not implement their work or repair their independent causes.", diagnosis.task_ids, diagnosis.related_task_ids);
+    let prompt = format!("{prompt}\nOnly edit the isolated repair worktree {}. Retained performer worktrees are read-only in this intervention. If the defect exists only in unfinished task delivery, report that its native fix/review cycle must resume in the original worker; do not modify that delivery from this invocation.\nAuthorized incident targets: {:?}. Related tasks {:?} are read-only context; do not implement their work or repair their independent causes.", worktree.display(), diagnosis.task_ids, diagnosis.related_task_ids);
     let requirements = super::external_verification::exact_requirements(root, &diagnosis.task_ids)?;
     let prompt=format!("{prompt}\nExact native prerequisite contracts to satisfy through source repair: {}. Leave actual physical actions, credentials and human approvals unresolved.",serde_json::to_string(&requirements).map_err(|e|MaccError::Validation(e.to_string()))?);
-    agent.run(worktree, &prompt, dir, &phase("repair")).await?;
+    let retained = super::repair_evidence::retained(root, &report.incident)?;
+    let repair_result = agent.run(worktree, &prompt, dir, &phase("repair")).await;
+    super::repair_evidence::unchanged(root, &report.incident, &retained, dir, &phase("repair"))?;
+    repair_result?;
+    // Freeze only the repair that this transaction can actually validate and
+    // publish. Never accept prose describing an edit in a different worker.
+    super::repair_changes::prepare(worktree, &report.incident)?;
+    if let Err(error) = super::repair_evidence::require_changes(worktree) {
+        super::report::write_json(
+            &dir.join("repair-source-refused.json"),
+            &serde_json::json!({"worktree":worktree,"error":error.to_string(),"retained_work":retained,"commit":null,"acceptance_inferred":false}),
+        )?;
+        return Ok(Round::Rework(error.to_string(), error));
+    }
     progress.enter(
         report,
         "validating",
@@ -328,7 +341,14 @@ async fn repair_round(
         Err(error) => return Err(error),
     };
     report.preexisting_failures = preexisting.clone();
+    super::repair_changes::prepare(worktree, &report.incident)?;
+    let validated = super::repair_evidence::snapshot(worktree)?;
+    super::report::write_json(
+        &dir.join(format!("{}-source.json", phase("validation"))),
+        &serde_json::json!({"source":validated,"tests_enabled":progress.config.tests_enabled,"commands":commands,"independent_verification_pending":progress.config.ai_verification_enabled,"feature_accepted":false}),
+    )?;
     if !progress.config.ai_verification_enabled {
+        report.repair_evidence = Some(validated);
         return Ok(Round::Accepted(format!(
             "AI verification disabled by supervisor configuration; tests_enabled={}; preexisting failures={preexisting:?}", progress.config.tests_enabled
         )));
@@ -341,9 +361,6 @@ async fn repair_round(
         format!(" These validation commands fail on the unmodified base too and were not used as a gate: {preexisting:?}. For each, compare validation-N.log (with the repair) against baseline-N.log (unmodified base) in that directory, N being the position in {commands:?} counted from 0; use false if the repair adds any failure absent from the baseline, or if the logs cannot establish that it does not.")
     };
     let rework_note = feedback.map(|reason| format!(" This is repair round {round}: an earlier state of the repair was rejected for: {reason} Check that each point is resolved and judge the whole repair again; logs of earlier rounds are under round-N/ in that directory.")).unwrap_or_default();
-    git(worktree, &["add", "--all"])?;
-    let validated_tree = git(worktree, &["write-tree"])?;
-    let validated_head = git(worktree, &["rev-parse", "HEAD"])?;
     let prompt=format!("Independently verify the supervisor repair. Diagnosis: {}. Examine source changes, existing and added regression tests and validation logs at {}. Do not edit files. Confirm the original root causes are corrected; no security checks, assertions, validation scripts or human gates were weakened or bypassed. Write .macc/supervisor-verification.json as {{\"verified\":true,\"explanation\":\"concrete evidence\",\"requires_human\":false}}; use false for unresolved causes, unjustified test changes, or missing proof. When false, the explanation is handed to the repair agent: state exactly what must change. Set requires_human to true only when accepting the repair needs a product, security or access-policy decision that neither the diagnosis nor the project documentation settles.{baseline_note}{rework_note} Task ids: {:?}.",diagnosis.summary,dir.display(),diagnosis.task_ids);
     let requests = super::external_verification::exact_requirements(root, &diagnosis.task_ids)?;
     let prompt=format!("{prompt}\nVerify these exact native prerequisites as well: {requests:?}. Approval of source changes is not evidence that a physical action happened. Source prerequisite recovery must cover its declared source paths and actual expected result; use verified=false if the original prerequisite is still missing.");
@@ -353,17 +370,23 @@ async fn repair_round(
         "verifying",
         format!("Independent AI verification with {}", agent.id),
     )?;
-    agent
+    let verification_result = agent
         .run(worktree, &prompt, dir, &phase("verification"))
-        .await?;
-    git(worktree, &["add", "--all"])?;
-    if git(worktree, &["write-tree"])? != validated_tree
-        || git(worktree, &["rev-parse", "HEAD"])? != validated_head
-    {
-        return Err(MaccError::Validation(
-            "Verification modified validated source; integration refused".into(),
-        ));
-    }
+        .await;
+    super::repair_evidence::unchanged(
+        root,
+        &report.incident,
+        &retained,
+        dir,
+        &phase("verification"),
+    )?;
+    let source_check = super::repair_evidence::verified(worktree, &validated);
+    super::report::write_json(
+        &dir.join(format!("{}-source.json", phase("verification"))),
+        &serde_json::json!({"expected":validated,"observed":super::repair_evidence::snapshot(worktree)?,"unchanged":source_check.is_ok(),"error":source_check.as_ref().err().map(ToString::to_string)}),
+    )?;
+    source_check?;
+    verification_result?;
     let verified: Verification = read_json(&worktree.join(VERIFICATION_FILE))?;
     // A human gate always wins, including contradictory AI output.
     if verified.requires_human {
@@ -373,6 +396,11 @@ async fn repair_round(
         )));
     }
     if verified.verified {
+        super::report::write_json(
+            &dir.join("verified-repair.json"),
+            &serde_json::json!({"source":validated,"independent_verification":true,"feature_accepted":false,"proof":verified.explanation}),
+        )?;
+        report.repair_evidence = Some(validated);
         return Ok(Round::Accepted(verified.explanation));
     }
     let error = MaccError::Validation(format!(
@@ -390,6 +418,7 @@ pub fn integrate(
     worktree: &Path,
     target: &super::workspace::Target,
     incident: &Incident,
+    expected: &serde_json::Value,
 ) -> Result<String> {
     use macc_core::coordinator::integration::{publish_commit, PublishOutcome};
     let base = target.base.as_str();
@@ -399,6 +428,7 @@ pub fn integrate(
         ));
     }
     super::repair_changes::prepare(worktree, incident)?;
+    super::repair_evidence::verified(worktree, expected)?;
     let changed = git(worktree, &["diff", "--cached", "--name-only"])?;
     if changed.lines().any(|p| {
         p == "prd.json"
@@ -412,7 +442,7 @@ pub fn integrate(
         ));
     }
     if changed.is_empty() {
-        return Ok(base.into());
+        return Err(MaccError::Validation(super::repair_evidence::EMPTY.into()));
     }
     git(
         worktree,

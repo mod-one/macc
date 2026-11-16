@@ -295,7 +295,11 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     }
     let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
         || report.detail.contains(super::repair::HUMAN_DECISION);
-    let action = if report
+    let action = if report.detail.contains(super::repair_evidence::EMPTY)
+        || report.detail.contains(super::repair_evidence::OUTSIDE)
+    {
+        format!("Inspect repair-source-refused.json and *-retained-work.json in the incident log directory. Keep the original task worktree, commits, index and uncommitted files. Resume the task's native correction and independent review in that worker; an empty supervisor base cannot stand in for its delivery. Reconcile ownership through native recovery before retrying (`{RETRY}`). No source repair or passing compliance is inferred from a model's explanation.")
+    } else if report
         .detail
         .contains(super::checkpoint_recovery::RESTART_LIMIT)
     {

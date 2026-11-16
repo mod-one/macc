@@ -132,3 +132,37 @@ checkpoint `recovery/tests.rs` and CLI
 `supervisor_runtime/checkpoint_recovery.rs` cover legacy dependency markers,
 current versus stored decision bindings, unrelated decisions, regenerated
 checkpoints, retained development progress and non-mutating budget inspection.
+
+## Negative reviews and retained recovery
+
+An acknowledged, current review with `REVIEW_VERDICT: CHANGES_REQUESTED` and
+explicit `pass`/`fail` evidence for every non-advisory binding completes as
+`changes_requested`. Its findings remain in the native receipt and raw phase
+artifacts. Both positive and negative reviews receive unchanged-source/clean-tree
+postchecks and commit attestation. Negative receipts never authorize merge.
+Missing evidence, missing/incorrect acknowledgements, stale context and
+`needs_human_review` remain blocking, with distinct diagnostics.
+
+The correction runs in the retained worker, followed by configured tests and
+a new independent compliance review even at the ordinary review-cycle limit.
+That final review still counts toward the bound: a further rejection preserves
+the objection and stops at the correction budget instead of looping or merging.
+After a runtime update or explicit retry, legacy native `compliance_failed`
+receipts with exact task/attempt/digest and explicit failure evidence may request
+a fresh review; neither the old verdict nor passing compliance is synthesized.
+
+Startup recovery preserves the workflow phase, worker, branch and claim of tasks
+between phases, including without a PID. It only clears dead process state; no
+delivery result is inferred. Recorded blocks remain blocked for native recovery.
+Review postchecks retain unexpected untracked files and reject the dirty review
+instead of deleting those files.
+
+Supervisor repair agents write only in the isolated repair worktree. Native
+snapshots detect changes to the project or incident worker worktrees after both
+repair and verification; all original files and indexes remain available on
+refusal. Empty isolated diffs cannot become a repair commit or recovered result.
+`repair_evidence` in the intervention report and `verified-repair.json` bind
+verification to the actual worker, branch, HEAD, index tree, full content tree
+and changed paths. Integration rechecks this snapshot before publishing. Model
+prose about a repair elsewhere is insufficient. Such a failure names the native
+fix/review handoff rather than treating the unchanged supervisor base as delivery.

@@ -327,6 +327,7 @@ fn review_receipt_accepts_real_ack_after_tool_fence_but_rejects_echo_and_wrong_d
     let (tmp, mut store, plan, _, p) = fixture();
     for (attempt, answer, expected) in [
         ("real", "real", None),
+        ("positive", "positive", None),
         ("quoted", "quoted", Some("DM_ACK_EXCLUDED")),
         ("wrong", "wrong", Some("DM_ACK_MISMATCH")),
         ("absent", "absent", Some("DM_ACK_ABSENT")),
@@ -340,6 +341,7 @@ fn review_receipt_accepts_real_ack_after_tool_fence_but_rejects_echo_and_wrong_d
         let ack = format!("MACC_DECISION_ACK: {}", context.context_digest);
         let output=match answer {
             "real"=>format!("exec\nspec excerpt\n```\ncodex\n{ack}\nMACC_DECISION_COMPLIANCE: {{}}\nREVIEW_VERDICT: CHANGES_REQUESTED\n"),
+            "positive"=>format!("{ack}\nMACC_DECISION_COMPLIANCE: {{}}\nREVIEW_VERDICT: OK\n"),
             "quoted"=>format!("assistant\n```text\n{ack}\n```\n"),
             "wrong"=>"assistant\nMACC_DECISION_ACK: wrong\n".into(),
             _=>"assistant\nReview has no acknowledgement\n".into(),
@@ -350,10 +352,21 @@ fn review_receipt_accepts_real_ack_after_tool_fence_but_rejects_echo_and_wrong_d
         } else {
             let receipt = result.unwrap();
             assert!(receipt.acknowledged);
-            assert_eq!(receipt.completion_status, "accepted");
+            assert_eq!(
+                receipt.completion_status,
+                if answer == "positive" {
+                    "accepted"
+                } else {
+                    "changes_requested"
+                }
+            );
             assert_eq!(
                 crate::coordinator::runtime::parse_review_verdict(&output),
-                Some(crate::coordinator::engine::ReviewVerdict::ChangesRequested)
+                Some(if answer == "positive" {
+                    crate::coordinator::engine::ReviewVerdict::Ok
+                } else {
+                    crate::coordinator::engine::ReviewVerdict::ChangesRequested
+                })
             );
         }
     }

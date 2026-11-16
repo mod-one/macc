@@ -2,7 +2,78 @@ use crate::coordinator::engine::{
     apply_phase_outcome_in_registry, build_advance_actions, AdvanceTaskAction, ReviewVerdict,
 };
 use crate::coordinator::task_selector::reconcile_task_blocks;
+use crate::coordinator::WorkflowState;
 use serde_json::json;
+#[test]
+fn failed_compliance_requires_fresh_review_after_fix_even_at_the_limit_without_looping() {
+    for testing in [false, true] {
+        for verdict in [ReviewVerdict::Ok, ReviewVerdict::ChangesRequested] {
+            let mut registry = json!({"tasks":[{"id":"A","state":"reviewing","worktree":{"branch":"A","worktree_path":"/tmp/retained"},"task_runtime":{"decision_has_bindings":true,"review_cycles":0}}]});
+            let mut phases = crate::config::PhasesConfig::default();
+            phases.testing.enabled = testing;
+            let now = "2026-11-16T17:00:00Z";
+            apply_phase_outcome_in_registry(
+                &mut registry,
+                "A",
+                "review",
+                crate::coordinator::engine::PhaseTransition {
+                    mode: "review",
+                    next_state: WorkflowState::Reviewing,
+                    runtime_phase: "review",
+                },
+                Some(ReviewVerdict::ChangesRequested),
+                None,
+                now,
+            )
+            .unwrap();
+            for expected in if testing {
+                vec!["fix", "test", "review"]
+            } else {
+                vec!["fix", "review"]
+            } {
+                let actions =
+                    build_advance_actions(&registry, &Default::default(), now, Some(1), &phases)
+                        .unwrap();
+                let [AdvanceTaskAction::RunPhase {
+                    mode, transition, ..
+                }] = actions.as_slice()
+                else {
+                    panic!("{actions:?}")
+                };
+                assert_eq!(*mode, expected);
+                apply_phase_outcome_in_registry(
+                    &mut registry,
+                    "A",
+                    expected,
+                    *transition,
+                    if expected == "review" {
+                        Some(verdict)
+                    } else {
+                        None
+                    },
+                    None,
+                    now,
+                )
+                .unwrap();
+            }
+            let actions =
+                build_advance_actions(&registry, &Default::default(), now, Some(1), &phases)
+                    .unwrap();
+            if verdict == ReviewVerdict::ChangesRequested {
+                assert!(
+                    matches!(
+                        actions.as_slice(),
+                        [AdvanceTaskAction::BlockReviewBudget { .. }]
+                    ),
+                    "{actions:?}"
+                );
+            } else {
+                assert_eq!(registry["tasks"][0]["state"], "pr_open");
+            }
+            assert_eq!(registry["tasks"][0]["worktree"]["branch"], "A");
+        }
+    }
+}
 #[test]
 fn interrupted_fix_uses_native_phase_pin_then_requires_fresh_tests_and_review() {
     let root = tempfile::tempdir().unwrap();

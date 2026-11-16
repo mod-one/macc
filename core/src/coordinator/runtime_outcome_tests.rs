@@ -2,6 +2,57 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn review_postcheck_preserves_unexpected_files_instead_of_cleaning_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    let git = |args: &[&str]| {
+        let out = crate::git::run_git_output_mapped(p, args, "review safety fixture").unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    std::fs::write(p.join("source.txt"), "baseline").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "baseline"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(p.join("source.txt"), "implementation").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "implementation"]);
+    struct Review;
+    impl PhaseExecutor for Review {
+        fn run_phase(
+            &self,
+            task: &Task,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<std::result::Result<String, String>> {
+            std::fs::write(
+                std::path::Path::new(task.worktree_path().unwrap()).join("retained-proof.txt"),
+                "do not delete this evidence",
+            )
+            .unwrap();
+            Ok(Ok("REVIEW_VERDICT: CHANGES_REQUESTED".into()))
+        }
+    }
+    let task=serde_json::from_value(json!({"id":"A","state":"reviewing","worktree":{"worktree_path":p,"branch":"main","base_branch":base}})).unwrap();
+    assert!(run_review_phase(&Review, &task, None, 1)
+        .unwrap()
+        .unwrap_err()
+        .contains("postcheck"));
+    assert_eq!(
+        std::fs::read_to_string(p.join("retained-proof.txt")).unwrap(),
+        "do not delete this evidence"
+    );
+}
+
+#[test]
 fn native_protocol_failure_event_survives_transport_without_inventing_a_result_kind() {
     use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
     let tmp = tempfile::tempdir().unwrap();

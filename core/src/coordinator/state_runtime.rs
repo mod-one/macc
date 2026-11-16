@@ -461,6 +461,7 @@ enum MutationAction {
     Stale,
     Blocked,
     PhaseDone,
+    ResumePhase,
     Requeue,
 }
 
@@ -667,6 +668,24 @@ pub fn execute_startup_recovery_sweep(
             classification = "merged".to_string();
             action = "Close runtime claim".to_string();
             proposed_action = Some(MutationAction::Merge);
+        } else if task.state == "blocked" && !task.runtime_pid().is_some_and(is_pid_running) {
+            // A recorded block belongs to its native recovery, not to a new
+            // implementation claim. Keep its diagnostics and retained work.
+            situation = "Recorded block with retained recovery evidence".into();
+            classification = "blocked_preserved".into();
+            action = "Keep blocked for native recovery".into();
+            proposed_action = None;
+        } else if task.worktree_path().is_some()
+            && task.branch().is_some()
+            && !task.runtime_pid().is_some_and(is_pid_running)
+            && (crate::supervisor::incident::in_flight_phase(task)
+                || (task.state == "in_progress"
+                    && task.runtime_status() == RuntimeStatus::PhaseDone))
+        {
+            situation = "Retained task is between coordinator phases".into();
+            classification = "retained_phase_resume".into();
+            action = "Resume the retained phase in its original worktree".into();
+            proposed_action = Some(MutationAction::ResumePhase);
         } else if let Some(pid) = task.runtime_pid() {
             let is_alive = crate::coordinator::helpers::is_pid_running(pid);
             let mut is_stale = false;
@@ -824,6 +843,14 @@ pub fn execute_startup_recovery_sweep(
                     }
                     MutationAction::PhaseDone => {
                         task.task_runtime.status = Some("phase_done".to_string());
+                    }
+                    MutationAction::ResumePhase => {
+                        task.task_runtime.pid = None;
+                        // No phase result or delivery is inferred. The pending
+                        // phase re-runs its normal ownership/context checks.
+                        if task.runtime_status() != RuntimeStatus::PhaseDone {
+                            task.task_runtime.set_status(RuntimeStatus::Idle);
+                        }
                     }
                     MutationAction::Requeue => {
                         task.state = "todo".to_string();
@@ -1061,6 +1088,92 @@ mod tests {
             .output()
             .expect("git commit");
         repo
+    }
+
+    #[test]
+    fn startup_preserves_retained_phases_and_blocks_without_losing_source_or_index() {
+        let repo = make_test_git_repo();
+        fs::write(repo.join(".gitignore"), ".macc/\n").unwrap();
+        run_git(&repo, &["add", ".gitignore"]);
+        run_git(&repo, &["commit", "-qm", "ignore runtime"]);
+        let paths = crate::ProjectPaths::from_root(&repo);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths),
+        );
+        let mut snapshot = crate::coordinator_storage::CoordinatorSnapshot::empty();
+        for (i, state) in [
+            "testing",
+            "reviewing",
+            "changes_requested",
+            "pr_open",
+            "queued",
+            "blocked",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let path = repo.join(format!(".macc/worktree/worker-{i}"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let branch = format!("retained-{i}");
+            run_git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch,
+                    path.to_str().unwrap(),
+                    "main",
+                ],
+            );
+            fs::write(path.join("implementation.txt"), "committed implementation").unwrap();
+            run_git(&path, &["add", "implementation.txt"]);
+            run_git(&path, &["commit", "-qm", "retained implementation"]);
+            fs::write(path.join("implementation.txt"), "staged correction").unwrap();
+            run_git(&path, &["add", "implementation.txt"]);
+            fs::write(path.join("implementation.txt"), "uncommitted correction").unwrap();
+            fs::write(path.join("evidence.txt"), "retain original evidence").unwrap();
+            snapshot.registry.tasks.push(serde_json::from_value(serde_json::json!({"id":format!("A{i}"),"state":state,"worktree":{"worktree_path":path,"branch":branch,"base_branch":"main"},"task_runtime":{"current_phase":"review","claim_id":format!("claim-{i}"),"status":"idle","last_error_code":if *state=="blocked"{Some("E903")}else{None},"last_error_message":"retained evidence"}})).unwrap());
+        }
+        sqlite.save_snapshot(&snapshot).unwrap();
+        for dry in [true, false, false] {
+            let entries = execute_startup_recovery_sweep(&repo, "main", dry, None).unwrap();
+            assert!(entries
+                .iter()
+                .any(|e| e.classification == "retained_phase_resume"));
+            let after = sqlite.load_snapshot().unwrap();
+            for original in &snapshot.registry.tasks {
+                let t = after.registry.find_task(&original.id).unwrap();
+                assert_eq!(t.state, original.state);
+                assert_eq!(t.worktree_path(), original.worktree_path());
+                assert_eq!(t.branch(), original.branch());
+                assert_eq!(
+                    t.task_runtime.current_phase,
+                    original.task_runtime.current_phase
+                );
+                assert_eq!(t.task_runtime.claim_id, original.task_runtime.claim_id);
+                assert_eq!(
+                    t.task_runtime.last_error_code,
+                    original.task_runtime.last_error_code
+                );
+                let path = Path::new(t.worktree_path().unwrap());
+                assert_eq!(
+                    fs::read_to_string(path.join("implementation.txt")).unwrap(),
+                    "uncommitted correction"
+                );
+                assert_eq!(
+                    fs::read_to_string(path.join("evidence.txt")).unwrap(),
+                    "retain original evidence"
+                );
+                let staged = crate::git::run_git_output_mapped(
+                    path,
+                    &["show", ":implementation.txt"],
+                    "assert index retained",
+                )
+                .unwrap();
+                assert_eq!(staged.stdout, b"staged correction");
+            }
+        }
     }
 
     #[test]

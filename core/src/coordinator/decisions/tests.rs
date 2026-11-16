@@ -769,15 +769,94 @@ fn review_records_negative_evidence_and_publication_is_bound_to_the_reviewed_com
         "compliance_failed"
     );
     assert_eq!(history[0]["receipt"]["compliance"][&d.id]["status"], "fail");
+    let negative = format!("{failed}\nREVIEW_VERDICT: CHANGES_REQUESTED");
+    let receipt = store
+        .complete(&plan.id, "reviewed", "review", &negative, &p)
+        .unwrap();
+    assert_eq!(receipt.completion_status, "changes_requested");
+    assert!(receipt.verification_error.is_none());
+    store
+        .attest_review_artifact(&plan.id, "reviewed", tmp.path(), &original)
+        .unwrap();
+    let task = reg.find_task_mut("A").unwrap();
+    task.state = "reviewing".into();
+    task.worktree = Some(
+        serde_json::from_value(
+            json!({"worktree_path":tmp.path(),"branch":"main","base_branch":"main"}),
+        )
+        .unwrap(),
+    );
+    task.task_runtime.extra.insert(
+        "decision_context".into(),
+        json!({"attempt_id":"reviewed","phase":"review"}),
+    );
+    crate::coordinator::state::coordinator_state_registry_save(
+        tmp.path(),
+        &BTreeMap::new(),
+        &reg.to_value().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        merge_ready(tmp.path(), "A").is_err(),
+        "a fully delivered negative review is never merge approval"
+    );
+    crate::coordinator::engine::apply_review_phase_success_typed(
+        reg.find_task_mut("A").unwrap(),
+        crate::coordinator::engine::ReviewVerdict::ChangesRequested,
+        "2026-11-16T16:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(reg.find_task("A").unwrap().state, "changes_requested");
+    assert_eq!(
+        store.context_history(&plan.id, "A").unwrap()[0]["receipt"]["compliance"][&d.id]["status"],
+        "fail",
+        "the objection remains durable through remediation"
+    );
+    // Missing evidence and a real human verification request still block,
+    // even when the output requests changes.
+    for (attempt, compliance, ack_value) in [
+        ("missing", json!({}), ctx.context_digest.as_str()),
+        (
+            "human",
+            json!({d.id.clone():{"status":"needs_human_review","evidence":"Need an actual independent observation"}}),
+            ctx.context_digest.as_str(),
+        ),
+        (
+            "bad-ack",
+            json!({d.id.clone():{"status":"fail","evidence":"A concrete failing invariant"}}),
+            "sha256:wrong",
+        ),
+    ] {
+        let (c, _) = store
+            .issue(&current, "A", attempt, "review", tmp.path(), &p)
+            .unwrap();
+        store
+            .issued(&plan.id, attempt, "review", &c.render(), &p)
+            .unwrap();
+        let output=format!("MACC_DECISION_ACK: {ack_value}\nMACC_DECISION_COMPLIANCE: {compliance}\nREVIEW_VERDICT: CHANGES_REQUESTED");
+        assert!(
+            store
+                .complete(&plan.id, attempt, "review", &output, &p)
+                .is_err(),
+            "{attempt}"
+        );
+    }
+    let (fresh, _) = store
+        .issue(&current, "A", "fresh-review", "review", tmp.path(), &p)
+        .unwrap();
+    store
+        .issued(&plan.id, "fresh-review", "review", &fresh.render(), &p)
+        .unwrap();
+    let ack = format!("MACC_DECISION_ACK: {}", fresh.context_digest);
     let passed = format!(
         "{ack}\nMACC_DECISION_COMPLIANCE: {}",
         json!({d.id.clone():{"status":"pass","evidence":"Checked exact public payload against both consumers"}})
     );
     store
-        .complete(&plan.id, "reviewed", "review", &passed, &p)
+        .complete(&plan.id, "fresh-review", "review", &passed, &p)
         .unwrap();
     store
-        .attest_review_artifact(&plan.id, "reviewed", tmp.path(), &original)
+        .attest_review_artifact(&plan.id, "fresh-review", tmp.path(), &original)
         .unwrap();
     let task = reg.find_task_mut("A").unwrap();
     task.worktree = Some(
@@ -788,7 +867,7 @@ fn review_records_negative_evidence_and_publication_is_bound_to_the_reviewed_com
     );
     task.task_runtime.extra.insert(
         "decision_context".into(),
-        json!({"attempt_id":"reviewed","phase":"review"}),
+        json!({"attempt_id":"fresh-review","phase":"review"}),
     );
     crate::coordinator::state::coordinator_state_registry_save(
         tmp.path(),

@@ -813,6 +813,15 @@ pub(crate) fn apply_phase_success_typed(
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some(transition.runtime_phase.to_string());
     if transition.mode == "fix" {
+        if runtime
+            .extra
+            .remove("compliance_correction_pending")
+            .is_some()
+        {
+            runtime
+                .extra
+                .insert("compliance_review_required".into(), serde_json::json!(true));
+        }
         runtime.extra.remove("review_refresh_correction");
         if runtime
             .extra
@@ -863,6 +872,18 @@ pub(crate) fn apply_review_phase_success_typed(
     );
     let cycles = runtime.review_cycles.unwrap_or(0) + usize::from(!refresh);
     runtime.review_cycles = Some(cycles);
+    if verdict == ReviewVerdict::ChangesRequested
+        && runtime
+            .extra
+            .get("decision_has_bindings")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        runtime.extra.insert(
+            "compliance_correction_pending".into(),
+            serde_json::json!(true),
+        );
+    }
     task.touch_state_changed(now);
     Ok(to)
 }

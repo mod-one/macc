@@ -59,10 +59,14 @@ pub(crate) fn advance_override(
     use super::engine::{AdvancePlan, PhaseTransition};
     let (mode, next_state) = if (task.workflow_state() == Some(WorkflowState::Testing)
         || (task.workflow_state() == Some(WorkflowState::InProgress) && !phases.testing.enabled))
-        && task
+        && (task
             .task_runtime
             .extra
             .contains_key("review_refresh_required")
+            || task
+                .task_runtime
+                .extra
+                .contains_key("compliance_review_required"))
     {
         ("review", WorkflowState::Reviewing)
     } else if task.workflow_state() == Some(WorkflowState::ChangesRequested)
@@ -87,12 +91,17 @@ pub(crate) fn review_completed(
     changes_requested: bool,
 ) -> bool {
     let refresh = runtime.extra.remove("review_refresh_required").is_some();
-    if refresh && changes_requested {
+    let compliance = runtime.extra.remove("compliance_review_required").is_some();
+    if compliance {
+        runtime.extra.remove("review_refresh_correction");
+    } else if refresh && changes_requested {
         runtime
             .extra
             .insert("review_refresh_correction".into(), serde_json::json!(true));
     }
-    refresh
+    // Compliance remediation is real review work and must remain bounded by
+    // the configured correction budget, including a final required review.
+    refresh && !compliance
 }
 
 /// A repaired validation/publication failure must not restart implementation.

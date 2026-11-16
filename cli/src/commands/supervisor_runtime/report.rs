@@ -43,6 +43,9 @@ pub(super) struct Intervention {
     /// The recovery restarted the coordinator without a source repair.
     #[serde(default)]
     pub(super) restart_only: bool,
+    /// Exact native source snapshot verified before integration, not model prose.
+    #[serde(default)]
+    pub(super) repair_evidence: Option<serde_json::Value>,
 }
 
 /// Records each phase and step as it starts, so clients can show live progress.

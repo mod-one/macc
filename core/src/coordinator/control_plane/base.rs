@@ -943,7 +943,7 @@ pub async fn advance_tasks_native(
                             ))
                         }
                     };
-                    if matches!(review_result, Ok(coordinator_engine::ReviewVerdict::Ok))
+                    if review_result.is_ok()
                         && crate::coordinator::decisions::policy(repo_root)?.enabled
                     {
                         let current = crate::coordinator::decisions::registry(repo_root)?;

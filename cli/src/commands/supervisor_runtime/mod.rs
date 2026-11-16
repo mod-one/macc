@@ -10,6 +10,7 @@ mod prompt;
 mod recovery;
 mod repair;
 mod repair_changes;
+mod repair_evidence;
 mod report;
 mod restart_observation;
 mod review_protocol_recovery;
@@ -241,6 +242,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         phase_started_at: Some(chrono::Utc::now().to_rfc3339()),
                         activity: Some("Incident detected; preparing intervention".into()),
                         restart_only: false,
+                        repair_evidence: None,
                     };
                     let fingerprint = policy::recovery_fingerprint(&paths, &report.incident)?;
                     let restart_allowed = ledger.restarts.get(&fingerprint).copied().unwrap_or(0)

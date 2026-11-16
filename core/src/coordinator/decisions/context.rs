@@ -467,7 +467,11 @@ impl Store {
             |r| r.get(0),
         ))?;
         let mut receipt: ContextReceipt = decode(&raw)?;
-        if receipt.completion_status != "accepted" || !receipt.acknowledged {
+        if !matches!(
+            receipt.completion_status.as_str(),
+            "accepted" | "changes_requested"
+        ) || !receipt.acknowledged
+        {
             return Err(error("Review context/compliance was not accepted"));
         }
         receipt.reviewed_commit = Some(commit);
@@ -583,8 +587,20 @@ impl Store {
             }
         }
         if phase == "review" {
+            // A complete negative review is a completed objection, never an
+            // approval. Missing/uncertain evidence and stale contexts still fail.
+            let negative = crate::coordinator::runtime::parse_review_verdict(output)
+                == Some(crate::coordinator::engine::ReviewVerdict::ChangesRequested)
+                && context.bindings.iter().all(|binding| {
+                    binding.resolution.as_ref().is_some_and(|r| r.advisory)
+                        || receipt
+                            .compliance
+                            .get(&binding.id)
+                            .is_some_and(|c| matches!(c.status.as_str(), "pass" | "fail"))
+                });
             for binding in &context.bindings {
                 if !binding.resolution.as_ref().is_some_and(|r| r.advisory)
+                    && !negative
                     && !receipt
                         .compliance
                         .get(&binding.id)
@@ -593,11 +609,18 @@ impl Store {
                     if verification_error.is_none() {
                         receipt.completion_status = "compliance_failed".into();
                         verification_error = Some(format!(
-                            "DM_COMPLIANCE: Decision {} has no passing independent compliance evidence",
-                            binding.id
+                            "DM_COMPLIANCE: Decision {}: {}",
+                            binding.id, match receipt.compliance.get(&binding.id).map(|c|c.status.as_str()) {
+                                Some("fail") => "independent compliance explicitly failed; a complete CHANGES_REQUESTED review is required for remediation",
+                                Some("needs_human_review") => "independent compliance requires human review",
+                                _ => "independent compliance evidence is missing",
+                            }
                         ));
                     }
                 }
+            }
+            if negative && verification_error.is_none() {
+                receipt.completion_status = "changes_requested".into();
             }
         }
         receipt.verification_error = verification_error.clone();

@@ -281,6 +281,9 @@ pub(super) async fn intervene(
         &worktree,
         &target,
         &report.incident,
+        report.repair_evidence.as_ref().ok_or_else(|| {
+            MaccError::Validation("Missing native verified repair source snapshot".into())
+        })?,
     )?);
     progress.enter(
         report,
