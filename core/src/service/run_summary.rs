@@ -57,14 +57,22 @@ pub fn load_latest_run_summary(
         .map(|task| dependent_tasks(registry, &task.id))
         .unwrap_or_default();
     let cause = blocked_task
-        .and_then(task_error_message)
+        .and_then(|task| {
+            crate::coordinator::phase_diagnostics::compliance_block(task)
+                .map(|b| b.describe())
+                .or_else(|| task_error_message(task))
+        })
         .or_else(|| latest.stop_reason.clone())
         .unwrap_or_else(|| default_cause(&latest.status).to_string());
     let error_code = blocked_task
         .and_then(crate::coordinator::phase_diagnostics::effective_code)
         .map(str::to_owned);
     let unmet_preconditions = blocked_task
-        .map(|task| task.task_runtime.unmet_preconditions.clone())
+        .map(|task| {
+            crate::coordinator::phase_diagnostics::compliance_block(task)
+                .map(|b| vec![b.describe()])
+                .unwrap_or_else(|| task.task_runtime.unmet_preconditions.clone())
+        })
         .unwrap_or_default();
     let out_of_scope_paths = blocked_task.map(out_of_scope_fix_paths).unwrap_or_default();
     let task_id = blocked_task.map(|task| task.id.clone());
@@ -213,6 +221,9 @@ fn severity_for(
 
 fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: usize) -> String {
     if let Some(task) = blocked {
+        if crate::coordinator::phase_diagnostics::compliance_block(task).is_some() {
+            return format!("Independent review blocked {} on a governed decision; {} remaining task(s) depend on it.", task.id, dependent_count);
+        }
         if crate::coordinator::phase_diagnostics::context_refresh_blocked(task) {
             return format!(
                 "{} needs a native context refresh; retained work is preserved.",
@@ -273,6 +284,9 @@ fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&s
                 out_of_scope.join(", "),
                 task.id
             );
+        }
+        if let Some(block) = crate::coordinator::phase_diagnostics::compliance_block(task) {
+            return block.next_action();
         }
         if task.task_runtime.last_error_origin.as_deref() == Some("decisions") {
             return format!("Open Decisions for {}: inspect the exact decision named in the cause, its selected response and failed independent check. Supply evidence, or propose an explicit governed revision/deferral. Then retry the retained phase; a generic unblock or unchanged restart cannot establish compliance.",task.id);
@@ -374,6 +388,37 @@ mod tests {
             version: "test".to_string(),
             stop_reason: Some(reason.to_string()),
         }
+    }
+
+    #[test]
+    fn compliance_summary_preserves_finding_versions_and_governed_next_action() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(root.path());
+        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        sqlite
+            .upsert_coordinator_run(&run(
+                "review",
+                "2026-11-17T08:00:00Z",
+                "blocked",
+                "DM_COMPLIANCE",
+            ))
+            .unwrap();
+        let pin = json!({"plan_id":"plan","attempt_id":"attempt","phase":"review","digest":"sha256:context"});
+        let block = json!({"task_id":"A","plan_id":"plan","attempt_id":"attempt","context_digest":"sha256:context","findings":[{"decision_id":"choice","decision_kind":"decision","version":3,"status":"needs_human_review","evidence":"src/issuer.rs:26-41 violates the normative transaction invariant","resolution_origin":"delegated_autonomous"}]});
+        let registry=TaskRegistry::from_value(&json!({"tasks":[{"id":"A","state":"blocked","task_runtime":{"run_id":"review","current_phase":"review","last_error_code":"E903","last_error_origin":"decisions","last_error_message":"DM_COMPLIANCE: generic old fragment","decision_context":pin,"review_compliance_block":block}}]})).unwrap();
+        let summary = load_latest_run_summary(&sqlite, &registry)
+            .unwrap()
+            .unwrap();
+        assert!(
+            summary.cause.contains("choice v3") && summary.cause.contains("src/issuer.rs:26-41")
+        );
+        assert!(summary.headline.contains("Independent review blocked"));
+        assert!(
+            summary.next_action.contains("choice v3")
+                && summary.next_action.contains("governed revision")
+        );
+        assert!(!summary.next_action.contains("unblock-task"));
+        assert_eq!(summary.unmet_preconditions, vec![summary.cause.clone()]);
     }
 
     #[test]

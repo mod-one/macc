@@ -130,15 +130,13 @@ pub fn resume_state(root: &std::path::Path, task: &mut Task) -> WorkflowState {
     }
     match task.task_runtime.current_phase.as_deref() {
         Some("fix") => {
-            if task.task_runtime.extra.contains_key("decision_wait") {
-                task.task_runtime.extra.insert(
-                    "suspended_fix_review_required".into(),
-                    serde_json::json!(true),
-                );
-                task.task_runtime
-                    .extra
-                    .insert("review_refresh_correction".into(), serde_json::json!(true));
-            }
+            task.task_runtime.extra.insert(
+                "suspended_fix_review_required".into(),
+                serde_json::json!(true),
+            );
+            task.task_runtime
+                .extra
+                .insert("review_refresh_correction".into(), serde_json::json!(true));
             WorkflowState::ChangesRequested
         }
         Some("test") => WorkflowState::InProgress,

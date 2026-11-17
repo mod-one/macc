@@ -166,3 +166,44 @@ verification to the actual worker, branch, HEAD, index tree, full content tree
 and changed paths. Integration rechecks this snapshot before publishing. Model
 prose about a repair elsewhere is insufficient. Such a failure names the native
 fix/review handoff rather than treating the unchanged supervisor base as delivery.
+
+## Source prerequisites and compliance objections
+
+Native phase preconditions use the common coordinator protocol projection and
+deduplicate repeated final answers. Missing conditions are reported as missing,
+without inventing a checkpoint problem. A correction/test/review failure records
+the same `out_of_scope_fix` paths as development and preserves its phase and
+worktree. Test prerequisites block from both pre-test and testing states instead
+of becoming an unrelated FSM error or an unchanged retry. After the source is
+repaired, native unblock resumes the retained fix/test/review phase; a resumed
+correction still needs a fresh independent review. The scope event names that
+phase; source prerequisites point to repair
+logs instead of an unrelated decision form.
+
+Independent compliance objections retain decision IDs, versions, resolution
+origins and concrete findings. The control plane projects a structured
+`review_compliance_block` only from an acknowledged, current native review
+receipt. Wrong task, attempt, plan, digest, stale context and accepted receipts
+cannot supply that block. A subsequent failure or successful phase clears the
+obsolete active projection; the underlying native receipt remains historical
+evidence.
+
+The supervisor rereads this authoritative receipt before diagnosing a governed
+review block. When independent review requires governance, it records
+`review-compliance-block.json` without spending a provider call, modifying source
+or claiming an external device/credential is missing. Shared run summaries and
+clients preserve the finding and route to the exact decision/version and its
+governed revision. A negative check still cannot authorize compliance or merge.
+
+Mandatory project requirements remain above implementation choices, including
+delegated choices. Reviewer prompts distinguish implementation failures from
+conflicts in the choice itself and describe the existing request/supersedes
+protocol for proposing a compliant governed replacement. `never_ask` does not
+waive requirements or fabricate an independent pass. Human-origin authority and
+external approvals keep their existing safeguards.
+
+Investigation reports distinguish checked source bytes from semantic validation.
+No configured authoritative source evidence means no native source check was
+performed; a list of investigated files is an agent declaration. Repeated policy
+references to the same checked source consume the byte budget once. No
+application-specific business rule is embedded in MACC's generic diagnostics.

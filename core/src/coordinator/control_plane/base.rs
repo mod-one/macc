@@ -1107,7 +1107,11 @@ pub async fn advance_tasks_native(
                     }
                     registry = typed.to_value()?;
                 }
+                if mode == "review" {
+                    super::compliance_diagnostic::attach(repo_root, &mut registry, &task_id)?;
+                }
                 note_unapplicable_phase_outcome(repo_root, &registry, &task_id, mode, logger);
+                note_out_of_scope_precondition(repo_root, &registry, &task_id, logger);
                 progressed = true;
             }
             coordinator_engine::AdvanceTaskAction::QueueMerge {
@@ -1321,21 +1325,23 @@ fn note_out_of_scope_precondition(
     task_id: &str,
     logger: Option<&dyn CoordinatorLog>,
 ) {
-    let Some(paths) = TaskRegistry::from_value(registry)
+    let Some(task) = TaskRegistry::from_value(registry)
         .ok()
         .and_then(|typed| typed.find_task(task_id).cloned())
-        .and_then(|task| {
-            task.task_runtime
-                .extra
-                .get(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY)
-                .and_then(|v| v.get("paths"))
-                .and_then(|v| v.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
+    else {
+        return;
+    };
+    let Some(paths) = task
+        .task_runtime
+        .extra
+        .get(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY)
+        .and_then(|v| v.get("paths"))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
         })
         .filter(|paths| !paths.is_empty())
     else {
@@ -1346,7 +1352,7 @@ fn note_out_of_scope_precondition(
         repo_root,
         "precondition_out_of_scope",
         task_id,
-        "dev",
+        task.task_runtime.current_phase.as_deref().unwrap_or("dev"),
         "out_of_scope",
         &message,
         "warning",

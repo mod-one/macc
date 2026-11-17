@@ -1095,6 +1095,48 @@ fn bounded_investigation_blocks_without_fabricating_missing_sources() {
     s.verify().unwrap();
 }
 #[test]
+fn investigation_reports_actual_source_checks_and_counts_shared_policy_sources_once() {
+    let (tmp, mut store, plan, _, mut p) = fixture();
+    p.human_question_min_risk = Consultation::NeverAsk;
+    let d = store
+        .submit(&plan, question("unchecked"), "agent:A", "agent", &p)
+        .unwrap();
+    let report = d.investigation.unwrap();
+    assert!(report.source_digests.is_empty());
+    assert!(report
+        .diagnosis
+        .contains("No authoritative source contents were checked"));
+    let bytes = "Mandatory invariant: preserve concurrent access\n"
+        .repeat(32)
+        .into_bytes();
+    std::fs::write(tmp.path().join("normative.md"), &bytes).unwrap();
+    p.investigation.max_source_bytes = bytes.len();
+    for id in ["architecture", "security"] {
+        p.governance_rules.push(GovernanceRule {
+            id: id.into(),
+            evidence_paths: vec!["normative.md".into()],
+            ..Default::default()
+        });
+    }
+    let d = store
+        .submit(
+            &store.plan(&plan.id).unwrap(),
+            question("checked"),
+            "agent:A",
+            "agent",
+            &p,
+        )
+        .unwrap();
+    let report = d.investigation.unwrap();
+    assert!(report.missing_sources.is_empty());
+    assert_eq!(report.source_digests.len(), 1);
+    assert_eq!(
+        report.source_digests["normative.md"],
+        evidence_digest(&bytes)
+    );
+    assert!(report.diagnosis.contains("not semantic compliance"));
+}
+#[test]
 fn editor_patch_preserves_archive_and_versions_plan_requirements() {
     let (_tmp, mut s, plan, reg, p) = fixture();
     let original = s.context(&plan, "A", "before", "dev", &p).unwrap();

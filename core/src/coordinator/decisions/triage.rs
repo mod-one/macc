@@ -157,6 +157,9 @@ impl Store {
             }
             let mut complete = true;
             for source in &rule.evidence_paths {
+                if report.source_digests.contains_key(source) {
+                    continue;
+                }
                 let path = super::graph::projection_path(&self.root, source)?;
                 let bytes = match std::fs::metadata(&path) {
                     Ok(m) if m.len() <= remaining as u64 => std::fs::read(&path).ok(),
@@ -287,7 +290,7 @@ impl Store {
             self.verify_human_binding(existing, policy)?;
         }
         mandatory |= !request.supersedes.is_empty();
-        report.diagnosis=if !report.missing_sources.is_empty(){"Required authoritative sources are unavailable or exceed the investigation budget; no facts were fabricated"}else if !request.missing_facts.is_empty(){"Essential facts remain unresolved after bounded source checks; no safe default was established"}else{"Authoritative source checks completed within the configured read-only budget"}.into();
+        report.diagnosis=if !report.missing_sources.is_empty(){"Required authoritative sources are unavailable or exceed the investigation budget; no facts were fabricated"}else if !request.missing_facts.is_empty(){"Essential facts remain unresolved after bounded source checks; no safe default was established"}else if report.source_digests.is_empty(){"No authoritative source contents were checked by MACC; the declared investigation is not independent evidence that the recommendation satisfies project requirements"}else{"Configured authoritative source bytes were checked within the read-only budget; source digests establish provenance, not semantic compliance of the recommendation"}.into();
         let reason=if reuse.is_some(){"Existing binding takes precedence; conflicting proposals are explicitly reconciled to the recorded subject authority"}else if standing.is_some(){"Versioned project policy provides an explicit standing answer"}else if mandatory{"Mandatory governance/approval/conflict rule"}else{"Effective risk and current consultation threshold"}.into();
         Ok(Triage {
             risk,

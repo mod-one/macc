@@ -1,5 +1,6 @@
 mod base;
 mod checkpoint_preflight;
+mod compliance_diagnostic;
 mod decision_preflight;
 mod diagnostic_delivery;
 mod dispatch;

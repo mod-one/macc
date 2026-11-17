@@ -1,5 +1,42 @@
 //! Structured phase diagnostics and eligibility for retained review recovery.
 use super::model::Task;
+/// Source and governance prerequisites resume the interrupted phase after
+/// native checkpoint/worktree reconciliation, never a fresh implementation.
+pub fn retained_phase_precondition(task: &Task) -> bool {
+    task.state == "blocked"
+        && task.has_worktree_attached()
+        && task.task_runtime.last_error_code.as_deref() == Some("E903")
+        && matches!(
+            task.task_runtime.last_error_origin.as_deref(),
+            Some("precondition" | "decisions" | "checkpoint_preflight")
+        )
+        && matches!(
+            task.task_runtime.current_phase.as_deref(),
+            Some("fix" | "test" | "review" | "merge")
+        )
+}
+pub fn compliance_block(task: &Task) -> Option<super::decisions::ReviewComplianceBlock> {
+    if task.state != "blocked"
+        || task.task_runtime.last_error_code.as_deref() != Some("E903")
+        || task.task_runtime.last_error_origin.as_deref() != Some("decisions")
+    {
+        return None;
+    }
+    let block: super::decisions::ReviewComplianceBlock = serde_json::from_value(
+        task.task_runtime
+            .extra
+            .get(super::decisions::COMPLIANCE_BLOCK_KEY)?
+            .clone(),
+    )
+    .ok()?;
+    let pin = task.task_runtime.extra.get("decision_context")?;
+    (block.task_id == task.id
+        && pin["phase"] == "review"
+        && pin["attempt_id"] == block.attempt_id
+        && pin["plan_id"] == block.plan_id
+        && pin["digest"] == block.context_digest)
+        .then_some(block)
+}
 pub fn decision_precondition(reason: &str) -> bool {
     [
         "DM_STALE:",

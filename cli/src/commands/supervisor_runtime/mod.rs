@@ -1,6 +1,7 @@
 //! Production supervisor: canonical incidents, durable intervention and managed restart.
 mod activity;
 mod checkpoint_recovery;
+mod compliance_review;
 mod decision_budget_recovery;
 mod external_verification;
 mod output_protocol_recovery;

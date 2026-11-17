@@ -609,12 +609,12 @@ impl Store {
                     if verification_error.is_none() {
                         receipt.completion_status = "compliance_failed".into();
                         verification_error = Some(format!(
-                            "DM_COMPLIANCE: Decision {}: {}",
-                            binding.id, match receipt.compliance.get(&binding.id).map(|c|c.status.as_str()) {
-                                Some("fail") => "independent compliance explicitly failed; a complete CHANGES_REQUESTED review is required for remediation",
-                                Some("needs_human_review") => "independent compliance requires human review",
-                                _ => "independent compliance evidence is missing",
-                            }
+                            "DM_COMPLIANCE: {}",
+                            super::compliance::ComplianceFinding::from_binding(
+                                binding,
+                                receipt.compliance.get(&binding.id)
+                            )
+                            .describe()
                         ));
                     }
                 }

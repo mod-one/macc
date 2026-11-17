@@ -39,6 +39,15 @@ pub(super) async fn intervene(
     }
     stop_orphan_jobs(&report.incident).await?;
     macc_core::session_store::checkpoints::recovery::maintain(&paths.root)?;
+    if let Some(diagnosis) = super::compliance_review::diagnosis(&paths.root, &report.incident)? {
+        write_json(
+            &dir.join("review-compliance-block.json"),
+            &json!({"diagnosis":diagnosis,"source_repair_attempted":false,"compliance_accepted":false}),
+        )?;
+        let detail = diagnosis.summary.clone();
+        report.diagnosis = Some(diagnosis);
+        return Err(MaccError::Validation(detail));
+    }
     if let Some(diagnosis) =
         super::external_verification::pending_diagnosis(&paths.root, &report.incident)?
     {

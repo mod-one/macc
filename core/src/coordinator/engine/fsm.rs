@@ -895,11 +895,26 @@ pub(crate) fn apply_phase_failure_typed(
     now: &str,
 ) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode), None)?;
+    let active_phase = matches!(
+        (from, phase_mode),
+        (WorkflowState::InProgress, "dev" | "test" | "review")
+            | (WorkflowState::Testing, "test" | "review")
+            | (WorkflowState::Reviewing, "review")
+            | (WorkflowState::ChangesRequested, "fix")
+    );
+    // A genuine unmet prerequisite never becomes a test retry or an E910
+    // solely because tests start from in_progress and finish in testing.
+    // Other unexpected phase/state pairs still use the strict FSM refusal.
+    let to = if active_phase && super::phase_failure::is_precondition(reason) {
+        WorkflowState::Blocked
+    } else {
+        transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode), None)?
+    };
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     super::phase_failure::record(runtime, phase_mode, reason);
     runtime.pid = None;
+    crate::coordinator::precondition_scope::annotate_phase(task);
     task.touch_state_changed(now);
     Ok(())
 }

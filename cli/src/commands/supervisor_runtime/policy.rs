@@ -318,6 +318,12 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     } else if report
         .diagnosis
         .as_ref()
+        .is_some_and(|d| d.summary.starts_with("DM_COMPLIANCE:"))
+    {
+        "Open Decisions for the exact decision/version and independent finding in the diagnosis. Reconcile the recorded selection through a governed revision, or supply the missing independent evidence, then resume the retained phase with fresh context and review. This is a governance/compliance block; source repair or an unchanged restart cannot approve it.".into()
+    } else if report
+        .diagnosis
+        .as_ref()
         .is_some_and(|d| d.summary.starts_with("DM_PENDING:"))
     {
         "Open Decisions and answer or revise the exact native request listed in the reason. The supervisor waits for its revision; no application repair is needed. Then resume the retained task phase.".into()

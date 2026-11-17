@@ -666,7 +666,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 return Ok(Err(format!("E903: {}", wait.reason)));
             }
             if let Some(reason) =
-                crate::session_store::checkpoints::precondition_reason(&combined_output)
+                crate::coordinator::precondition_scope::phase_reason(&combined_output)
             {
                 evidence.settle("precondition_unmet", Some(&reason))?;
                 return Ok(Err(reason));

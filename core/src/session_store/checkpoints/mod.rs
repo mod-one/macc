@@ -267,33 +267,6 @@ pub(super) fn initial_schema() -> &'static str {
     schema::SCHEMA
 }
 
-/// Preserve the existing E903 contract across native synchronous phases.
-pub fn precondition_reason(output: &str) -> Option<String> {
-    let kind = output
-        .lines()
-        .rev()
-        .find_map(|line| line.trim().strip_prefix("MACC_TASK_RESULT:").map(str::trim))?;
-    if kind != "precondition_unmet" {
-        return None;
-    }
-    let conditions = output
-        .lines()
-        .filter_map(|line| {
-            line.trim()
-                .strip_prefix("MACC_TASK_PRECONDITION:")
-                .map(str::trim)
-        })
-        .collect::<Vec<_>>();
-    Some(format!(
-        "E903: {}",
-        if conditions.is_empty() {
-            "Validated checkpoint requires reconciliation".into()
-        } else {
-            conditions.join("; ")
-        }
-    ))
-}
-
 pub(crate) fn decision_planning_evidence(root: &Path) -> Result<String> {
     let state = git_state::snapshot(root)?;
     Ok(digest(

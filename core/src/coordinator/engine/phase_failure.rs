@@ -1,7 +1,17 @@
 //! A failure belongs to the current phase, not the previous dev explanation.
 use crate::coordinator::{model::TaskRuntime, RuntimeStatus};
 use serde_json::json;
+pub(crate) fn is_precondition(reason: &str) -> bool {
+    reason.starts_with("E903:")
+        || crate::coordinator::phase_diagnostics::decision_precondition(reason)
+}
 pub(crate) fn record(runtime: &mut TaskRuntime, phase: &str, reason: &str) {
+    runtime
+        .extra
+        .remove(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY);
+    runtime
+        .extra
+        .remove(crate::coordinator::decisions::COMPLIANCE_BLOCK_KEY);
     runtime.extra.insert("previous_phase_outcome".into(),json!({"phase":runtime.current_phase,"completion_kind":runtime.completion_kind,"explanation":runtime.result_explanation,"last_error":runtime.last_error}));
     if let Some(previous) = runtime.extra.remove("diagnostic_delivery") {
         runtime
@@ -17,7 +27,7 @@ pub(crate) fn record(runtime: &mut TaskRuntime, phase: &str, reason: &str) {
     runtime.current_phase = Some(phase.into());
     runtime.last_error = Some(reason.into());
     let decision = crate::coordinator::phase_diagnostics::decision_precondition(reason);
-    if reason.starts_with("E903:") || decision {
+    if is_precondition(reason) {
         runtime.set_last_error_details(
             "E903",
             if decision {
@@ -67,6 +77,12 @@ mod tests {
 /// Successful continuation clears active errors, retaining the prior diagnostic
 /// as history rather than claiming the last failure still applies.
 pub(super) fn clear(runtime: &mut TaskRuntime) {
+    runtime
+        .extra
+        .remove(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY);
+    runtime
+        .extra
+        .remove(crate::coordinator::decisions::COMPLIANCE_BLOCK_KEY);
     if let Some(value) = runtime.extra.remove("diagnostic_delivery") {
         runtime
             .extra

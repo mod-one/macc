@@ -337,9 +337,9 @@ fn checkpoint_limit_changes_apply_to_the_next_invocation() {
 }
 #[test]
 fn native_phases_preserve_the_last_explicit_precondition_marker() {
-    let reason=precondition_reason("MACC_TASK_RESULT: success_with_changes\nMACC_TASK_PRECONDITION: sources changed\nMACC_TASK_RESULT: precondition_unmet\n").unwrap();
+    let reason=crate::coordinator::precondition_scope::phase_reason("MACC_TASK_RESULT: success_with_changes\nMACC_TASK_PRECONDITION: sources changed\nMACC_TASK_RESULT: precondition_unmet\n").unwrap();
     assert_eq!(reason, "E903: sources changed");
-    assert!(precondition_reason(
+    assert!(crate::coordinator::precondition_scope::phase_reason(
         "MACC_TASK_RESULT: precondition_unmet\nMACC_TASK_RESULT: success_with_changes\n"
     )
     .is_none());

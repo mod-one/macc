@@ -3,7 +3,11 @@ mod analytics;
 mod approvals;
 mod backup;
 pub use backup::*;
+mod compliance;
 mod context;
+pub use compliance::{
+    review_compliance_for_task, ComplianceFinding, ReviewComplianceBlock, COMPLIANCE_BLOCK_KEY,
+};
 mod delegation;
 mod diagnostic;
 pub(crate) use delegation::verified as verified_delegated_gates;

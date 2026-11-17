@@ -5,6 +5,33 @@ use crate::coordinator::task_selector::reconcile_task_blocks;
 use crate::coordinator::WorkflowState;
 use serde_json::json;
 #[test]
+fn source_prerequisite_resumes_fix_and_validation_without_restarting_development() {
+    let root = tempfile::tempdir().unwrap();
+    for (phase, state) in [
+        ("fix", WorkflowState::ChangesRequested),
+        ("test", WorkflowState::InProgress),
+        ("review", WorkflowState::Testing),
+    ] {
+        let mut task:crate::coordinator::model::Task=serde_json::from_value(json!({"id":"A","state":"blocked","worktree":{"worktree_path":"/fixture/retained","branch":"A"},"task_runtime":{"current_phase":phase,"last_error_code":"E903","last_error_origin":"precondition","out_of_scope_fix":{"paths":["packages/ui-web/test/browser/interactions.spec.ts"]}}})).unwrap();
+        assert!(crate::coordinator::phase_diagnostics::retained_phase_precondition(&task));
+        assert_eq!(super::resume_state(root.path(), &mut task), state);
+        assert_eq!(task.worktree_path(), Some("/fixture/retained"));
+        assert_eq!(task.task_runtime.current_phase.as_deref(), Some(phase));
+        if phase == "fix" {
+            assert_eq!(
+                task.task_runtime.extra["suspended_fix_review_required"],
+                json!(true)
+            );
+            assert_eq!(
+                task.task_runtime.extra["review_refresh_correction"],
+                json!(true)
+            );
+        }
+        task.task_runtime.current_phase = Some("dev".into());
+        assert!(!crate::coordinator::phase_diagnostics::retained_phase_precondition(&task));
+    }
+}
+#[test]
 fn failed_compliance_requires_fresh_review_after_fix_even_at_the_limit_without_looping() {
     for testing in [false, true] {
         for verdict in [ReviewVerdict::Ok, ReviewVerdict::ChangesRequested] {

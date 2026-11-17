@@ -3883,8 +3883,15 @@ fn pause_overlay_content(
         if let Some(action) = next_action {
             body.push_str(&format!("\nNext: {}\n", action));
         }
+        if macc_core::coordinator::phase_diagnostics::decision_precondition(message)
+            || unmet_preconditions
+                .iter()
+                .any(|p| macc_core::coordinator::phase_diagnostics::decision_precondition(p))
+        {
+            body.push_str("\n- Press 'd': open Decisions and inspect the failed check\n");
+        }
         body.push_str(
-            "\n- Press 'd': open Decisions and inspect the failed check\n- Press 'o': open Logs screen\n- Press 'k' or Esc: close and keep the run stopped\n",
+            "\n- Press 'o': open Logs screen\n- Press 'k' or Esc: close and keep the run stopped\n",
         );
         body.push_str(&format!("\nCommand: {}\n", command_name));
         return (
@@ -4106,6 +4113,37 @@ mod pause_overlay_content_tests {
         assert_eq!(title, "Coordinator Paused — Context Refresh");
         assert!(body.contains("Work is preserved") && body.contains("checkpoint recovery"));
         assert!(!body.contains("cannot be implemented") && !body.contains("open Decisions"));
+    }
+
+    #[test]
+    fn source_preconditions_offer_logs_and_compliance_objections_offer_decisions() {
+        let source = "E903: out_of_scope_fix packages/ui-web/test/browser/interactions.spec.ts";
+        let (_, body, _) = pause_overlay_content(
+            source,
+            "task=A phase=fix",
+            "run",
+            Some("E903"),
+            Some("A"),
+            &[source.into()],
+            Some("Let the supervisor repair the protected source path."),
+        );
+        assert!(body.contains("open Logs") && !body.contains("open Decisions"));
+        let finding="DM_COMPLIANCE: Decision choice v3: src/issuer.rs:26-41 conflicts with the normative transaction invariant";
+        let (_, body, _) = pause_overlay_content(
+            finding,
+            "task=A phase=review",
+            "run",
+            Some("E903"),
+            Some("A"),
+            &[finding.into()],
+            Some("Open Decisions; propose a governed revision of choice v3."),
+        );
+        assert!(
+            body.contains("open Decisions")
+                && body.contains("src/issuer.rs:26-41")
+                && body.contains("choice v3")
+        );
+        assert!(!body.contains("external devices"));
     }
 
     #[test]

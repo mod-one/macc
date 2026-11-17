@@ -13,6 +13,74 @@ use serde_json::Value;
 /// Runtime `extra` key holding the out-of-scope fix record.
 pub const OUT_OF_SCOPE_FIX_KEY: &str = "out_of_scope_fix";
 
+/// Read native phase preconditions from assistant protocol, excluding examples
+/// and prompt/tool echoes. A repeated final answer does not add another cause.
+pub fn phase_reason(output: &str) -> Option<String> {
+    let output = super::result_protocol::projection(output);
+    let kind = output
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("MACC_TASK_RESULT:").map(str::trim))?;
+    if kind != "precondition_unmet" {
+        return None;
+    }
+    let mut conditions = Vec::new();
+    for value in output
+        .lines()
+        .filter_map(|l| l.strip_prefix("MACC_TASK_PRECONDITION:").map(str::trim))
+        .filter(|s| !s.is_empty())
+    {
+        if !conditions.contains(&value) {
+            conditions.push(value);
+        }
+    }
+    if conditions.is_empty() {
+        if let Some(explanation) = output
+            .lines()
+            .rev()
+            .find_map(|l| l.strip_prefix("MACC_TASK_RESULT_EXP:").map(str::trim))
+            .filter(|s| !s.is_empty())
+        {
+            conditions.push(explanation);
+        }
+    }
+    Some(format!(
+        "E903: {}",
+        if conditions.is_empty() {
+            "Performer reported an unmet precondition without naming it; inspect the preserved phase output".into()
+        } else {
+            conditions.join("; ")
+        }
+    ))
+}
+
+/// Development and correction phases share the same source-scope metadata.
+pub(crate) fn annotate_phase(task: &mut Task) {
+    let paths = if task.task_runtime.last_error_code.as_deref() == Some("E903")
+        && task.task_runtime.last_error_origin.as_deref() == Some("precondition")
+    {
+        out_of_scope_paths(
+            task,
+            &task
+                .task_runtime
+                .unmet_preconditions
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        vec![]
+    };
+    if paths.is_empty() {
+        task.task_runtime.extra.remove(OUT_OF_SCOPE_FIX_KEY);
+    } else {
+        task.task_runtime.extra.insert(
+            OUT_OF_SCOPE_FIX_KEY.into(),
+            serde_json::json!({"paths":paths}),
+        );
+    }
+}
+
 /// Paths named in `texts` that `task` may not change: outside every
 /// `change_scope.allowed_paths` pattern, or inside a read-only or forbidden one.
 ///
@@ -128,6 +196,52 @@ mod tests {
 
     fn task(scope: Value) -> Task {
         serde_json::from_value(json!({"id":"WEB-UI-005","change_scope":scope})).unwrap()
+    }
+
+    #[test]
+    fn repeated_final_answer_deduplicates_conditions_and_ignores_protocol_examples() {
+        let condition="out_of_scope_fix packages/ui-web/test/browser/interactions.spec.ts — stabilize dialog screenshots and rerun pnpm test.";
+        let block =
+            format!("MACC_TASK_RESULT: precondition_unmet\nMACC_TASK_PRECONDITION: {condition}\n");
+        let raw=format!("MACC_PROMPT_BEGIN: fixture\nMACC_TASK_RESULT: precondition_unmet\nMACC_TASK_PRECONDITION: wrong/prompt.ts\nMACC_PROMPT_END: fixture\nassistant\n{block}\ntokens used\n{block}");
+        assert_eq!(phase_reason(&raw), Some(format!("E903: {condition}")));
+        assert!(phase_reason(&format!(
+            "{block}\nMACC_TASK_RESULT: success_with_changes\n"
+        ))
+        .is_none());
+        let unnamed = phase_reason("MACC_TASK_RESULT: precondition_unmet\n").unwrap();
+        assert!(unnamed.contains("without naming") && !unnamed.contains("checkpoint"));
+        assert_eq!(phase_reason("MACC_TASK_RESULT: precondition_unmet\nMACC_TASK_RESULT_EXP: external verification unavailable\n"),Some("E903: external verification unavailable".into()));
+    }
+
+    #[test]
+    fn phase_failures_keep_the_same_repair_scope_and_original_worktree() {
+        for (phase, state) in [
+            ("fix", "changes_requested"),
+            ("test", "in_progress"),
+            ("test", "testing"),
+            ("review", "reviewing"),
+        ] {
+            let mut t:Task=serde_json::from_value(json!({"id":"A","state":state,"change_scope":{"allowed_paths":["apps/**"],"forbidden_paths":["packages/ui-web/**"]},"worktree":{"worktree_path":"/fixture/retained","branch":"original"},"task_runtime":{"current_phase":phase}})).unwrap();
+            crate::coordinator::engine::apply_phase_failure_typed(&mut t,phase,"E903: out_of_scope_fix packages/ui-web/test/browser/interactions.spec.ts — stabilize screenshots","2026-11-17T08:00:00Z").unwrap();
+            assert_eq!(t.state, "blocked");
+            assert_eq!(t.task_runtime.current_phase.as_deref(), Some(phase));
+            assert_eq!(
+                t.task_runtime.extra[OUT_OF_SCOPE_FIX_KEY]["paths"],
+                json!(["packages/ui-web/test/browser/interactions.spec.ts"])
+            );
+            assert_eq!(t.worktree_path(), Some("/fixture/retained"));
+            assert_eq!(t.branch(), Some("original"));
+            crate::coordinator::engine::phase_failure::record(
+                &mut t.task_runtime,
+                "review",
+                "DM_COMPLIANCE: governed decision requires review",
+            );
+            assert!(
+                !t.task_runtime.extra.contains_key(OUT_OF_SCOPE_FIX_KEY),
+                "a later governance failure must not retain the old source-repair diagnosis"
+            );
+        }
     }
 
     #[test]
