@@ -24,6 +24,11 @@ prepare_checkpoint() {
 }
 finish_checkpoint() {
   [[ "$checkpoint_enabled" == true && "$checkpoint_finished" == false && -n "$sqlite_lease_key" ]] || return 0
+  if [[ "${provider_quiesced:-true}" != true ]]; then
+    echo 'MACC_RUNNER_ERROR: E901' >&2
+    echo 'MACC_TASK_RESULT_EXP: Provider process cleanup was not confirmed; checkpoint finalization refused. Inspect the invocation and stop its remaining tools before reviewed recovery; work retained.' >&2
+    return 1
+  fi
   local result="$1" acknowledged="$2"
   checkpoint_finished=true
   local response

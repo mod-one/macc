@@ -39,10 +39,11 @@ const TIMEOUT_KILL_GRACE_SECONDS: u64 = 10;
 
 /// Kill the entire process group rooted at the performer child.
 ///
-/// Because we spawn with `process_group(0)`, the child is the process group
-/// leader and all its descendants share the same PGID.  We send SIGTERM to
-/// the negative PGID first (graceful), wait up to [`TIMEOUT_KILL_GRACE_SECONDS`],
-/// then send SIGKILL to ensure nothing survives.
+/// The runner shell is a process-group leader. TERM lets its EXIT trap stop
+/// the native provider supervisor and finalize the lease. Detached tool cleanup
+/// belongs to that isolated supervisor, which also observes runner parent loss;
+/// a process-group signal alone cannot contain tools that call setsid().
+/// Wait up to [`TIMEOUT_KILL_GRACE_SECONDS`] before forcing the shell down.
 ///
 /// Falls back to `child.kill()` if we don't have a PID (shouldn't happen).
 async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) {

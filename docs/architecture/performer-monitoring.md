@@ -207,3 +207,32 @@ No configured authoritative source evidence means no native source check was
 performed; a list of investigated files is an agent declaration. Repeated policy
 references to the same checked source consume the byte budget once. No
 application-specific business rule is embedded in MACC's generic diagnostics.
+
+## Provider process lifetime and checkpoint finalization
+
+All shared adapter invocations, including the JSON session backend, pass through
+the internal `runner-process` service. Its stdio and provider exit status remain
+unchanged. The shell transports prompts/output; process ownership and shutdown
+live in one native module rather than duplicated shell cleanup paths.
+
+On Linux this dedicated, synchronous subprocess is a child subreaper. It adopts
+orphaned tool processes even after `setsid` or a double fork. After provider exit
+or cancellation it sends TERM, escalates to KILL after a bounded grace period,
+and reaps every owned child before returning. It never signals a saved project
+PID, an unrelated sibling or another invocation. The supervisor has its own
+session and observes parent loss, so a killed runner shell does not abandon its
+tools. Other Unix platforms retain process-group cleanup; detached adoption is
+a Linux capability.
+
+Only a completed lifetime boundary writes its per-call completion receipt.
+The shared shell waits for that boundary, drains output, then saves the final
+checkpoint and releases its fenced session lease. Missing receipts (including
+a crashed or forcibly killed boundary) refuse checkpoint finalization with E901;
+they cannot silently turn a moving worktree into a verified checkpoint.
+
+`MACC-CHECKPOINT-WORKTREE-DRIFT` distinguishes retained content/index changes
+from changed ownership or requirements. The diagnostic asks to stop invocation
+tools and inspect late or external writes before reviewed reconciliation. An
+old drift alone does not prove its writer, authorize automatic acceptance of
+new bytes, waive requirements, or establish a missing device/approval. Existing
+exact-state and contract guards remain in force.

@@ -110,7 +110,7 @@ fn run(
         if let Err(error) = result {
             super::report::write_json(
                 &dir.join("checkpoint-recovery-blocked.json"),
-                &serde_json::json!({"code":macc_core::session_store::checkpoints::recovery::CODE,"task_id":task.id,"error":error.to_string(),"work_preserved":true,"next_action":"Inspect the retained source and assigned worker; reconcile conflicting files or changed requirements before retrying. No application repair or blind restart can resolve this ownership incident."}),
+                &serde_json::json!({"code":macc_core::session_store::checkpoints::recovery::CODE,"task_id":task.id,"error":error.to_string(),"work_preserved":true,"next_action":"Inspect the exact changed field. For retained content/index drift, confirm all invocation tools have stopped, inspect late or external writes, then reconcile reviewed changes. For changed requirements or ownership, inspect the contract and assigned worker. Do not bypass this guard with application edits or an unchanged restart."}),
             )?;
             return Err(error);
         }

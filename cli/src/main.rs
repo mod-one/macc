@@ -76,6 +76,16 @@ enum SaveSubcommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Internal provider lifetime boundary; preserves provider stdio and exit status.
+    #[command(hide = true)]
+    RunnerProcess {
+        #[arg(long)]
+        completion_file: std::path::PathBuf,
+        #[arg(long)]
+        owner_pid: Option<u32>,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<std::ffi::OsString>,
+    },
     /// Durable decisions, autonomy policy, task contexts and live graph patches
     Decisions {
         #[command(subcommand)]
@@ -1546,6 +1556,11 @@ fn run_with_engine_provider(
         std::env::current_exe().map_err(|e| MaccError::Validation(e.to_string()))?,
     );
     match &cli.command {
+        Some(Commands::RunnerProcess {
+            completion_file,
+            owner_pid,
+            command,
+        }) => commands::runner_process::run(command, completion_file, *owner_pid),
         Some(Commands::RunnerOutput {
             file,
             tool,

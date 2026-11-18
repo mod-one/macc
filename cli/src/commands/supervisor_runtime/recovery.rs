@@ -115,12 +115,12 @@ pub(super) async fn intervene(
         };
         if let Err(error) = &checkpoint_recovery {
             report.diagnosis = Some(repair::Diagnosis {
-                summary: format!("MACC-CHECKPOINT-CONTEXT-DRIFT: retained work could not be transferred safely: {error}"),
+                summary: format!("MACC-CHECKPOINT-CONTEXT-DRIFT: retained checkpoint recovery was refused: {error}"),
                 repairable: false, requires_human: true, restart_only: false,
                 task_ids: report.incident.tasks.iter().filter(|t| incident::repair_candidate(t)).map(|t|t.id.clone()).collect(),
                 external_prerequisites: vec![],
                 retry_at: None, unavailable_tool: None, related_task_ids: vec![],
-                macc_findings: vec!["Checkpoint ownership recovery stopped before application repair; inspect checkpoint-recovery-blocked.json".into()],
+                macc_findings: vec!["Checkpoint recovery stopped before application repair; inspect checkpoint-recovery-blocked.json for the exact changed field. Worktree content drift may indicate a tool still writing after invocation shutdown; it does not establish an ownership conflict.".into()],
                 macc_repair_required: false,
             });
         }

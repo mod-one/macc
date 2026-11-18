@@ -306,6 +306,11 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
         format!("Inspect checkpoint-recovery.json in the incident log directory: the same work and applicable decision binding already used their automatic restart. No checkpoint was changed by this preview. Investigate the recurring context refresh, then explicitly retry native recovery (`{RETRY}`). A new applicable decision or new checkpointed work has a separate bounded recovery budget.")
     } else if report.diagnosis.as_ref().is_some_and(|d| {
         d.summary
+            .contains(macc_core::session_store::checkpoints::recovery::WORKTREE_DRIFT)
+    }) {
+        format!("Inspect checkpoint-recovery-blocked.json: retained Git content/index changed after the checkpoint. Confirm all tools from that invocation have stopped and inspect late or external writes. Reconcile reviewed changes through `macc session-store reconcile <checkpoint-id>`, then explicitly retry native recovery (`{RETRY}`). Original work is preserved; no device, approval or automatic acceptance is implied.")
+    } else if report.diagnosis.as_ref().is_some_and(|d| {
+        d.summary
             .starts_with(macc_core::session_store::checkpoints::recovery::CODE)
     }) {
         format!("Inspect checkpoint-recovery-blocked.json in the incident log directory: verify the named checkpoint, retained phase, ownership and changed field. Reconcile reviewed changes through `macc session-store reconcile <checkpoint-id>` before retrying native recovery (`{RETRY}`). Original work is retained; this infrastructure guard is not a device or approval request.")
@@ -402,6 +407,18 @@ mod tests {
                 && !action.contains("Supply the recorded external")
                 && !action.contains("to context_refresh")
         );
+        let mut drift: Intervention =
+            serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+        drift
+            .diagnosis
+            .as_mut()
+            .unwrap()
+            .summary
+            .push_str(macc_core::session_store::checkpoints::recovery::WORKTREE_DRIFT);
+        let action = next_action(&Pending::default(), &drift, 3).unwrap();
+        assert!(action.contains("all tools from that invocation have stopped"));
+        assert!(action.contains("late or external writes"));
+        assert!(!action.contains("ownership"));
         let mut recurring = report;
         recurring.detail = super::super::checkpoint_recovery::RESTART_LIMIT.into();
         let action = next_action(&Pending::default(), &recurring, 3).unwrap();

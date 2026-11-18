@@ -210,10 +210,10 @@ fn decision_refresh_recovers_dirty_fix_without_rebinding_historical_review() {
         "concurrent external edit before requeue",
     )
     .unwrap();
-    assert!(ensure_task_ready(root, "A")
-        .unwrap_err()
-        .to_string()
-        .contains("worktree_dirty_digest"));
+    let drift = ensure_task_ready(root, "A").unwrap_err().to_string();
+    assert!(drift.contains("worktree_dirty_digest"));
+    assert!(drift.contains(WORKTREE_DRIFT));
+    assert!(drift.contains("late or external writes"));
     std::fs::write(worker.join("proof.txt"), "untracked validation evidence").unwrap();
     let after: (String, String, String) = db
         .query_row(

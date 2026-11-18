@@ -12,6 +12,9 @@ mod o2_runner;
 #[cfg(unix)]
 #[path = "support/performer_lifecycle.rs"]
 mod performer_lifecycle;
+#[cfg(target_os = "linux")]
+#[path = "support/provider_process.rs"]
+mod provider_process;
 #[cfg(unix)]
 #[path = "support/usage_identity_runner.rs"]
 mod usage_identity_runner;

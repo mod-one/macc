@@ -102,6 +102,7 @@ mkdir -p "$(dirname "$session_state_file")"
 # Session policy is shared across all adapter runners; provider syntax stays in tool.json.
 source "$(dirname -- "${BASH_SOURCE[0]}")/session_identity.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/session_store.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/provider_process.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/session_sqlite.sh"
 session_backend=json
 if [[ -f "$session_state_file" ]]; then
@@ -143,36 +144,21 @@ run_and_capture() {
   shift
   local rc=0
   [[ "${MACC_DEBUG:-0}" == "1" ]] && printf '[MACC] invoke (%s 1): %s\n' "${TOOL_LOG_PREFIX}" "$*" >&2
-  if [[ "$session_backend" == sqlite ]]; then
-    local fifo tee_pid
-    local capture_dir
-    capture_dir="$(mktemp -d "${output_file}.pipe.XXXXXX")"
-    provider_capture_dir="$capture_dir"
-    fifo="$capture_dir/output"
-    mkfifo "$fifo" || { rmdir "$capture_dir"; return 1; }
-    tee "$output_file" <"$fifo" &
-    tee_pid=$!
-    provider_tee_pid="$tee_pid"
-    if command -v setsid >/dev/null 2>&1; then
-      setsid "$@" >"$fifo" 2>&1 &
-      provider_group=true
-    else
-      "$@" >"$fifo" 2>&1 &
-      provider_group=false
-    fi
-    provider_pid=$!
-    wait "$provider_pid" || rc=$?
-    if [[ "$provider_group" == true ]]; then kill -KILL -- "-$provider_pid" 2>/dev/null || true; fi
-    provider_pid=""
-    wait "$tee_pid" || true
-    provider_tee_pid=""
-    rm -f "$fifo"
-    rmdir "$capture_dir"
-    provider_capture_dir=""
-  else
-    "$@" 2>&1 | tee "$output_file"
-    rc=${PIPESTATUS[0]}
-  fi
+  local capture_dir fifo owner_pid="$BASHPID"
+  capture_dir="$(mktemp -d "${output_file}.pipe.XXXXXX")"
+  provider_capture_dir="$capture_dir"
+  provider_quiesced=false
+  fifo="$capture_dir/output"
+  mkfifo "$fifo" || { rmdir "$capture_dir"; return 1; }
+  tee "$output_file" <"$fifo" &
+  provider_tee_pid=$!
+  # The native lifetime boundary reaps detached tools before returning. Never
+  # finalize a checkpoint based solely on the provider's own exit or its PGID.
+  "${MACC_SESSION_SERVICE_BIN:-macc}" runner-process --completion-file "$capture_dir/completion" --owner-pid "$owner_pid" -- "$@" <&0 >"$fifo" 2>&1 &
+  provider_pid=$!
+  wait "$provider_pid" || rc=$?
+  provider_pid=""
+  drain_provider_output
   return "$rc"
 }
 
@@ -466,6 +452,9 @@ sid_is_new=0
 sid=""
 
 cleanup_runner() {
+  # Repeated cancellation must not interrupt the lifetime barrier or lease release.
+  trap '' TERM INT HUP
+  stop_provider_process
   if [[ "$session_backend" == sqlite ]]; then
     cleanup_sqlite_session
   fi
@@ -480,6 +469,7 @@ cleanup_runner() {
 trap cleanup_runner EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
+trap 'exit 129' HUP
 
 run_default_call() {
   decision_prompt_receipt || return 1

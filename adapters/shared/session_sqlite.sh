@@ -8,10 +8,6 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/usage.sh"
 sqlite_heartbeat_pid=""
 sqlite_lease_key=""
 sqlite_clean=false
-provider_pid=""
-provider_group=false
-provider_capture_dir=""
-provider_tee_pid=""
 stop_sqlite_heartbeat() {
   if [[ -n "$sqlite_heartbeat_pid" ]]; then
     kill "$sqlite_heartbeat_pid" 2>/dev/null || true
@@ -20,25 +16,6 @@ stop_sqlite_heartbeat() {
   fi
 }
 cleanup_sqlite_session() {
-  # TERM may interrupt the shell's provider wait. Stop that provider before
-  # nesting another wait in the EXIT trap (notably the signaling heartbeat).
-  # Keep the lease monitor until the provider has stopped, then finalize it.
-  if [[ -n "$provider_pid" ]] && kill -0 "$provider_pid" 2>/dev/null; then
-    if [[ "$provider_group" == true ]]; then
-      kill -TERM -- "-$provider_pid" 2>/dev/null || true
-      (sleep 2; kill -KILL -- "-$provider_pid" 2>/dev/null || true) >/dev/null 2>&1 &
-    else
-      kill -TERM "$provider_pid" 2>/dev/null || true
-      (sleep 2; kill -KILL "$provider_pid" 2>/dev/null || true) >/dev/null 2>&1 &
-    fi
-    local watchdog=$!
-    wait "$provider_pid" 2>/dev/null || true
-    kill "$watchdog" 2>/dev/null || true
-    if [[ "$provider_group" == true ]]; then kill -KILL -- "-$provider_pid" 2>/dev/null || true; fi
-    sqlite_clean=false
-  fi
-  if [[ -n "$provider_tee_pid" ]]; then kill "$provider_tee_pid" 2>/dev/null || true; wait "$provider_tee_pid" 2>/dev/null || true; fi
-  if [[ -n "$provider_capture_dir" ]]; then rm -f "$provider_capture_dir/output"; rmdir "$provider_capture_dir" 2>/dev/null || true; fi
   stop_sqlite_heartbeat
   if [[ -n "$sqlite_lease_key" ]]; then
     finish_usage interrupted

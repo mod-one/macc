@@ -13,6 +13,9 @@ use rusqlite::TransactionBehavior;
 
 /// Stable diagnostic identifier under the existing E903 precondition contract.
 pub const CODE: &str = "MACC-CHECKPOINT-CONTEXT-DRIFT";
+/// Exact retained bytes/index changed after their checkpoint. This is not
+/// evidence of a missing device, a human decision or a transferred worktree.
+pub const WORKTREE_DRIFT: &str = "MACC-CHECKPOINT-WORKTREE-DRIFT";
 
 /// Keep session claims excluded throughout a physical worktree ownership repair.
 pub(crate) fn idle_worktrees(
@@ -407,8 +410,16 @@ fn decision_context_ready(root: &Path, task: &str, apply: bool) -> Result<()> {
             "source_hashes",
         ] {
             if preview["previous"][field] != preview["current"][field] {
+                let lifecycle = if matches!(
+                    field,
+                    "worktree_dirty_digest" | "worktree_content_digest"
+                ) {
+                    format!("{WORKTREE_DRIFT}: retained Git state differs from its checkpoint; confirm invocation tools are stopped and inspect late or external writes before reviewed reconciliation; ")
+                } else {
+                    String::new()
+                };
                 return Err(error(format!(
-                    "{}: task {task} checkpoint {id} phase={} role={}: decision-only refresh refused: {field} changed; previous={} current={}; original work preserved",
+                    "{}: {lifecycle}task {task} checkpoint {id} phase={} role={}: decision-only refresh refused: {field} changed; previous={} current={}; original work preserved",
                     CODE,preview["previous"]["phase"],preview["previous"]["role"],preview["previous"][field],preview["current"][field]
                 )));
             }
