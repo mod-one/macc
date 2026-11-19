@@ -4,7 +4,7 @@ use crossterm::event::KeyCode;
 use macc_core::service::launch_review::{LaunchDecision, LaunchReview};
 use ratatui::{
     layout::{Constraint, Layout},
-    style::{Color, Style},
+    style::Style,
     widgets::{Clear, Paragraph, Wrap},
     Frame,
 };
@@ -259,9 +259,9 @@ impl AppState {
                 .wrap(Wrap { trim: false })
                 .scroll((dialog.scroll, 0))
                 .style(Style::default().fg(if r.blockers.is_empty() {
-                    Color::Yellow
+                    crate::ui::theme().warn
                 } else {
-                    Color::Red
+                    crate::ui::theme().bad
                 })),
             parts[2],
         );
@@ -284,10 +284,17 @@ impl AppState {
             format!("  {start}  ")
         };
         let buttons = ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(format!("{cancel}   "), Style::default().fg(Color::Cyan)),
+            ratatui::text::Span::styled(
+                format!("{cancel}   "),
+                Style::default().fg(crate::ui::theme().accent),
+            ),
             ratatui::text::Span::styled(
                 start,
-                Style::default().fg(if ready { Color::Cyan } else { Color::DarkGray }),
+                Style::default().fg(if ready {
+                    crate::ui::theme().accent
+                } else {
+                    crate::ui::theme().muted
+                }),
             ),
         ]);
         f.render_widget(Paragraph::new(buttons), parts[3]);

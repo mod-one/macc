@@ -19,13 +19,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DecisionCommand {
+    NextDecision,
+    ToggleAdvisory,
+    Inspect,
+    Submit,
+    Feedback,
+    TogglePatch,
+    Challenge,
+}
+
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Draft {
     artifacts: Vec<dm::ArtifactRef>,
     effects: dm::AnswerEffects,
     fields: BTreeMap<String, String>,
-    active_field: usize,
     cursors: BTreeMap<String, usize>,
     apply_patch: bool,
     outcome: dm::AnswerOutcome,
@@ -50,7 +60,6 @@ pub struct Center {
     message: String,
     notice_success: bool,
     feedback: bool,
-    show_help: bool,
     submitting: bool,
     answer_in_flight: Option<(String, u64)>,
     auto_after: Option<Instant>,
@@ -271,21 +280,39 @@ impl Center {
         self.scroll = 0;
         self.focus = 0;
     }
-    pub fn pending(&self) -> usize {
+    pub(crate) fn inbox_rows(&self, history: bool) -> Vec<dm::Decision> {
         self.list()
-            .iter()
-            .filter(|d| d.status == "pending_human")
-            .count()
+            .into_iter()
+            .filter(|d| (d.status == "pending_human") != history)
+            .collect()
     }
-    fn legacy_key(&mut self, key: KeyCode) -> Option<Action> {
-        if !matches!(key, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace) {
-            self.save_drafts();
-        }
-        if key == KeyCode::F(1) {
-            self.show_help = !self.show_help;
-            self.scroll = 0;
-            return None;
-        }
+    pub(crate) fn show_exact(&mut self, decision: dm::Decision) {
+        self.show();
+        self.current = Some(decision);
+    }
+    pub(crate) fn pending_task_index(&self, tasks: &[String]) -> Option<usize> {
+        self.snapshot.as_ref()?["decisions"]
+            .as_array()?
+            .iter()
+            .filter(|d| d["status"] == "pending_human")
+            .position(|d| {
+                d["request"]["task_id"]
+                    .as_str()
+                    .is_some_and(|id| tasks.iter().any(|t| t == id))
+            })
+    }
+    pub fn pending(&self) -> usize {
+        self.snapshot
+            .as_ref()
+            .and_then(|v| v["decisions"].as_array())
+            .map_or(0, |rows| {
+                rows.iter()
+                    .filter(|d| d["status"] == "pending_human")
+                    .count()
+            })
+    }
+    fn navigation_key(&mut self, key: KeyCode) -> Option<Action> {
+        self.save_drafts();
         if key == KeyCode::Home {
             self.actions.show();
             self.manual = true;
@@ -333,13 +360,28 @@ impl Center {
             self.open = false;
             return None;
         }
-        if key == KeyCode::F(4) {
+        match key {
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(8);
+                return None;
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_add(8);
+                return None;
+            }
+            _ => {}
+        }
+        None
+    }
+    fn form_command(&mut self, command: DecisionCommand) -> Option<Action> {
+        self.save_drafts();
+        if command == DecisionCommand::Inspect {
             if let Some(d) = &self.current {
                 return Some(Action::InspectContext(d.request.task_id.clone()));
             }
             return None;
         }
-        if key == KeyCode::F(2) {
+        if command == DecisionCommand::NextDecision {
             self.inspected_contexts = None;
             let list = self.list();
             if !list.is_empty() {
@@ -354,44 +396,22 @@ impl Center {
             }
             return None;
         }
-        if key == KeyCode::F(8) {
+        if command == DecisionCommand::Feedback {
             self.feedback = true;
             self.message =
                 "New project direction: type your text, then Tab to Send and Enter to record it"
                     .into();
             return None;
         }
-        match key {
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(8);
-                return None;
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(8);
-                return None;
-            }
-            _ => {}
-        }
         let name = if self.feedback {
             "feedback".into()
         } else {
             self.current.as_ref().map(Self::key).unwrap_or_default()
         };
-        let secure = self.policy().trust_mode == "secure_approval"
-            && self
-                .snapshot
-                .as_ref()
-                .is_none_or(|s| s["approval_broker_available"] != true);
         let draft = self.drafts.entry(name).or_default();
         if self.feedback {
-            match key {
-                KeyCode::Char(c) => draft.text.push(c),
-                KeyCode::Enter => draft.text.push('\n'),
-                KeyCode::Backspace => {
-                    draft.text.pop();
-                }
-                KeyCode::F(5) => return Some(Action::Feedback(draft.text.clone())),
-                _ => {}
+            if command == DecisionCommand::Submit {
+                return Some(Action::Feedback(draft.text.clone()));
             }
             return None;
         }
@@ -408,29 +428,7 @@ impl Center {
         {
             return None;
         }
-        let mut fields = current.request.response_fields.clone();
-        fields.extend(interaction_fields(&current.request.kind));
-        if matches!(current.request.kind.as_str(), "approval" | "authorization")
-            && !fields.iter().any(|f| f.id == "evidence")
-        {
-            fields.push(dm::ResponseField {
-                id: "evidence".into(),
-                label: "Approval evidence".into(),
-                required: true,
-                multiline: false,
-                choices: vec![],
-            });
-        }
-        if secure {
-            fields.push(dm::ResponseField {
-                id: "__attestation".into(),
-                label: "Isolated approver attestation JSON".into(),
-                required: true,
-                multiline: true,
-                choices: vec![],
-            });
-        }
-        if key == KeyCode::F(12) {
+        if command == DecisionCommand::Challenge {
             let mut fields = draft.fields.clone();
             fields.remove("__attestation");
             let conditions = match condition_fields(&fields) {
@@ -463,11 +461,7 @@ impl Center {
                 },
             });
         }
-        if key == KeyCode::F(9) {
-            draft.active_field = (draft.active_field + 1) % (fields.len() + 1);
-            return None;
-        }
-        if key == KeyCode::F(10) {
+        if command == DecisionCommand::TogglePatch {
             let selected = draft
                 .option
                 .checked_sub(1)
@@ -479,58 +473,9 @@ impl Center {
             }
             return None;
         }
-        if key == KeyCode::F(11) {
-            draft.outcome = match draft.outcome {
-                dm::AnswerOutcome::Answer => dm::AnswerOutcome::Reject,
-                dm::AnswerOutcome::Reject => dm::AnswerOutcome::RequestChanges,
-                dm::AnswerOutcome::RequestChanges => dm::AnswerOutcome::Investigate,
-                dm::AnswerOutcome::Investigate => dm::AnswerOutcome::Answer,
-            };
-            draft.apply_patch = false;
-            return None;
-        }
-        if draft.active_field > 0 {
-            if let Some(field) = fields.get(draft.active_field - 1) {
-                let value = draft.fields.entry(field.id.clone()).or_default();
-                match key {
-                    KeyCode::Char(c) => {
-                        value.push(c);
-                        return None;
-                    }
-                    KeyCode::Enter => {
-                        value.push('\n');
-                        return None;
-                    }
-                    KeyCode::Backspace => {
-                        value.pop();
-                        return None;
-                    }
-                    KeyCode::Tab if !field.choices.is_empty() => {
-                        let index = field
-                            .choices
-                            .iter()
-                            .position(|s| s == value)
-                            .map(|i| (i + 1) % field.choices.len())
-                            .unwrap_or(0);
-                        *value = field.choices[index].clone();
-                        return None;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        match key {
-            KeyCode::Tab => {
-                draft.option = (draft.option + 1) % (current.request.options.len() + 1);
-                draft.apply_patch = false;
-            }
-            KeyCode::F(3) => draft.advisory = !draft.advisory,
-            KeyCode::Char(c) => draft.text.push(c),
-            KeyCode::Enter => draft.text.push('\n'),
-            KeyCode::Backspace => {
-                draft.text.pop();
-            }
-            KeyCode::F(5) => {
+        match command {
+            DecisionCommand::ToggleAdvisory => draft.advisory = !draft.advisory,
+            DecisionCommand::Submit => {
                 let option = draft
                     .option
                     .checked_sub(1)
@@ -762,13 +707,13 @@ mod tests {
         c
     }
     #[test]
-    fn enter_adds_newline_and_only_f5_sends() {
+    fn enter_adds_newline_and_only_send_submits() {
         let mut c = center("high");
         assert!(c.key_event(KeyCode::Char('é')).is_none());
         assert!(c.key_event(KeyCode::Enter).is_none());
         assert_eq!(c.drafts["q@1"].text, "é\n");
-        let Some(Action::Answer { text, .. }) = c.key_event(KeyCode::F(5)) else {
-            panic!("explicit F5 must submit")
+        let Some(Action::Answer { text, .. }) = c.attempt_send(false) else {
+            panic!("explicit Send must submit")
         };
         assert_eq!(text, "é\n");
     }
@@ -791,7 +736,7 @@ mod tests {
         draft
             .fields
             .insert("result".into(), "Device USB-42\nready".into());
-        match c.key_event(KeyCode::F(5)).unwrap() {
+        match c.attempt_send(false).unwrap() {
             Action::Answer { text, fields, .. } => {
                 assert_eq!(text, "Device USB-42\nready");
                 assert_eq!(fields["performed"], "yes");
@@ -799,10 +744,10 @@ mod tests {
             }
             _ => panic!("Expected explicit manual result"),
         }
-        for _ in 0..3 {
-            c.key_event(KeyCode::F(11));
-        }
-        match c.key_event(KeyCode::F(5)).unwrap() {
+        c.quick_menu = true;
+        c.menu_index = 3;
+        c.key_event(KeyCode::Enter);
+        match c.attempt_send(false).unwrap() {
             Action::Answer {
                 outcome,
                 apply_patch,
@@ -830,7 +775,7 @@ mod tests {
     fn full_autonomy_history_never_accepts_an_answer() {
         let mut c = center("never_ask");
         assert!(c.key_event(KeyCode::Char('x')).is_none());
-        assert!(c.key_event(KeyCode::F(5)).is_none());
+        assert!(c.attempt_send(false).is_none());
         assert!(c.drafts.get("q@1").is_none_or(|d| d.text.is_empty()));
     }
     #[test]
@@ -862,12 +807,13 @@ mod structured_tests {
         for ch in "Answer".chars() {
             c.key_event(KeyCode::Char(ch));
         }
-        c.key_event(KeyCode::F(9));
+        c.advanced_fields = true;
+        c.focus_control(interaction::Control::Field(0));
         for ch in "Evidence".chars() {
             c.key_event(KeyCode::Char(ch));
         }
         assert!(c.key_event(KeyCode::Enter).is_none());
-        match c.key_event(KeyCode::F(5)).unwrap() {
+        match c.attempt_send(false).unwrap() {
             Action::Answer {
                 text,
                 fields,
@@ -882,18 +828,19 @@ mod structured_tests {
         }
     }
     #[test]
-    fn resize_and_help_preserve_multiline_structured_draft() {
+    fn resize_and_scrolling_preserve_multiline_structured_draft() {
         let mut c = center();
         c.key_event(KeyCode::Char('é'));
-        c.key_event(KeyCode::F(9));
+        c.advanced_fields = true;
+        c.focus_control(interaction::Control::Field(0));
         c.key_event(KeyCode::Char('à'));
-        c.key_event(KeyCode::F(1));
+        c.key_event(KeyCode::PageDown);
         for (width, height) in [(24, 9), (40, 14), (100, 30)] {
             let backend = ratatui::backend::TestBackend::new(width, height);
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
             terminal.draw(|f| c.draw(f)).unwrap();
         }
-        match c.key_event(KeyCode::F(5)).unwrap() {
+        match c.attempt_send(false).unwrap() {
             Action::Answer { text, fields, .. } => {
                 assert_eq!(text, "é");
                 assert_eq!(fields["reason"], "à");
@@ -951,16 +898,17 @@ fn run_operator(
 mod lifecycle_tests {
     use super::*;
     #[test]
-    fn action_menu_withdraws_only_on_explicit_f5_and_retains_multiline_reason() {
+    fn withdrawal_requires_activating_send_and_retains_multiline_reason() {
         let mut c = super::tests::center("high");
         c.key_event(KeyCode::Home);
-        assert!(c.key_event(KeyCode::F(5)).is_none());
+        assert!(c.key_event(KeyCode::Tab).is_none());
         c.key_event(KeyCode::Down);
         c.key_event(KeyCode::Enter);
         for ch in "Obsolete".chars() {
             assert!(c.key_event(KeyCode::Char(ch)).is_none());
         }
         assert!(c.key_event(KeyCode::Enter).is_none());
+        c.key_event(KeyCode::Tab);
         let Some(Action::Operator {
             intent:
                 dm::OperatorIntent::Withdraw {
@@ -969,7 +917,7 @@ mod lifecycle_tests {
                     reason,
                 },
             ..
-        }) = c.key_event(KeyCode::F(5))
+        }) = c.key_event(KeyCode::Enter)
         else {
             panic!("expected explicit versioned withdrawal")
         };
@@ -1005,12 +953,14 @@ mod lifecycle_tests {
         d.request.options.push(serde_json::from_value(json!({"id":"b","label":"Alternative B","proposed_patch":{"plan_id":"p","base_graph_version":1,"idempotency_key":"b","reason":"Alternative","operations":[{"op":"add_task","task":{"id":"B"}}]}})).unwrap());
         c.key_event(KeyCode::Right);
         c.key_event(KeyCode::Right);
-        c.key_event(KeyCode::F(10));
+        c.reviewing_patch = true;
+        c.patch_accept = true;
+        c.key_event(KeyCode::Enter);
         let Some(Action::Answer {
             option,
             apply_patch,
             ..
-        }) = c.key_event(KeyCode::F(5))
+        }) = c.attempt_send(false)
         else {
             panic!("missing answer")
         };

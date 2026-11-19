@@ -8,35 +8,39 @@ use ratatui::{
 };
 impl Panel {
     pub fn draw(&self, f: &mut Frame, area: Rect, outer_message: &str) {
-        let tabs = [
-            "Memory",
-            "Context",
-            "Compaction",
-            "Code",
-            "Settings",
-            "Overview",
-            "Trials",
-        ];
-        let tab_height = if area.width < 80 { 4 } else { 3 };
-        let status_len = if !outer_message.is_empty() {
-            outer_message.len()
+        let tabs: Vec<_> = self.sections().iter().map(|(_, name)| *name).collect();
+        let status = if outer_message.is_empty() {
+            &self.message
         } else {
-            self.message.len()
+            outer_message
         };
-        let status_height = if status_len > area.width.saturating_sub(2) as usize {
+        let width = usize::from(area.width.saturating_sub(2));
+        let status_height = if status.is_empty() {
+            0
+        } else if status.chars().count() > width {
             4
         } else {
             3
         };
         let parts = Layout::default()
             .constraints([
-                Constraint::Length(tab_height),
+                Constraint::Length(1),
                 Constraint::Length(2),
                 Constraint::Min(3),
                 Constraint::Length(status_height),
             ])
             .split(area);
-        ui::tabs(f, parts[0], &tabs, self.tab);
+        ui::tab_line(
+            f,
+            parts[0],
+            &tabs,
+            self.section_index(),
+            if self.configure_section() {
+                crate::ui::theme().configure
+            } else {
+                crate::ui::theme().accent
+            },
+        );
         let summary = match &self.view {
             Some(v) => format!(
                 "O2 {}  •  Storage: {}  •  Schema: {}\n{}",
@@ -44,9 +48,9 @@ impl Panel {
                 if v.sqlite { "SQLite" } else { "JSON" },
                 if v.ready { "ready" } else { "setup required" },
                 if v.ready {
-                    "F2 Actions opens named operations. Optional features live under 5 Settings."
+                    "[:] Commands opens named operations. Ctrl+T switches between evidence and settings."
                 } else {
-                    "Setup required. Review storage migration first; 5 Settings stays available."
+                    "Shared storage needs setup. Review the migration in Session settings."
                 }
             ),
             None => "O2 state unavailable. Press r to retry; inspect the status message.".into(),
@@ -81,12 +85,12 @@ impl Panel {
                 );
             } else if self.rows.is_empty() {
                 let empty=match self.tab {
-                    0=>"No memories in this scope.\n\nF2 → Propose a sourced memory, import proposals, or change the search scope. Only reviewed active facts can enter automatic context.",
+                    0=>"No memories in this scope.\n\n[:] → Propose a sourced memory, import proposals, or change the search scope. Only reviewed active facts can enter automatic context.",
                     1=>"No context manifests yet.\n\nRun a task with the context engine enabled in Settings. This section records the mandatory and optional context supplied to each invocation.",
-                    2=>"No compaction observations yet.\n\nF2 → Inspect runtime decisions. Configure optional native settings under Settings → Compaction; capability claims require real adapter observations.",
-                    3=>"No provider evidence yet.\n\nF2 → Prepare provider lifecycle action. The native provider ships with MACC; external providers are optional and require reviewed setup.",
-                    5=>"No task evidence yet.\n\nRun a task to record sessions, checkpoints and context. Use F2 to filter tasks or open scoped memory and sessions.",
-                    _=>"No policy trial selected.\n\nF2 → Pre-register a policy trial or inspect an existing trial. Trials never start model calls or change policies automatically.",
+                    2=>"No compaction observations yet.\n\n[:] → Inspect runtime decisions. Configure optional native settings under Settings → Compaction; capability claims require real adapter observations.",
+                    3=>"No provider evidence yet.\n\n[:] → Prepare provider lifecycle action. The native provider ships with MACC; external providers are optional and require reviewed setup.",
+                    5=>"No task evidence yet.\n\nRun a task to record sessions, checkpoints and context. Use [:] to filter tasks or open scoped memory and sessions.",
+                    _=>"No policy trial selected.\n\n[:] → Pre-register a policy trial or inspect an existing trial. Trials never start model calls or change policies automatically.",
                 };
                 ui::details(f, list, self.section_name(), empty.into(), 0);
             } else {
@@ -99,21 +103,11 @@ impl Panel {
             } else {
                 self.selection_details()
             };
-            ui::details(
-                f,
-                details,
-                "Details — PgUp / PgDn scroll; F4 raw evidence",
-                text,
-                self.scroll,
-            );
+            ui::details(f, details, "Details", text, self.scroll);
         }
-        let status = if !outer_message.is_empty() {
-            outer_message
-        } else if !self.message.is_empty() {
-            &self.message
-        } else {
-            "Select a record to inspect its evidence."
-        };
+        if status.is_empty() {
+            return;
+        }
         f.render_widget(
             Paragraph::new(status)
                 .wrap(Wrap { trim: false })
@@ -131,9 +125,9 @@ impl Panel {
     }
     fn setup_text(&self) -> String {
         if self.view.as_ref().is_some_and(|v| v.sqlite) {
-            "Step 1 — Upgrade shared storage\nF2 → Prepare O2 schema upgrade. Inspect the backup and source hash, then confirm with a.\n\nStep 2 — Choose features\n5 Settings opens Memory, Context, Compaction and Code groups.\n\nFeatures remain disabled until explicitly saved.".into()
+            "Step 1 — Upgrade shared storage\n[:] → Prepare O2 schema upgrade. Inspect the backup and source hash, then confirm with a.\n\nStep 2 — Choose features\nConfigure → O2 → Settings opens Memory, Context, Compaction and Code groups.\n\nFeatures remain disabled until explicitly saved.".into()
         } else {
-            "Step 1 — Prepare SQLite storage\nJ opens Sessions. F2 → Prepare SQLite migration. Stop active runners, inspect the plan, then confirm with a.\n\nStep 2 — Return here with O\nF2 → Prepare O2 schema upgrade if needed.\n\nStep 3 — Choose features\n5 Settings controls optional features. No facts or settings are activated automatically.".into()
+            "Step 1 — Prepare SQLite storage\nS opens Sessions. [:] → Prepare SQLite migration. Stop active runners, inspect the plan, then confirm with a.\n\nStep 2 — Return here with O\n[:] → Prepare O2 schema upgrade if needed.\n\nStep 3 — Choose features\nConfigure → O2 → Settings controls optional features. No facts or settings are activated automatically.".into()
         }
     }
     fn draw_form(&self, f: &mut Frame, area: Rect, form: &forms::Form) {
@@ -189,30 +183,53 @@ impl Panel {
             .map(|i| (i, &view.fields[i]))
             .collect();
         let saved = serde_json::to_value(&view.policy).unwrap_or_default();
-        let selected = fields.iter().position(|(i, _)| *i == self.selected);
-        let rows = fields
-            .iter()
-            .map(|(_, field)| {
-                let pointer = format!("/{}", field.path.replace('.', "/"));
-                let value = self.draft.pointer(&pointer).unwrap_or(&field.default);
-                vec![
-                    field.label.clone(),
-                    ui::value(value),
-                    if saved.pointer(&pointer) != Some(value) {
-                        "Edited".into()
-                    } else {
-                        "Saved".into()
-                    },
-                ]
-            })
-            .collect();
+        let mut selected = None;
+        let mut rows = Vec::new();
+        let mut previous = None;
+        for &(i, field) in &fields {
+            let group = settings::MemoryGroup::from_path(&field.path);
+            let folded = group.is_some_and(|g| self.folded.contains(&g));
+            if let Some(g) = group.filter(|_| group != previous) {
+                if folded && i == self.selected {
+                    selected = Some(rows.len());
+                }
+                let count = fields
+                    .iter()
+                    .filter(|(_, f)| settings::MemoryGroup::from_path(&f.path) == Some(g))
+                    .count();
+                rows.push(vec![
+                    format!("{} {} · {count}", if folded { "▸" } else { "▾" }, g.label()),
+                    String::new(),
+                    String::new(),
+                ]);
+            }
+            previous = group;
+            if folded {
+                continue;
+            }
+            if i == self.selected {
+                selected = Some(rows.len());
+            }
+            let pointer = format!("/{}", field.path.replace('.', "/"));
+            let value = self.draft.pointer(&pointer).unwrap_or(&field.default);
+            rows.push(vec![
+                field.label.clone(),
+                ui::value(value),
+                if saved.pointer(&pointer) != Some(value) {
+                    "◆ Edited".into()
+                } else {
+                    String::new()
+                },
+            ]);
+        }
         ui::table(
             f,
             area,
-            &format!("{group_name} settings — ← / → group, / find"),
+            &format!("{group_name} settings"),
             &["Setting", "Value", "Draft"],
             rows,
             selected,
+            crate::navigation::Mode::Configure,
         );
     }
     fn selection_details(&self) -> String {
@@ -236,19 +253,19 @@ impl Panel {
                             .unwrap_or_else(|| "—".into())
                     )
                 };
-                return format!("{}\n\nCurrent draft: {}\nDefault: {}\nAllowed: {}\nActivation: {}\n\nEnter: toggle, choose or edit\np: preview exact draft\ns: save after preview\nx: discard edits\n\nGroup: ← / →    Find: /\nCanonical key: {}",field.label,ui::value(self.draft.pointer(&pointer).unwrap_or(&field.default)),ui::value(&field.default),choices,field.activation,field.path);
+                return format!("{}\n\nCurrent draft: {}\nDefault: {}\nAllowed: {}\nActivation: {}\n\nEnter: toggle, choose or edit\np: preview exact draft\ns: save after preview\nx: discard edits\n\nCategory: [ / ]   Find: /\nCanonical key: {}",field.label,ui::value(self.draft.pointer(&pointer).unwrap_or(&field.default)),ui::value(&field.default),choices,field.activation,field.path);
             }
         }
         if let Some(row) = self.rows.get(self.selected) {
             return ui::evidence(&row.to_string(), self.raw_details);
         }
         match self.tab {
-            0=>"Memory preserves sourced facts across tasks.\n\nProposal → inspect evidence → review → explicit confirmation.\n\nUse F2 to browse actions by their full names.".into(),
+            0=>"Memory preserves sourced facts across tasks.\n\nProposal → inspect evidence → review → explicit confirmation.\n\nUse [:] to browse actions by their full names.".into(),
             1=>"Context manifests show what was supplied to an invocation. Mandatory PRD/criteria remain separate from optional memory and estimates.".into(),
             2=>"Compaction controls conversation pressure and checkpoint rotation. Unsupported native capabilities remain explicitly unverified.".into(),
             3=>"Code intelligence uses registered provider adapters with native fallback. Installation and indexing require a reviewed plan.".into(),
-            5=>"Overview joins observed task evidence. It never marks a task delivered.\n\nF2: inspect scoped memory, context or sessions.".into(),
-            _=>format!("Selected safe trial field: {}\n\n← / → choose field. F2 lists trial registration, quality review, evaluation and adoption steps. No policy changes automatically.",macc_core::o2::tuning::FIELDS[self.tuning_field]),
+            5=>"Overview joins observed task evidence. It never marks a task delivered.\n\n[:] inspect scoped memory, context or sessions.".into(),
+            _=>format!("Selected safe trial field: {}\n\n← / → choose field. [:] lists trial registration, quality review, evaluation and adoption steps. No policy changes automatically.",macc_core::o2::tuning::FIELDS[self.tuning_field]),
         }
     }
     fn draw_records(&self, f: &mut Frame, area: Rect) {
@@ -347,6 +364,11 @@ impl Panel {
             headers,
             rows,
             Some(self.selected),
+            if self.configure_section() {
+                crate::navigation::Mode::Configure
+            } else {
+                crate::navigation::Mode::Operate
+            },
         );
     }
 }

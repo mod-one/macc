@@ -1,5 +1,6 @@
 //! Interactive recovery stays inside Apply and reuses typed O2 configuration edits.
 use super::*;
+use crate::command_catalog::keys as k;
 use macc_core::service::preparation::{Approval, Inputs, Report};
 use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
@@ -27,6 +28,10 @@ enum Mode {
     Confirm,
 }
 impl AppState {
+    pub(crate) fn apply_assistant_editing(&self) -> bool {
+        self.apply_assistant_open()
+            && matches!(self.apply_runtime.assistant.mode, Mode::Suite | Mode::Value)
+    }
     pub(crate) fn apply_assistant_open(&self) -> bool {
         self.apply_runtime.assistant.open
     }
@@ -246,7 +251,7 @@ impl AppState {
             },
         }
     }
-    pub(crate) fn apply_assistant_bindings(&self) -> Vec<(&'static str, &'static str)> {
+    pub(crate) fn apply_assistant_bindings(&self) -> Vec<(k::Keys, &'static str)> {
         let state = &self.apply_runtime.assistant;
         let mut rows = match state.mode {
             Mode::Overview => {
@@ -257,34 +262,37 @@ impl AppState {
                     .is_some_and(|q| q.kind == "provider_quality");
                 let mut actions = vec![
                     (
-                        "Enter",
+                        k::ENTER,
                         if quality {
                             "Keep partial coverage and review Apply"
                         } else {
                             "Continue / review Apply"
                         },
                     ),
-                    ("c", "Configure O2"),
-                    ("s", "Provide labelled suite"),
+                    (k::ch('c'), "Configure O2"),
+                    (k::ch('s'), "Provide labelled suite"),
                 ];
                 if quality {
-                    actions.push(("i", "Confirm suggested budget and review rebuild"));
+                    actions.push((k::ch('i'), "Confirm suggested budget and review rebuild"));
                 }
                 actions
             }
-            Mode::Settings => vec![("↑↓", "Select setting"), ("Enter", "Edit selected setting")],
+            Mode::Settings => vec![
+                (k::VERTICAL, "Select setting"),
+                (k::ENTER, "Edit selected setting"),
+            ],
             Mode::Value => vec![
-                ("←→", "Choose value"),
-                ("Backspace", "Delete character"),
-                ("Enter", "Preview setting"),
+                (k::HORIZONTAL, "Choose value"),
+                (k::BACKSPACE, "Delete character"),
+                (k::ENTER, "Preview setting"),
             ],
             Mode::Suite => vec![
-                ("Backspace", "Delete character"),
-                ("Enter", "Validate suite and review Apply"),
+                (k::BACKSPACE, "Delete character"),
+                (k::ENTER, "Validate suite and review Apply"),
             ],
-            Mode::Confirm => vec![("Enter", "Confirm setting and review Apply")],
+            Mode::Confirm => vec![(k::ENTER, "Confirm setting and review Apply")],
         };
-        rows.extend([("PgUp/PgDn", "Scroll evidence"), ("Esc", "Close assistant")]);
+        rows.extend([(k::PAGES, "Scroll evidence"), (k::ESC, "Close assistant")]);
         rows
     }
     pub(crate) fn draw_apply_assistant(&self, f: &mut Frame) {

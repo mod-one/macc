@@ -3,7 +3,7 @@ use super::*;
 fn trials_have_a_dedicated_guided_tab_and_mutations_require_confirmation() {
     let root = tempfile::tempdir().unwrap();
     let mut p = Panel::default();
-    p.key(root.path(), KeyCode::Char('7')).unwrap();
+    p.key(root.path(), KeyCode::Char('4')).unwrap();
     assert_eq!(p.tab, 6);
     // A missing SQLite authority is surfaced by the asynchronous inspector, not a crash.
     p.job = None;
@@ -27,7 +27,7 @@ fn trials_have_a_dedicated_guided_tab_and_mutations_require_confirmation() {
     );
     assert!(p.mutation(KeyCode::Char('a')));
     assert!(p.job.is_none());
-    p.key(root.path(), KeyCode::Char('5')).unwrap();
+    p.open_mode(root.path(), true).unwrap();
     assert!(p.pending.is_none());
 }
 #[test]

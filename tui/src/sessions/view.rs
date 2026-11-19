@@ -6,17 +6,37 @@ use ratatui::{
     style::Style,
     widgets::{Paragraph, Wrap},
 };
+fn unit(name: &str) -> &str {
+    match name {
+        "seconds" => "s",
+        "milliseconds" => "ms",
+        other => other,
+    }
+}
+
 impl SessionsScreen {
     pub(super) fn draw_workspace(&self, f: &mut Frame, area: Rect) {
         let parts = Layout::default()
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(1),
                 Constraint::Length(3),
                 Constraint::Min(3),
                 Constraint::Length(3),
             ])
             .split(area);
-        ui::tabs(f, parts[0], &["Settings", "Conversations"], self.tab);
+        let section = if self.tab == 0 {
+            "Settings"
+        } else {
+            "Conversations"
+        };
+        f.render_widget(
+            Paragraph::new(section).style(Style::default().fg(if self.tab == 0 {
+                crate::ui::theme().configure
+            } else {
+                crate::ui::theme().accent
+            })),
+            parts[0],
+        );
         let summary = match &self.view {
             Some(v) => format!(
                 "Storage: {}  •  {} conversations  •  Settings: {}{}\n{}",
@@ -33,7 +53,7 @@ impl SessionsScreen {
                 if v.backend == "sqlite" {
                     "Changes take effect on the next session claim."
                 } else {
-                    "Shared O2 data needs SQLite. F2 → Prepare SQLite migration; inspect the plan before confirming."
+                    "Shared O2 data needs SQLite. [:] → Prepare SQLite migration; inspect the plan before confirming."
                 }
             ),
             None => "Session state unavailable. Press r to retry; see the status below.".into(),
@@ -55,7 +75,7 @@ impl SessionsScreen {
                                         .pointer(&format!("/{}", field.path.replace('.', "/")))
                                         .unwrap_or(&Value::Null)
                                 ),
-                                field.unit
+                                unit(&field.unit)
                             ),
                         ]
                     })
@@ -67,9 +87,10 @@ impl SessionsScreen {
                     &["Setting", "Value"],
                     rows,
                     Some(self.selected),
+                    crate::navigation::Mode::Configure,
                 );
             } else if v.sessions.is_empty() {
-                ui::details(f,list,"Conversations","No recorded conversations yet.\n\nRun a coordinator task to record a session. Existing conversations appear here with their task, role and lifecycle status.\n\nF2 Actions opens usage, checkpoints and storage administration.".into(),0);
+                ui::details(f,list,"Conversations","No recorded conversations yet.\n\nRun a coordinator task to record a session. Existing conversations appear here with their task, role and lifecycle status.\n\n[:] Commands opens usage, checkpoints and storage administration.".into(),0);
             } else {
                 let rows = v
                     .sessions
@@ -91,6 +112,7 @@ impl SessionsScreen {
                     &["Task", "Role", "Tool", "Status", "Uses"],
                     rows,
                     self.selected.checked_sub(v.fields.len()),
+                    crate::navigation::Mode::Operate,
                 );
             }
         }
@@ -110,7 +132,7 @@ impl SessionsScreen {
             if self.editing.is_some() {
                 "Edit value — Enter saves draft; Esc cancels"
             } else {
-                "Details — PgUp / PgDn scroll; F4 raw evidence"
+                "Details — PgUp / PgDn scroll; Ctrl+R raw evidence"
             },
             details,
             self.scroll,
@@ -140,12 +162,12 @@ impl SessionsScreen {
                         .unwrap_or(&Value::Null),
                 )
             });
-            format!("{}\n\n{}\n\nValue: {} {}\nAllowed range: {}–{} {}\n\nEnter: edit value\np: validate and preview\ns: save settings\n\nCanonical key: {}\nSaved revision: {}",field.label,field.help,current,field.unit,field.min,field.max,field.unit,field.path,if v.revision==self.draft_revision {"current"}else{"changed externally; discard/review before saving"})
+            format!("{}\n\n{}\n\nValue: {} {}\nAllowed range: {}–{} {}\n\nEnter: edit value\np: validate and preview\ns: save settings\n\nCanonical key: {}\nSaved revision: {}",field.label,field.help,current,unit(&field.unit),field.min,field.max,unit(&field.unit),field.path,if v.revision==self.draft_revision {"current"}else{"changed externally; discard/review before saving"})
         } else if let Some(s) = self
             .selected_id()
             .and_then(|id| v.sessions.iter().find(|s| s.id == id))
         {
-            format!("Task: {}\nRole: {}\nTool: {}\nStatus: {}\nGeneration: {}\nUses: {}\nOwner process: {}\n\nSession ID: {}\n\nEnter: inspect events\nF2: usage, checkpoints or prepare closure",s.task_id,s.role,s.tool_id,s.status,s.generation,s.use_count,s.owner_pid.map(|p|p.to_string()).unwrap_or_else(||"none".into()),s.id)
+            format!("Task: {}\nRole: {}\nTool: {}\nStatus: {}\nGeneration: {}\nUses: {}\nOwner process: {}\n\nSession ID: {}\n\nEnter: inspect events\n[:] usage, checkpoints or prepare closure",s.task_id,s.role,s.tool_id,s.status,s.generation,s.use_count,s.owner_pid.map(|p|p.to_string()).unwrap_or_else(||"none".into()),s.id)
         } else {
             "Select a setting or conversation to inspect its purpose and available actions.".into()
         }

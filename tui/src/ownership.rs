@@ -1,7 +1,7 @@
 use macc_core::process_ownership::{OwnershipRecord, TakeoverRequest};
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -57,32 +57,38 @@ pub fn render_ownership_banner(f: &mut Frame, area: Rect, props: &OwnershipBanne
 
     let status_label = if props.is_owner { "owner" } else { "viewer" };
     let status_color = if props.is_owner {
-        Color::Green
+        crate::ui::theme().good
     } else {
-        Color::Yellow
+        crate::ui::theme().muted
     };
 
     let takeover_hint = if !props.is_owner && props.has_pending_request {
         " [pending takeover]"
     } else if !props.is_owner {
-        " [T: request ownership]"
+        " [o] Request ownership"
     } else {
         ""
     };
 
     let spans = vec![
         Span::styled(
-            format!("[{}]", status_label),
+            format!(
+                "{} {}",
+                if props.is_owner { "●" } else { "○" },
+                status_label
+            ),
             Style::default().fg(status_color),
         ),
-        Span::raw("  owner: "),
+        Span::raw(if props.is_owner { " " } else { "  owner: " }),
         Span::raw(owner_display),
         Span::raw(format!("  viewers: {}", props.viewer_count)),
-        Span::styled(takeover_hint.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            takeover_hint.to_string(),
+            Style::default().fg(crate::ui::theme().accent),
+        ),
     ];
 
-    let banner = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::ALL).title("Ownership"));
+    let banner = Paragraph::new(Line::from(spans));
     f.render_widget(banner, area);
 }
 
@@ -100,7 +106,7 @@ pub fn render_takeover_modal(f: &mut Frame, area: Rect, request: &TakeoverReques
             Block::default()
                 .title("Ownership Takeover Request")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
+                .border_style(Style::default().fg(crate::ui::theme().warn)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(modal, modal_area);

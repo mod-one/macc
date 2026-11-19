@@ -2,44 +2,44 @@
 
 ## Open a workspace
 
-The Home overview lists both destinations. Press **O** (uppercase) for **O2 Memory & Context** or **J** for **Sessions & Conversations**. Both also appear in the searchable command palette (**F2**, with **:** outside text input), and in contextual help (**F1**). The older **Sessions → o** shortcut remains available.
+The Home overview lists both destinations. Press **O** (uppercase) for **O2 Memory & Context** or **S** for **Sessions & Conversations**. Both also appear in the searchable command palette (**:**), and in contextual help (**?**). The older **Sessions → o** shortcut remains available.
 
 Each workspace has its own title and breadcrumb. Opening O2 for the first time shows the task overview or explicit storage setup instructions. A missing PRD does not prevent inspecting these configuration screens.
 
 ## Find an operation
 
-- **F2** opens the shared searchable command palette for the active page or window. Type an action name, select with **Up/Down**, then **Enter**. The lower pane explains the selected action. Unavailable actions remain visible with an explanation; they do not execute.
-- **?** or **F1** opens contextual help. Scroll with **Up/Down** or **Page Up/Page Down**; **Esc** closes help.
+- **:** or **Ctrl+P** opens the shared searchable command palette for the active page or window. Type an action name, select with **Up/Down**, then **Enter**. The lower pane explains the selected action. Unavailable actions remain visible with an explanation; they do not execute.
+- **?** opens contextual help. Scroll with **Up/Down** or **Page Up/Page Down**; **Esc** closes help.
 - **Tab/Shift+Tab** changes section; number keys open sections directly.
 - **Enter** edits the selected setting or inspects the selected record. The selected row stays visible while navigating.
-- **Page Up/Page Down** scrolls the details pane. **F4** switches between readable evidence and complete raw evidence.
+- **Page Up/Page Down** scrolls the details pane. **Ctrl+R** switches between readable evidence and complete raw evidence.
 - **Esc** cancels input or a pending reviewed operation before navigating back. Unsaved policy drafts require explicit save or discard.
 
-Palette actions resolve to the existing operation shortcuts **before** the project ownership gate runs. A viewer cannot bypass the gate by choosing an operation with Enter. Core services still validate schema, scope, source hashes, revisions and confirmation checksums.
+The palette and keyboard invoke the same workspace actions and project ownership gate. A viewer cannot bypass the gate by choosing an operation with Enter. Core services still validate schema, scope, source hashes, revisions and confirmation checksums.
 
 ## Sessions
 
-**1 Settings** shows the session policy catalog in a table. The adjacent detail pane explains the selected field, its units, valid range and canonical key. **Enter** edits a value. **p** previews/validates the draft; **s** saves through the existing revision check. **x** discards a draft; defaults and inheritance are available through F2.
+**Configure → Sessions** shows the session policy catalog in a table. The adjacent detail pane explains the selected field, its units, valid range and canonical key. **Enter** edits a value. **p** previews/validates the draft; **s** saves through the existing revision check. **x** discards a draft; defaults and inheritance are available through the command palette.
 
-**2 Conversations** shows recorded task, role, tool, status and use count. An empty list explains when conversations are recorded. Select a row and press Enter for session/events evidence. Usage, checkpoints, closure preparation, lease recovery, consistent backup and reviewed storage migration are available through F2. Closing a leased session remains forbidden.
+**Operate → Sessions** shows recorded task, role, tool, status and use count. An empty list explains when conversations are recorded. Select a row and press Enter for session/events evidence. Use `:` for usage, checkpoints, closure, lease recovery and backups. Ctrl+T opens settings and the reviewed storage migration. Closing a leased session remains forbidden.
 
 Storage migration is always a reviewed action: prepare the plan, stop active coordinator/supervisor/runners, inspect backup/source evidence, then confirm with **a**. Esc cancels the plan without changing storage.
 
 ## O2
 
-| Section | Purpose |
-| --- | --- |
-| 1 Memory | Sourced proposals, reviews, conflicts, import/export and retrieval evidence |
-| 2 Context | Recorded mandatory/optional invocation context and output reduction |
-| 3 Compaction | Runtime decisions, adapter probes and reviewed checkpoint/rotation operations |
-| 4 Code | Current-code queries and reviewed provider lifecycle operations |
-| 5 Settings | Grouped configuration of optional O2 capabilities |
-| 6 Overview | Task-scoped sessions, checkpoints, context and proposal counts |
-| 7 Trials | Pre-registered paired policy trials and measured adoption gates |
+| Mode | Section | Purpose |
+| --- | --- | --- |
+| Operate | 1 Memory | Proposals, reviews, conflicts, import/export and retrieval evidence |
+| Operate | 2 Context | Invocation context and output reduction |
+| Operate | 3 Overview | Task-scoped sessions, checkpoints and proposals |
+| Operate | 4 Trials | Paired policy trials and measured adoption |
+| Configure | 1 Settings | Grouped O2 feature policies |
+| Configure | 2 Compaction | Adapter probes, checkpoint and rotation operations |
+| Configure | 3 Code intelligence | Code queries and reviewed provider operations |
 
-In **5 Settings**, use **Left/Right** to switch **Memory / Context / Compaction / Code intelligence**. The group's main enable switch is shown first. Up/Down stays within that group; **/** finds a setting across the complete shared catalog. Enter toggles a boolean, cycles an enumerated choice or opens an exact-value form. **p** previews the current revision; **s** saves the previewed draft; **x** discards it.
+**Tab**, **Shift+Tab** and the displayed numbers navigate within the mode. **Ctrl+T** switches modes. In **Configure → O2 → Settings**, use **[ / ]** to switch **Memory / Context / Compaction / Code intelligence**. Under Memory, **Left/Right** folds or expands Ledger, Semantic search, Ranking weights, MCP access and Limits. A search expands the matching group. Up/Down stays within that group; **/** finds a setting across the complete shared catalog. Enter toggles a boolean, cycles an enumerated choice or opens an exact-value form. **p** previews the current revision; **s** saves the previewed draft; **x** discards it.
 
-Forms show one named step, its current value, Back/Next controls and explicit cancellation. A completed write form prepares a review rather than silently applying it. Inspect the operation, then **a** confirms; Esc discards it. Advanced JSON remains optional under F2.
+Forms show one named step, its current value, Back/Next controls and explicit cancellation. A completed write form prepares a review rather than silently applying it. Inspect the operation, then **a** confirms; Esc discards it. Advanced JSON remains optional in the command palette.
 
 JSON/older SQLite projects get a setup card instead of an unexplained empty panel. It links to Sessions for SQLite migration, O2 schema upgrade when needed, and Settings for feature activation. Neither opening the screen nor following setup navigation performs a migration, enables a feature, installs a provider or starts an AI call.
 

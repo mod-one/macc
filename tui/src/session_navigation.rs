@@ -1,15 +1,14 @@
 //! Thin navigation and ownership wiring for the two administration workspaces.
 use crate::{screen::Screen, state::AppState};
 use crossterm::event::KeyCode;
-pub(crate) fn open(state: &mut AppState, o2: bool) {
+pub(crate) fn open(state: &mut AppState, o2: bool, configure: bool) {
     let Some(paths) = state.project_paths.clone() else {
         return;
     };
     let result = if o2 {
-        state.sessions.open_o2(&paths.root)
+        state.sessions.open_o2(&paths.root, configure)
     } else {
-        state.sessions.show_sessions();
-        state.sessions.refresh(&paths.root)
+        state.sessions.show_sessions(&paths.root, configure)
     };
     if let Err(e) = result {
         state.sessions.message = e.to_string();
@@ -22,20 +21,8 @@ pub(crate) fn open(state: &mut AppState, o2: bool) {
 pub(crate) fn handle(state: &mut AppState, key: KeyCode) -> bool {
     let screen = state.current_screen();
     let workspace = matches!(screen, Screen::Sessions | Screen::O2);
-    if (!workspace || !state.sessions.input_active()) && matches!(key, KeyCode::Char('O' | 'J')) {
-        open(state, key == KeyCode::Char('O'));
-        return true;
-    }
     if !workspace {
         return false;
-    }
-    if key == KeyCode::F(1) || key == KeyCode::Char('?') && !state.sessions.input_active() {
-        state.toggle_help();
-        return true;
-    }
-    if !state.sessions.input_active() && matches!(key, KeyCode::Char('O' | 'J')) {
-        open(state, key == KeyCode::Char('O'));
-        return true;
     }
     let Some(paths) = state.project_paths.clone() else {
         return true;
@@ -66,35 +53,48 @@ pub(crate) fn handle(state: &mut AppState, key: KeyCode) -> bool {
     true
 }
 fn sync_saved(state: &mut AppState, config_path: &std::path::Path, key: KeyCode) {
-    if matches!(key, KeyCode::Char('s' | 'a')) {
-        if let Ok(saved) = macc_core::load_canonical_config(config_path) {
-            if let Some(config) = &mut state.config {
-                config.memory = saved.memory.clone();
-                config.context_engine = saved.context_engine.clone();
-                config.adaptive_compaction = saved.adaptive_compaction.clone();
-                config.code_intelligence = saved.code_intelligence.clone();
-            }
-            if let Some(draft) = &mut state.working_copy {
-                draft.memory = saved.memory;
-                draft.context_engine = saved.context_engine;
-                draft.adaptive_compaction = saved.adaptive_compaction;
-                draft.code_intelligence = saved.code_intelligence;
-            }
-        }
+    let o2 = state.current_screen() == Screen::O2 && matches!(key, KeyCode::Char('s' | 'a'));
+    let session = state.current_screen() == Screen::Sessions
+        && key == KeyCode::Char('s')
+        && state.sessions.configuring();
+    if !o2 && !session {
+        return;
     }
-    if key == KeyCode::Char('s') {
-        if let Some(view) = &state.sessions.view {
-            let policy = if view.policy_source == "defaults" {
-                None
-            } else {
-                Some(view.policy.clone())
-            };
-            if let Some(config) = &mut state.config {
-                config.session_management = policy.clone();
-            }
-            if let Some(draft) = &mut state.working_copy {
-                draft.session_management = policy;
-            }
+    let (Some(base), Some(draft)) = (&mut state.config, &mut state.working_copy) else {
+        return;
+    };
+    let Ok(saved) = macc_core::load_canonical_config(config_path) else {
+        return;
+    };
+    // Preserve unrelated edits when a workspace service persists its own section.
+    fn accept<T: PartialEq + Clone>(base: &mut T, draft: &mut T, saved: T) {
+        if draft == base {
+            *draft = saved.clone();
         }
+        *base = saved;
+    }
+    if o2 {
+        accept(&mut base.memory, &mut draft.memory, saved.memory);
+        accept(
+            &mut base.context_engine,
+            &mut draft.context_engine,
+            saved.context_engine,
+        );
+        accept(
+            &mut base.adaptive_compaction,
+            &mut draft.adaptive_compaction,
+            saved.adaptive_compaction,
+        );
+        accept(
+            &mut base.code_intelligence,
+            &mut draft.code_intelligence,
+            saved.code_intelligence,
+        );
+    } else {
+        accept(
+            &mut base.session_management,
+            &mut draft.session_management,
+            saved.session_management,
+        );
     }
 }

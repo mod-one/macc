@@ -6,7 +6,7 @@ fn policy_editor_requires_preview_preserves_drafts_and_saves_exact_revision() {
     let mut panel = Panel::default();
     panel.refresh(root).unwrap();
     assert_eq!(panel.access, json!({}));
-    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.open_mode(root, true).unwrap();
     panel.selected = panel
         .view
         .as_ref()
@@ -55,7 +55,8 @@ fn scope_form_has_all_scopes_and_retains_input_on_errors() {
     assert_eq!(panel.access["user_id"], "user");
     assert!(panel.form.is_some()); // JSON authority: action fails, user input retained.
     panel.key(root, KeyCode::Esc).unwrap();
-    panel.key(root, KeyCode::Char('3')).unwrap();
+    panel.open_mode(root, true).unwrap();
+    panel.key(root, KeyCode::Char('2')).unwrap();
     panel.key(root, KeyCode::Char('c')).unwrap();
     assert!(panel.mutation(KeyCode::Enter));
 }
@@ -66,7 +67,7 @@ fn editing_after_preview_clears_evidence_and_guides_without_saving() {
     let root = temp.path();
     let mut panel = Panel::default();
     panel.refresh(root).unwrap();
-    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.open_mode(root, true).unwrap();
     panel.key(root, KeyCode::Enter).unwrap();
     panel.key(root, KeyCode::Char('p')).unwrap();
     assert!(panel.preview);
@@ -142,7 +143,7 @@ fn graphify_executable_editor_keeps_typed_paths_and_requires_a_new_preview() {
     let root = t.path();
     let mut panel = Panel::default();
     panel.refresh(root).unwrap();
-    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.open_mode(root, true).unwrap();
     panel.selected = panel
         .view
         .as_ref()
@@ -280,7 +281,7 @@ fn overview_navigation_preserves_scope_selection_and_policy_draft() {
         .map(|c| c.symbol())
         .collect::<String>();
     assert!(contents.contains("Overview"));
-    assert!(contents.contains("F2"));
+    assert!(contents.contains("[:]"));
     assert!(contents.contains("Get started"));
     panel.tab = 2;
     panel.rows = vec![json!({"tool_id":"a"}), json!({"tool_id":"b"})];
@@ -305,7 +306,7 @@ fn overview_async_refresh_does_not_replace_another_domains_rows() {
     let mut panel = Panel::default();
     panel.refresh(root).unwrap();
     panel.open = true;
-    panel.key(root, KeyCode::Char('6')).unwrap();
+    panel.key(root, KeyCode::Char('3')).unwrap();
     panel.tab = 0;
     panel.rows = vec![json!({"memory":{"id":"keep-selected"}})];
     for _ in 0..100 {
@@ -479,7 +480,7 @@ fn native_map_default_opt_out_is_previewed_and_applied_through_the_shared_catalo
     let root = t.path();
     let mut panel = Panel::default();
     panel.refresh(root).unwrap();
-    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.open_mode(root, true).unwrap();
     panel.selected = panel
         .view
         .as_ref()

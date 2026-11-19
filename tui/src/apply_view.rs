@@ -2,7 +2,7 @@
 use super::*;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
@@ -77,7 +77,7 @@ impl AppState {
                     "Planned operations · select to inspect full path",
                 ))
                 .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(theme.highlight_bg)),
+                .highlight_style(Style::default().bg(theme.configure_selection)),
             panes[0],
             &mut selected,
         );
@@ -124,7 +124,7 @@ impl AppState {
             .scroll((self.apply_runtime.scroll, 0))
             .block(crate::ui::panel("Details / result"))
             .style(Style::default().fg(if self.apply_error.is_some() {
-                Color::Red
+                crate::ui::theme().bad
             } else {
                 theme.accent_dim
             })),
@@ -208,8 +208,8 @@ impl AppState {
                 format!("  {label}  "),
                 if self.apply_runtime.confirm_selected == index {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(crate::ui::theme().background)
+                        .bg(crate::ui::theme().configure)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()

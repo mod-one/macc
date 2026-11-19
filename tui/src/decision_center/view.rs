@@ -4,7 +4,7 @@ use super::{
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -15,14 +15,14 @@ impl Center {
         if !self.open {
             return;
         }
-        let area = frame.size();
+        let area = crate::ui::content_area(frame.size());
         let width = area
             .width
             .saturating_sub(if area.width > 40 { 4 } else { 0 })
             .min(110);
         let height = area
             .height
-            .saturating_sub(if area.height > 12 { 2 } else { 0 })
+            .saturating_sub(if area.height > 16 { 2 } else { 0 })
             .min(24);
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
@@ -85,9 +85,9 @@ impl Center {
             frame.render_widget(
                 Paragraph::new(self.message.as_str())
                     .style(Style::default().fg(if self.notice_success {
-                        Color::Green
+                        crate::ui::theme().good
                     } else {
-                        Color::Yellow
+                        crate::ui::theme().warn
                     }))
                     .wrap(Wrap { trim: false }),
                 parts[0],
@@ -449,7 +449,7 @@ impl Center {
         );
         let input_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(crate::ui::theme().accent))
             .title(caption);
         let input_area = input_block.inner(parts[2]);
         if editing
@@ -508,8 +508,8 @@ impl Center {
             frame.render_widget(paragraph.scroll((offset, 0)).block(input_block), parts[2]);
         }
         let button_style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(crate::ui::theme().background)
+            .bg(crate::ui::theme().accent)
             .add_modifier(Modifier::BOLD);
         let mut buttons = Vec::new();
         for (control, label) in [
@@ -542,7 +542,7 @@ impl Center {
                     if focus == control && !self.quick_menu {
                         button_style
                     } else {
-                        Style::default().fg(Color::Cyan)
+                        Style::default().fg(crate::ui::theme().accent)
                     },
                 ));
             }

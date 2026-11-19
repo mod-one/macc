@@ -166,7 +166,7 @@ impl Center {
             .position(|c| *c == target)
             .unwrap_or(0);
     }
-    fn attempt_send(&mut self, challenge: bool) -> Option<Action> {
+    pub(super) fn attempt_send(&mut self, challenge: bool) -> Option<Action> {
         self.notice_success = false;
         if self.submitting {
             self.message =
@@ -180,7 +180,7 @@ impl Center {
                         .into();
                 return None;
             }
-            return self.legacy_key(KeyCode::F(5));
+            return self.form_command(DecisionCommand::Submit);
         }
         let current = self.current.as_ref()?;
         if current.status != "pending_human"
@@ -255,37 +255,27 @@ impl Center {
             self.focus_control(Control::Note);
             return None;
         }
-        self.legacy_key(if challenge {
-            KeyCode::F(12)
+        self.form_command(if challenge {
+            DecisionCommand::Challenge
         } else {
-            KeyCode::F(5)
+            DecisionCommand::Submit
         })
+    }
+    pub(crate) fn accepts_text(&self) -> bool {
+        if self.quick_menu || self.reviewing_patch {
+            return false;
+        }
+        if self.actions.open {
+            return self.actions.accepts_text();
+        }
+        let controls = self.controls();
+        matches!(
+            controls.get(self.focus % controls.len()),
+            Some(Control::Note | Control::Field(_) | Control::Option)
+        )
     }
     pub fn key_event(&mut self, key: KeyCode) -> Option<Action> {
         self.notice_success = false;
-        // Old function-key codes remain internal command IDs and compatible aliases;
-        // every command has a visible, ordinary-key route through the form/menu.
-        if matches!(key, KeyCode::F(_)) {
-            if key == KeyCode::F(5) && !self.actions.open {
-                return self.attempt_send(false);
-            }
-            let result = self.legacy_key(key);
-            if key == KeyCode::F(9) {
-                let index = self
-                    .current
-                    .as_ref()
-                    .and_then(|d| self.drafts.get(&Self::key(d)))
-                    .map(|d| d.active_field)
-                    .unwrap_or(0);
-                self.advanced_fields = true;
-                self.focus_control(if index == 0 {
-                    Control::Note
-                } else {
-                    Control::Field(index - 1)
-                });
-            }
-            return result;
-        }
         if self.reviewing_patch {
             match key {
                 KeyCode::Esc => self.reviewing_patch = false,
@@ -295,7 +285,7 @@ impl Center {
                 KeyCode::Enter => {
                     self.reviewing_patch = false;
                     if self.patch_accept {
-                        return self.legacy_key(KeyCode::F(10));
+                        return self.form_command(DecisionCommand::TogglePatch);
                     }
                 }
                 KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(8),
@@ -337,15 +327,15 @@ impl Center {
                         }
                         6 => {
                             self.focus = 0;
-                            return self.legacy_key(KeyCode::F(2));
+                            return self.form_command(DecisionCommand::NextDecision);
                         }
                         7 => {
                             self.focus = 0;
-                            return self.legacy_key(KeyCode::F(8));
+                            return self.form_command(DecisionCommand::Feedback);
                         }
                         8 => {
                             self.expanded = true;
-                            return self.legacy_key(KeyCode::F(4));
+                            return self.form_command(DecisionCommand::Inspect);
                         }
                         9 => {
                             self.advanced_fields = !self.advanced_fields;
@@ -362,7 +352,7 @@ impl Center {
                             }
                         }
                         11 => {
-                            return self.legacy_key(KeyCode::F(3));
+                            return self.form_command(DecisionCommand::ToggleAdvisory);
                         }
                         12 => return self.attempt_send(true),
                         13 | 14 => {
@@ -387,7 +377,7 @@ impl Center {
                 KeyCode::Esc | KeyCode::Home | KeyCode::PageUp | KeyCode::PageDown
             )
         {
-            return self.legacy_key(key);
+            return self.navigation_key(key);
         }
         let controls = self.controls();
         self.focus %= controls.len();
@@ -416,7 +406,7 @@ impl Center {
             Control::Send if matches!(key, KeyCode::Enter | KeyCode::Char(' ')) => {
                 return self.attempt_send(false)
             }
-            Control::Later if key == KeyCode::Enter => return self.legacy_key(KeyCode::Esc),
+            Control::Later if key == KeyCode::Enter => return self.navigation_key(KeyCode::Esc),
             Control::Details if key == KeyCode::Enter => {
                 self.expanded = !self.expanded;
                 self.scroll = 0;
@@ -541,7 +531,6 @@ impl Center {
                 if let Some(field) = fields.get(i) {
                     let d = self.current.as_ref()?;
                     let draft = self.drafts.entry(Self::key(d)).or_default();
-                    draft.active_field = i + 1;
                     let value = draft.fields.entry(field.id.clone()).or_default();
                     if !field.choices.is_empty() {
                         if let KeyCode::Char(c @ '1'..='9') = key {
@@ -594,7 +583,6 @@ impl Center {
                     self.current.as_ref().map(Self::key).unwrap_or_default()
                 };
                 let draft = self.drafts.entry(name).or_default();
-                draft.active_field = 0;
                 let cursor = draft
                     .cursors
                     .entry("__text".into())

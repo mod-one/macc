@@ -152,6 +152,8 @@ pub struct AppState {
     pub project_paths: Option<ProjectPaths>,
     pub config: Option<CanonicalConfig>,
     pub working_copy: Option<CanonicalConfig>,
+    /// Last configuration applied here, or the configuration preceding the first local save.
+    pub(crate) delivery_baseline: Option<CanonicalConfig>,
     pub errors: Vec<String>,
     pub notices: Vec<String>,
     pub should_quit: bool,
@@ -206,6 +208,7 @@ pub struct AppState {
     pub log_view_content: String,
     pub preview_ops: Vec<PlannedOp>,
     pub preview_selection_index: usize,
+    pub(crate) preview_job: Option<crate::preview::Job>,
     pub preview_error: Option<String>,
     pub preview_diff_cache: HashMap<String, DiffView>,
     pub preview_diff_scroll: HashMap<String, usize>,
@@ -300,7 +303,8 @@ pub struct AppState {
     /// §18: Human-readable summary of active runtime phase overrides, e.g. "[testing:off] [review:required]".
     /// Set at launch time; None when no overrides are active.
     pub coordinator_phase_overrides: Option<String>,
-    pub coordinator_selected_task_index: usize,
+    // None selects the pinned supervisor. Worker indices are independent of its presence.
+    coordinator_selected_task_index: Option<usize>,
     pub coordinator_log_pane_visible: bool,
     pub coordinator_task_diff_popup: Option<String>,
     pub coordinator_task_explain_popup: Option<String>,
@@ -312,6 +316,17 @@ pub struct AppState {
     pub watch_log_tail: Vec<String>,
     pub watch_last_refresh: Option<Instant>,
     /// Last doctor check result displayed in the Home readiness panel.
+    pub(crate) home_activity: bool,
+    pub(crate) inbox_section: crate::inbox::Section,
+    pub(crate) inbox_raw: bool,
+    pub(crate) inspector_scroll: u16,
+    pub(crate) inspector_index: usize,
+    pub(crate) observations: crate::observations::Observations,
+    pub(crate) tool_installation_tab: bool,
+    pub(crate) doctor_raw: bool,
+    pub(crate) doctor_findings: Vec<macc_core::doctor::DiagnosticFinding>,
+    pub(crate) doctor_job:
+        Option<std::sync::mpsc::Receiver<Vec<macc_core::doctor::DiagnosticFinding>>>,
     pub home_doctor_summary: Option<String>,
 }
 
@@ -343,6 +358,7 @@ impl AppState {
             project_paths: None,
             config: None,
             working_copy: None,
+            delivery_baseline: None,
             errors: Vec::new(),
             notices: Vec::new(),
             should_quit: false,
@@ -386,6 +402,7 @@ impl AppState {
             log_view_content: String::new(),
             preview_ops: Vec::new(),
             preview_selection_index: 0,
+            preview_job: None,
             preview_error: None,
             preview_diff_cache: HashMap::new(),
             preview_diff_scroll: HashMap::new(),
@@ -448,7 +465,7 @@ impl AppState {
             coordinator_ownership_attached: false,
             coordinator_registration_observed: false,
             viewer_guards: Vec::new(),
-            coordinator_selected_task_index: 0,
+            coordinator_selected_task_index: Some(0),
             coordinator_log_pane_visible: true,
             coordinator_task_diff_popup: None,
             coordinator_task_explain_popup: None,
@@ -459,6 +476,16 @@ impl AppState {
             watch_snapshot: None,
             watch_log_tail: Vec::new(),
             watch_last_refresh: None,
+            home_activity: false,
+            inbox_section: Default::default(),
+            inbox_raw: false,
+            inspector_scroll: 0,
+            inspector_index: 0,
+            observations: Default::default(),
+            tool_installation_tab: false,
+            doctor_raw: false,
+            doctor_findings: Vec::new(),
+            doctor_job: None,
             home_doctor_summary: None,
             client_context: ClientContext {
                 client_id: client_identity.client_id.clone(),
@@ -585,8 +612,7 @@ impl AppState {
         }
     }
 
-    /// Run doctor checks synchronously and store a summary for the Home readiness panel.
-    /// Called when the user presses 'd' on the Home screen (spec §13.1).
+    /// Run at most one diagnostic job. The event loop consumes its result on a tick.
     pub fn run_home_doctor_check(&mut self) {
         let Some(paths) = self.project_paths.clone() else {
             self.set_status(
@@ -603,10 +629,33 @@ impl AppState {
                 .and_then(|c| c.automation.coordinator.as_ref()),
         )
         .max_parallel as u32;
-        let findings = self
-            .engine
-            .collect_diagnostic_findings(&paths, max_parallel);
+        if self.doctor_job.is_some() {
+            return;
+        }
+        let engine = self.engine.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("macc-tui-doctor".into())
+            .spawn(move || {
+                let _ = tx.send(engine.collect_diagnostic_findings(&paths, max_parallel));
+            }) {
+            Ok(_) => self.doctor_job = Some(rx),
+            Err(e) => self.set_status(UiStatusLevel::Error, e.to_string(), None),
+        }
+    }
 
+    fn poll_doctor(&mut self) {
+        let Some(rx) = &self.doctor_job else { return };
+        let findings = match rx.try_recv() {
+            Ok(findings) => findings,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.doctor_job = None;
+                self.set_status(UiStatusLevel::Error, "Doctor worker stopped", None);
+                return;
+            }
+        };
+        self.doctor_job = None;
         let errors: Vec<_> = findings
             .iter()
             .filter(|f| matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Error))
@@ -617,7 +666,7 @@ impl AppState {
             .collect();
 
         let summary = if errors.is_empty() && warnings.is_empty() {
-            "✅ All checks passed".to_string()
+            "✓ All checks passed".to_string()
         } else {
             let mut parts = Vec::new();
             if !errors.is_empty() {
@@ -626,19 +675,21 @@ impl AppState {
             if !warnings.is_empty() {
                 parts.push(format!("{} warning(s)", warnings.len()));
             }
-            format!("⚠ Doctor: {}", parts.join(", "))
+            format!(
+                "{} Doctor: {}",
+                if errors.is_empty() { "▲" } else { "✕" },
+                parts.join(", ")
+            )
         };
 
         // Build detailed text for the Home panel.
         let mut detail = String::from("Last doctor check\n\n");
         for f in &findings {
-            let sym = match f.severity {
-                macc_core::doctor::DiagnosticSeverity::Ok => "✅",
-                macc_core::doctor::DiagnosticSeverity::Info => "ℹ",
-                macc_core::doctor::DiagnosticSeverity::Warning => "⚠",
-                macc_core::doctor::DiagnosticSeverity::Error => "❌",
-            };
-            detail.push_str(&format!("{} {}\n", sym, f.title));
+            detail.push_str(&format!(
+                "{}  {}\n",
+                crate::doctor_view::status(&f.severity),
+                f.title
+            ));
             if !f.message.is_empty()
                 && !matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Ok)
             {
@@ -648,17 +699,20 @@ impl AppState {
             }
         }
         if errors.is_empty() {
-            detail.push_str("\n✅ Ready to dispatch a task\n");
+            detail.push_str("\n✓ Ready to dispatch a task\n");
         } else {
-            detail.push_str(&format!("\n❌ {} blocking issue(s)\n", errors.len()));
+            detail.push_str(&format!("\n✕ {} blocking issue(s)\n", errors.len()));
         }
 
         self.home_doctor_summary = Some(detail);
-        let (level, ttl) = if errors.is_empty() {
-            (UiStatusLevel::Success, std::time::Duration::from_secs(4))
-        } else {
+        let (level, ttl) = if !errors.is_empty() {
+            (UiStatusLevel::Error, std::time::Duration::from_secs(6))
+        } else if !warnings.is_empty() {
             (UiStatusLevel::Warning, std::time::Duration::from_secs(6))
+        } else {
+            (UiStatusLevel::Success, std::time::Duration::from_secs(4))
         };
+        self.doctor_findings = findings;
         self.set_status(level, summary, Some(ttl));
     }
 
@@ -1150,10 +1204,9 @@ impl AppState {
             || self.coordinator_task_explain_popup.is_some()
     }
 
-    /// Open the approval window on demand (`A`), snoozed gates included.
-    pub fn open_approval_window(&mut self) {
+    pub(crate) fn open_approval_at(&mut self, index: usize) {
         let waiting = self.awaiting_approvals().len();
-        match self.awaiting_approvals().first().map(|p| (*p).clone()) {
+        match self.awaiting_approvals().get(index).map(|p| (*p).clone()) {
             Some(gate) => {
                 self.approval_snoozed
                     .remove(&crate::approval::Window::key_of(&gate));
@@ -1175,7 +1228,7 @@ impl AppState {
             self.set_status(
                 UiStatusLevel::Info,
                 format!(
-                    "{} still waits for approval. Press A to decide.",
+                    "{} still waits for approval. Open Inbox to decide.",
                     window.gate.task_id
                 ),
                 Some(Duration::from_secs(5)),
@@ -2481,6 +2534,12 @@ impl AppState {
     }
 
     pub fn load_config(&mut self, start_dir: Option<&std::path::Path>) {
+        self.delivery_baseline = None;
+        self.observations = Default::default();
+        self.preview_job = None;
+        self.doctor_job = None;
+        self.doctor_findings.clear();
+        self.home_doctor_summary = None;
         self.decision_settings_proof.clear();
         self.release_ownership_on_exit();
 
@@ -2504,6 +2563,7 @@ impl AppState {
                 self.scan_and_attach_to_running_processes();
                 match self.engine.load_canonical_config(&paths) {
                     Ok(config) => {
+                        self.delivery_baseline = Some(config.clone());
                         self.config = Some(config.clone());
                         self.working_copy = Some(config);
                     }
@@ -2827,6 +2887,8 @@ impl AppState {
     }
 
     pub fn tick(&mut self) {
+        self.poll_observations();
+        self.poll_doctor();
         let decisions_busy =
             self.approval_input_busy() || self.approval_window.is_some() || self.help_open;
         self.decision_center.tick(
@@ -2834,6 +2896,7 @@ impl AppState {
             decisions_busy,
         );
         self.poll_apply_preparation();
+        self.poll_preview();
         self.poll_launch_start();
         if matches!(self.current_screen(), Screen::Sessions | Screen::O2) {
             if let Some(paths) = &self.project_paths {
@@ -3126,6 +3189,11 @@ impl AppState {
     pub fn pop_screen(&mut self) {
         if self.screen_stack.len() > 1 {
             self.screen_stack.pop();
+            match self.current_screen() {
+                Screen::Sessions => self.sessions.restore_workspace(false),
+                Screen::O2 => self.sessions.restore_workspace(true),
+                _ => {}
+            }
         }
         self.search_editing = false;
     }
@@ -3139,7 +3207,12 @@ impl AppState {
     pub fn is_searchable_screen(&self) -> bool {
         matches!(
             self.current_screen(),
-            Screen::Tools | Screen::Skills | Screen::Agents | Screen::Mcp | Screen::Logs
+            Screen::Tools
+                | Screen::Skills
+                | Screen::Agents
+                | Screen::Mcp
+                | Screen::Logs
+                | Screen::CoordinatorLive
         )
     }
 
@@ -3235,13 +3308,8 @@ impl AppState {
         self.selected_tool_index = prev_visible_index(self.selected_tool_index, &visible);
     }
 
-    pub fn reset_selected_tool_cooldown(&mut self) {
-        let Some(tool) = self.selected_tool_descriptor() else {
-            return;
-        };
-        let command = CoordinatorCommand::ToolCooldownClear {
-            tool: tool.id.clone(),
-        };
+    pub(crate) fn reset_tool_cooldown(&mut self, tool: String) {
+        let command = CoordinatorCommand::ToolCooldownClear { tool };
         if let Err(error) = self.gate_coordinator_action(&command) {
             self.set_status(
                 UiStatusLevel::Error,
@@ -3647,22 +3715,6 @@ impl AppState {
         self.sync_config_indices();
     }
 
-    /// Switch to the next config tab (wraps around).
-    pub fn next_config_tab(&mut self) {
-        self.config_tab_index = (self.config_tab_index + 1) % Self::CONFIG_TAB_NAMES.len();
-        self.config_view_index = 0;
-        self.sync_config_indices();
-    }
-
-    /// Switch to the previous config tab (wraps around).
-    pub fn prev_config_tab(&mut self) {
-        let n = Self::CONFIG_TAB_NAMES.len();
-        self.config_tab_index = (self.config_tab_index + n - 1) % n;
-        self.config_view_index = 0;
-        self.sync_config_indices();
-    }
-
-    /// Jump directly to a specific tab by index.
     pub fn jump_config_tab(&mut self, tab: usize) {
         if tab < Self::CONFIG_TAB_NAMES.len() {
             self.config_tab_index = tab;
@@ -3721,15 +3773,6 @@ impl AppState {
         } else {
             self.automation_field_help(idx)
         }
-    }
-
-    /// Whether any config field is currently in text-editing mode.
-    pub fn is_config_editing(&self) -> bool {
-        self.supervisor_commands_active()
-            || self.automation_field_editing
-            || self.tool_priority_editor_active
-            || self.tool_parallel_editor_active
-            || self.settings_field_editing
     }
 
     /// Toggle or begin editing for whichever config field is currently selected.
@@ -3843,29 +3886,29 @@ impl AppState {
             5 => "[Advanced] Tool Specializations (JSON)",
             6 => "[Advanced] Max Dispatch",
             7 => "[Basic] Max Parallel",
-            8 => "[Basic] Timeout Seconds",
+            8 => "[Basic] Timeout",
             9 => "[Advanced] Phase Runner Max Attempts",
-            10 => "[Advanced] Stale Claimed Seconds",
-            11 => "[Advanced] Stale In Progress Seconds",
-            12 => "[Advanced] Stale Changes Requested Seconds",
+            10 => "[Advanced] Stale Claimed",
+            11 => "[Advanced] Stale In Progress",
+            12 => "[Advanced] Stale Changes Requested",
             13 => "[Advanced] Stale Action",
             14 => "[Admin] Log Flush Lines",
-            15 => "[Admin] Log Flush Interval (ms)",
-            16 => "[Admin] JSON Export Debounce (ms)",
+            15 => "[Admin] Log Flush Interval",
+            16 => "[Admin] JSON Export Debounce",
             17 => "[Advanced] Merge AI Fix",
-            18 => "[Advanced] Merge Job Timeout (s)",
-            19 => "[Advanced] Merge Hook Timeout (s)",
-            20 => "[Advanced] Ghost Heartbeat Grace (s)",
-            21 => "[Advanced] Dispatch Cooldown (s)",
+            18 => "[Advanced] Merge Job Timeout",
+            19 => "[Advanced] Merge Hook Timeout",
+            20 => "[Advanced] Ghost Heartbeat Grace",
+            21 => "[Advanced] Dispatch Cooldown",
             22 => "[Admin] JSON Compatibility",
             23 => "[Advanced] Retry Error Codes (CSV)",
             24 => "[Advanced] Max Auto Retries",
             25 => "[Admin] Legacy JSON Fallback",
-            26 => "[Advanced] RL Backoff Base (s)",
-            27 => "[Advanced] RL Backoff Max (s)",
+            26 => "[Advanced] RL Backoff Base",
+            27 => "[Advanced] RL Backoff Max",
             28 => "[Advanced] RL Fallback Enabled",
             29 => "[Advanced] RL Throttle Parallel",
-            30 => "[Advanced] Force-Kill Grace (s)",
+            30 => "[Advanced] Force-Kill Grace",
             31 => "[Advanced] Max Review Cycles",
             32 => "[Basic] Safety Policy",
             33 => "[Basic] Destructive Actions",
@@ -4168,27 +4211,15 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     saved
                 }
             }
-            38 => {
-                let require_clean = coordinator
-                    .and_then(|c| c.require_clean_reference_branch)
-                    .unwrap_or(true);
-                if require_clean {
-                    "true (block)".to_string()
-                } else {
-                    "false (warn)".to_string()
-                }
-            }
-            39 => {
-                let enabled = coordinator
-                    .and_then(|c| c.reference_branch_preflight.as_ref())
-                    .and_then(|p| p.enabled)
-                    .unwrap_or(true);
-                if enabled {
-                    "enabled".to_string()
-                } else {
-                    "disabled".to_string()
-                }
-            }
+            38 => coordinator
+                .and_then(|c| c.require_clean_reference_branch)
+                .unwrap_or(true)
+                .to_string(),
+            39 => coordinator
+                .and_then(|c| c.reference_branch_preflight.as_ref())
+                .and_then(|p| p.enabled)
+                .unwrap_or(true)
+                .to_string(),
             _ => String::new(),
         }
     }
@@ -4211,7 +4242,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         match index {
             0 => "Suppress all non-essential output from AI tools.",
             1 => "Disable all remote fetching and updates.",
-            2 => "The port number for the MACC web interface.",
+            2 => "Port used by the MACC web interface. Default: 3450.",
             3 => "Enable verbose performer logs: prompt dump, runner line, [MACC] invoke. Equivalent to MACC_DEBUG=1 or macc --verbose.",
             _ => "",
         }
@@ -4228,7 +4259,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 .settings
                 .web_port
                 .map(|p| p.to_string())
-                .unwrap_or_else(|| "default (3450)".to_string()),
+                .unwrap_or_else(|| 3450.to_string()),
             3 => config.settings.debug.to_string(),
             _ => String::new(),
         }
@@ -4627,7 +4658,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             self.set_automation_field_string(33, next.to_string());
             return;
         }
-        if matches!(self.automation_field_index, 17 | 22 | 25 | 28 | 29) {
+        if matches!(
+            self.automation_field_index,
+            17 | 22 | 25 | 28 | 29 | 38 | 39
+        ) {
             let current =
                 self.automation_field_display_value(self.automation_field_index) == "true";
             self.set_automation_field_bool(self.automation_field_index, !current);
@@ -4726,7 +4760,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     Ok(())
                 }
             }
-            17 | 22 | 25 | 28 | 29 => {
+            17 | 22 | 25 | 28 | 29 | 38 | 39 => {
                 let value = input.to_lowercase();
                 if value == "true" {
                     self.set_automation_field_bool(idx, true);
@@ -4761,31 +4795,6 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     Ok(())
                 } else {
                     Err("Mode must be one of: disabled, required, risk_based, manual.".to_string())
-                }
-            }
-            // Preflight fields
-            38 => {
-                let value = input.to_lowercase();
-                if value == "true" {
-                    self.set_require_clean_reference_branch(true);
-                    Ok(())
-                } else if value == "false" {
-                    self.set_require_clean_reference_branch(false);
-                    Ok(())
-                } else {
-                    Err("Value must be 'true' or 'false'.".to_string())
-                }
-            }
-            39 => {
-                let value = input.to_lowercase();
-                if value == "true" {
-                    self.set_preflight_enabled(true);
-                    Ok(())
-                } else if value == "false" {
-                    self.set_preflight_enabled(false);
-                    Ok(())
-                } else {
-                    Err("Value must be 'true' or 'false'.".to_string())
                 }
             }
             _ => Ok(()),
@@ -4887,6 +4896,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 25 => coordinator.legacy_json_fallback = Some(value),
                 28 => coordinator.rate_limit_fallback_enabled = Some(value),
                 29 => coordinator.rate_limit_throttle_parallel = Some(value),
+                38 => coordinator.require_clean_reference_branch = Some(value),
+                39 => {
+                    coordinator
+                        .reference_branch_preflight
+                        .get_or_insert_with(Default::default)
+                        .enabled = Some(value)
+                }
                 _ => {}
             }
         }
@@ -4934,23 +4950,6 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 }
                 _ => {}
             }
-        }
-    }
-
-    fn set_require_clean_reference_branch(&mut self, value: bool) {
-        self.snapshot_before_config_change();
-        if let Some(coordinator) = self.coordinator_config_mut() {
-            coordinator.require_clean_reference_branch = Some(value);
-        }
-    }
-
-    fn set_preflight_enabled(&mut self, value: bool) {
-        self.snapshot_before_config_change();
-        if let Some(coordinator) = self.coordinator_config_mut() {
-            let preflight = coordinator
-                .reference_branch_preflight
-                .get_or_insert_with(Default::default);
-            preflight.enabled = Some(value);
         }
     }
 
@@ -5127,9 +5126,9 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     })
                     .unwrap_or(false);
                 if current {
-                    "on".to_string()
+                    "On".to_string()
                 } else {
-                    "off".to_string()
+                    "Off".to_string()
                 }
             }
             FieldKind::Enum(ref options) => self
@@ -5518,14 +5517,14 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         match self.current_screen() {
             Screen::Tools => self.next_tool(),
             // Both Automation and Settings use the unified config navigation.
-            Screen::Automation | Screen::Settings => self.navigate_config_next(),
+            Screen::Automation => self.navigate_config_next(),
             Screen::Logs => self.next_log(),
             Screen::Skills => self.next_skill(),
             Screen::Agents => self.next_agent(),
             Screen::ToolSettings => self.next_tool_field(),
             Screen::Preview => self.next_preview_op(),
             Screen::Mcp => self.next_mcp(),
-            Screen::CoordinatorLive => self.next_live_task(),
+            Screen::CoordinatorLive => self.move_live_selection(true),
             Screen::Watch => {
                 let max = self
                     .watch_snapshot
@@ -5544,14 +5543,14 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn navigate_prev(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.prev_tool(),
-            Screen::Automation | Screen::Settings => self.navigate_config_prev(),
+            Screen::Automation => self.navigate_config_prev(),
             Screen::Logs => self.prev_log(),
             Screen::Skills => self.prev_skill(),
             Screen::Agents => self.prev_agent(),
             Screen::ToolSettings => self.prev_tool_field(),
             Screen::Preview => self.prev_preview_op(),
             Screen::Mcp => self.prev_mcp(),
-            Screen::CoordinatorLive => self.prev_live_task(),
+            Screen::CoordinatorLive => self.move_live_selection(false),
             Screen::Watch => {
                 self.watch_selected_worker = self.watch_selected_worker.saturating_sub(1);
             }
@@ -5562,7 +5561,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn navigate_toggle(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.toggle_selected_tool(),
-            Screen::Automation | Screen::Settings => self.toggle_current_config_field(),
+            Screen::Automation => self.toggle_current_config_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -5596,7 +5595,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     self.push_screen(Screen::ToolSettings);
                 }
             }
-            Screen::Automation | Screen::Settings => self.toggle_current_config_field(),
+            Screen::Automation => self.toggle_current_config_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -5691,6 +5690,9 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         })();
         match save_result {
             Ok(status) => {
+                if self.delivery_baseline.is_none() && self.config != self.working_copy {
+                    self.delivery_baseline = self.config.clone();
+                }
                 self.config = self.working_copy.clone();
                 if status == macc_core::plan::ActionStatus::Unchanged {
                     self.notices
@@ -5827,79 +5829,6 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.refresh_preview_plan();
     }
 
-    pub fn refresh_preview_plan(&mut self) {
-        self.preview_ops.clear();
-        self.preview_diff_cache.clear();
-        self.preview_diff_scroll.clear();
-        self.preview_error = None;
-        self.preview_selection_index = 0;
-
-        if self.apply_preparing() {
-            self.preview_error = Some(
-                "Apply is still preparing shared sources. Refresh Preview when it finishes.".into(),
-            );
-            return;
-        }
-
-        let paths = match &self.project_paths {
-            Some(paths) => paths,
-            None => {
-                self.preview_error = Some(
-                    "Preview requires a loaded MACC project. Run 'macc init' in the repo root."
-                        .to_string(),
-                );
-                return;
-            }
-        };
-
-        let canonical = match &self.working_copy {
-            Some(cfg) => cfg,
-            None => {
-                self.preview_error =
-                    Some("No canonical configuration available to plan.".to_string());
-                return;
-            }
-        };
-
-        let resolved = resolve(canonical, &CliOverrides::default());
-        let fetch_units = match resolve_fetch_units(paths, &resolved) {
-            Ok(units) => units,
-            Err(e) => {
-                self.preview_error = Some(format!("Failed to resolve catalog selections: {}", e));
-                return;
-            }
-        };
-
-        let offline = self
-            .working_copy
-            .as_ref()
-            .map(|c| c.settings.offline)
-            .unwrap_or(false);
-
-        let materialized_units = match materialize_fetch_units(paths, fetch_units, true, offline) {
-            Ok(units) => units,
-            Err(e) => {
-                self.preview_error = Some(format!("Failed to materialize catalog sources: {}", e));
-                return;
-            }
-        };
-
-        match self.engine.plan(
-            paths,
-            canonical,
-            &materialized_units,
-            &CliOverrides::default(),
-        ) {
-            Ok(plan) => {
-                self.preview_ops = self.engine.plan_operations(paths, &plan);
-                self.set_preview_selection(0);
-            }
-            Err(e) => {
-                self.preview_error = Some(format!("Planning failed: {}", e));
-            }
-        }
-    }
-
     pub fn selected_preview_op(&self) -> Option<&PlannedOp> {
         self.preview_ops.get(self.preview_selection_index)
     }
@@ -5922,7 +5851,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         }
     }
 
-    fn set_preview_selection(&mut self, index: usize) {
+    pub(crate) fn set_preview_selection(&mut self, index: usize) {
         if self.preview_ops.is_empty() {
             self.preview_selection_index = 0;
             return;
@@ -6055,8 +5984,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     None
                 }
             }
-            // §19: phase bool/mode validation
-            34 | 36 => {
+            17 | 22 | 25 | 28 | 29 | 34 | 36 | 38 | 39 => {
                 let v = input.to_lowercase();
                 if !matches!(v.as_str(), "true" | "false") {
                     Some("Value must be 'true' or 'false'.".to_string())
@@ -6071,14 +5999,6 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     "disabled" | "required" | "risk_based" | "manual"
                 ) {
                     Some("Mode must be one of: disabled, required, risk_based, manual.".to_string())
-                } else {
-                    None
-                }
-            }
-            38 | 39 => {
-                let v = input.to_lowercase();
-                if !matches!(v.as_str(), "true" | "false") {
-                    Some("Value must be 'true' or 'false'.".to_string())
                 } else {
                     None
                 }
@@ -6113,32 +6033,35 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .collect()
     }
 
+    pub(crate) fn live_supervisor(&self) -> Option<&macc_core::supervisor::live::SupervisorLive> {
+        self.observations.latest.as_ref()?.intervention.as_ref()
+    }
+
+    pub(crate) fn live_row_index(&self, workers: usize) -> Option<usize> {
+        let pinned = self.live_supervisor().is_some();
+        match (workers, self.coordinator_selected_task_index) {
+            (0, _) => pinned.then_some(0),
+            (_, None) if pinned => Some(0),
+            (_, worker) => Some(usize::from(pinned) + worker.unwrap_or(0).min(workers - 1)),
+        }
+    }
+
     pub fn selected_live_task(&self) -> Option<macc_core::coordinator::view_model::LiveTaskRow> {
         let tasks = self.filtered_active_tasks();
-        if tasks.is_empty() {
-            return None;
-        }
-        let index = self.coordinator_selected_task_index.min(tasks.len() - 1);
-        Some(tasks[index].clone())
+        let row = self.live_row_index(tasks.len())?;
+        let worker = row.checked_sub(usize::from(self.live_supervisor().is_some()))?;
+        tasks.into_iter().nth(worker)
     }
 
-    pub fn next_live_task(&mut self) {
-        let tasks = self.filtered_active_tasks();
-        if !tasks.is_empty() {
-            self.coordinator_selected_task_index =
-                (self.coordinator_selected_task_index + 1) % tasks.len();
-        }
-    }
-
-    pub fn prev_live_task(&mut self) {
-        let tasks = self.filtered_active_tasks();
-        if !tasks.is_empty() {
-            if self.coordinator_selected_task_index == 0 {
-                self.coordinator_selected_task_index = tasks.len() - 1;
-            } else {
-                self.coordinator_selected_task_index -= 1;
-            }
-        }
+    fn move_live_selection(&mut self, forward: bool) {
+        let workers = self.filtered_active_tasks().len();
+        let Some(row) = self.live_row_index(workers) else {
+            return;
+        };
+        let pinned = usize::from(self.live_supervisor().is_some());
+        let count = workers + pinned;
+        let next = if forward { row + 1 } else { row + count - 1 } % count;
+        self.coordinator_selected_task_index = next.checked_sub(pinned);
     }
 
     pub fn toggle_log_pane(&mut self) {
@@ -7967,7 +7890,7 @@ mod tests {
         state
             .approval_snoozed
             .insert(("APP-1".into(), Some("bbbbbbb2".into())));
-        state.open_approval_window();
+        state.open_approval_at(0);
         assert!(state.approval_window.is_some(), "A opens a snoozed gate");
     }
 

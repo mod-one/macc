@@ -87,3 +87,12 @@ Thumbs.db
 *.sw?
 performer.sh
 worktree.prd.json
+
+docs/tui-design/
+# BEGIN MACC project visibility
+!/.macc/
+/.macc/*
+!/.macc/macc.yaml
+!/.macc/catalog/
+!/.macc/skills.lock.json
+# END MACC project visibility

@@ -5,12 +5,13 @@
 //! `CoordinatorCommand::GateDecision`, so core validates the role, revision,
 //! evidence and reason exactly as for `macc coordinator approve`.
 
+use crate::command_catalog::keys as k;
 use crossterm::event::KeyCode;
 use macc_core::coordinator::approval::{approval_brief, short_revision, PendingApproval};
 use macc_core::coordinator::model::ApprovalDecision;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
@@ -127,28 +128,28 @@ impl Window {
     }
 
     /// True while the operator is typing, so the window must not be replaced.
-    pub(crate) fn command_bindings(&self) -> Vec<(&'static str, &'static str)> {
+    pub(crate) fn command_bindings(&self) -> Vec<(k::Keys, &'static str)> {
         match self.mode {
             Mode::Reading => vec![
-                ("a", "Approve…"),
-                ("r", "Reject…"),
-                ("c", "Request changes…"),
-                ("↑↓", "Scroll"),
-                ("PgUp/PgDn", "Scroll page"),
-                ("Tab", "Next approval"),
-                ("Esc", "Decide later"),
+                (k::ch('a'), "Approve…"),
+                (k::ch('r'), "Reject…"),
+                (k::ch('c'), "Request changes…"),
+                (k::VERTICAL, "Scroll"),
+                (k::PAGES, "Scroll page"),
+                (k::TAB, "Next approval"),
+                (k::ESC, "Decide later"),
             ],
             Mode::Role { .. } => vec![
-                ("↑↓", "Select role"),
-                ("Enter", "Choose role"),
-                ("Esc", "Cancel decision"),
+                (k::VERTICAL, "Select role"),
+                (k::ENTER, "Choose role"),
+                (k::ESC, "Cancel decision"),
             ],
             Mode::Input { .. } => vec![
-                ("Enter", "Next field"),
-                ("Backspace", "Delete character"),
-                ("Esc", "Cancel decision"),
+                (k::ENTER, "Next field"),
+                (k::BACKSPACE, "Delete character"),
+                (k::ESC, "Cancel decision"),
             ],
-            Mode::Confirm(_) => vec![("Enter", "Submit decision"), ("Esc", "Cancel decision")],
+            Mode::Confirm(_) => vec![(k::ENTER, "Submit decision"), (k::ESC, "Cancel decision")],
         }
     }
 
@@ -333,15 +334,15 @@ impl Window {
 
     fn body_lines(&self) -> Vec<Line<'static>> {
         let heading = Style::default()
-            .fg(Color::Cyan)
+            .fg(crate::ui::theme().accent)
             .add_modifier(Modifier::BOLD);
         let mut lines = Vec::new();
         for section in approval_brief(&self.gate) {
             let style = match section.title {
                 "Question" => Style::default()
-                    .fg(Color::Yellow)
+                    .fg(crate::ui::theme().warn)
                     .add_modifier(Modifier::BOLD),
-                "Risks to weigh" => Style::default().fg(Color::Red),
+                "Risks to weigh" => Style::default().fg(crate::ui::theme().bad),
                 _ => Style::default(),
             };
             lines.push(Line::from(Span::styled(section.title, heading)));
@@ -355,11 +356,15 @@ impl Window {
 
     fn footer_lines(&self) -> Vec<Line<'static>> {
         let key = Style::default()
-            .fg(Color::Cyan)
+            .fg(crate::ui::theme().accent)
             .add_modifier(Modifier::BOLD);
         let mut lines = Vec::new();
         if let Some((ok, message)) = &self.message {
-            let color = if *ok { Color::Green } else { Color::Red };
+            let color = if *ok {
+                crate::ui::theme().good
+            } else {
+                crate::ui::theme().bad
+            };
             lines.push(Line::from(Span::styled(
                 message.clone(),
                 Style::default().fg(color),
@@ -424,7 +429,7 @@ impl Window {
                 lines.push(Line::from(vec![
                     Span::styled("> ", key),
                     Span::raw(buffer.clone()),
-                    Span::styled("█", Style::default().fg(Color::Gray)),
+                    Span::styled("█", Style::default().fg(crate::ui::theme().foreground)),
                 ]));
                 lines.push(Line::from("Enter Next  Esc Back"));
             }
@@ -437,7 +442,7 @@ impl Window {
                         draft.role
                     ),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(crate::ui::theme().warn)
                         .add_modifier(Modifier::BOLD),
                 )));
                 let mut detail = Vec::new();
@@ -481,11 +486,11 @@ impl Window {
         );
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
+            .border_style(Style::default().fg(crate::ui::theme().warn))
             .title(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(crate::ui::theme().warn)
                     .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(area);

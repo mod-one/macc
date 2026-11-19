@@ -54,7 +54,7 @@ fn elapsed_label(since: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Str
 /// Cells of the supervisor row, in the LIVE TASKS column order:
 /// health, worker, task, status, tool, model, effort, age, phase age.
 pub fn row_cells(live: &SupervisorLive, now: chrono::DateTime<chrono::Utc>) -> [String; 9] {
-    let marker = if live.active { "◆ SUP" } else { "! SUP" };
+    let marker = if live.active { "● SUP" } else { "▲ SUP" };
     [
         marker.into(),
         WORKER_LABEL.into(),
@@ -177,14 +177,14 @@ mod tests {
     #[test]
     fn row_is_labelled_as_supervisor_work_with_phase_and_elapsed_times() {
         let cells = row_cells(&sample(true), now());
-        assert_eq!(cells[0], "◆ SUP");
+        assert_eq!(cells[0], "● SUP");
         assert_eq!(cells[1], "SUPERVISOR");
         assert_eq!(cells[2], "repair WEB-BFF-002");
         assert_eq!(cells[3], "validating");
         assert_eq!(cells[4], "claude");
         assert_eq!(cells[7], "21m");
         assert_eq!(cells[8], "4m");
-        assert_eq!(row_cells(&sample(false), now())[0], "! SUP");
+        assert_eq!(row_cells(&sample(false), now())[0], "▲ SUP");
     }
 
     #[test]

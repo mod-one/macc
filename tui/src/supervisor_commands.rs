@@ -1,5 +1,6 @@
 //! Interactive validation-command rows; no shell execution in the editor.
 use super::*;
+use crate::command_catalog::keys as k;
 use crossterm::event::KeyCode;
 
 pub(super) struct CommandEditor {
@@ -8,26 +9,27 @@ pub(super) struct CommandEditor {
     input: Option<String>,
 }
 impl AppState {
-    pub fn supervisor_command_bindings(&self) -> Vec<(&'static str, &'static str)> {
-        if self
-            .supervisor_commands_editor
+    pub(crate) fn supervisor_command_editing(&self) -> bool {
+        self.supervisor_commands_editor
             .as_ref()
             .is_some_and(|e| e.input.is_some())
-        {
+    }
+    pub(crate) fn supervisor_command_bindings(&self) -> Vec<(k::Keys, &'static str)> {
+        if self.supervisor_command_editing() {
             return vec![
-                ("Enter", "Accept command"),
-                ("Backspace", "Delete character"),
-                ("Esc", "Cancel input"),
+                (k::ENTER, "Accept command"),
+                (k::BACKSPACE, "Delete character"),
+                (k::ESC, "Cancel input"),
             ];
         }
         vec![
-            ("↑↓", "Select command"),
-            ("←→", "Reorder"),
-            ("a", "Add command"),
-            ("Enter", "Edit command"),
-            ("d", "Remove command"),
-            ("s", "Accept draft"),
-            ("Esc", "Cancel"),
+            (k::VERTICAL, "Select command"),
+            (k::HORIZONTAL, "Reorder"),
+            (k::ch('a'), "Add command"),
+            (k::ENTER, "Edit command"),
+            (k::ch('d'), "Remove command"),
+            (k::ch('s'), "Accept draft"),
+            (k::ESC, "Cancel"),
         ]
     }
     pub fn supervisor_commands_active(&self) -> bool {

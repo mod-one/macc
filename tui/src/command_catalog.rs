@@ -1,424 +1,312 @@
-//! Active-context command metadata shared by footer, help and palette.
+//! Resolve and present commands from the same context that executes them.
 use super::*;
-
+pub(crate) mod keys;
+mod overlays;
+mod pages;
+use keys as k;
+pub(crate) use pages::Action;
 #[derive(Clone, Debug)]
 pub(crate) struct Command {
-    pub shortcut: String,
-    pub label: String,
     pub key: Option<KeyCode>,
+    pub control: bool,
+    pub label: String,
+    pub hint: String,
+    pub action: Action,
     pub enabled: bool,
 }
 impl Command {
-    fn new(shortcut: &str, label: &str) -> Self {
+    pub fn new(key: char, label: &str, hint: &str) -> Self {
+        let mut c = Self::widget(KeyCode::Char(key), label);
+        c.hint = hint.into();
+        c
+    }
+    fn widget(key: KeyCode, label: &str) -> Self {
+        Self::bound(key, label, Action::Widget(key))
+    }
+    pub(crate) fn ctrl(key: char, label: &str, action: Action) -> Self {
         Self {
-            shortcut: shortcut.into(),
+            control: true,
+            ..Self::bound(KeyCode::Char(key), label, action)
+        }
+    }
+    fn bound(key: KeyCode, label: &str, action: Action) -> Self {
+        Self {
+            key: Some(key),
+            control: false,
             label: label.into(),
-            key: key_for(shortcut),
+            hint: String::new(),
+            action,
             enabled: true,
         }
     }
-}
-fn key_for(shortcut: &str) -> Option<KeyCode> {
-    Some(match shortcut {
-        "Enter" => KeyCode::Enter,
-        "Esc" | "Esc/q" => KeyCode::Esc,
-        "Space" | "Space/Enter" => KeyCode::Char(' '),
-        "Tab" | "Tab/1-8" => KeyCode::Tab,
-        "Backspace" => KeyCode::Backspace,
-        "Shift+Tab" => KeyCode::BackTab,
-        "Delete" => KeyCode::Delete,
-        "F4" => KeyCode::F(4),
-        "F12" => KeyCode::F(12),
-        s if s.chars().count() == 1 && !"↑↓←→".contains(s) => {
-            KeyCode::Char(s.chars().next()?)
+    pub fn when(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+    pub fn shortcut(&self) -> String {
+        match self.key {
+            Some(k) if self.control => format!("Ctrl+{}", keys::label(k).to_uppercase()),
+            Some(k) => keys::label(k),
+            None => "Palette".into(),
         }
-        _ => return None,
-    })
+    }
 }
-fn rows(bindings: Vec<(&str, &str)>) -> Vec<Command> {
+fn rows(bindings: Vec<(k::Keys, &str)>) -> Vec<Command> {
     bindings
         .into_iter()
-        .map(|(k, l)| Command::new(k, l))
+        .flat_map(|(keys, label)| {
+            [Some(keys.0), keys.1]
+                .into_iter()
+                .flatten()
+                .map(move |key| Command::widget(key, label))
+        })
         .collect()
 }
-
-/// Input is isolated from page navigation. Function keys remain available.
-pub(crate) fn input_active(state: &AppState) -> bool {
-    (state.current_screen() == Screen::Hooks && state.hooks.input_active())
-        || (state.current_screen() == Screen::Apply && state.apply_confirmation_open())
-        || state.search_editing
-        || (state.current_screen() == Screen::ToolSettings && state.is_tool_field_editing())
-        || (matches!(
-            state.current_screen(),
-            Screen::Automation | Screen::Settings
-        ) && (state.automation_field_editing || state.settings_field_editing))
-        || (matches!(state.current_screen(), Screen::Sessions | Screen::O2)
-            && state.sessions.input_active())
-}
-
 /// Global destinations must never bypass an active modal or text editor.
-pub(crate) fn exclusive(state: &AppState) -> bool {
-    input_active(state)
-        || (state.current_screen() == Screen::Hooks && state.hooks.modal())
-        || state.launch_dialog.is_some()
-        || state.approval_window.is_some()
-        || state.prd_queue_editor.is_some()
-        || state.coordinator_task_diff_popup.is_some()
-        || state.coordinator_task_explain_popup.is_some()
-        || state.has_coordinator_finished_prompt()
-        || state.has_coordinator_pause_prompt()
-        || state.coordinator_stop_dialog_open
-        || state.coordinator_stop_task_confirm_id.is_some()
-        || state.coordinator_recover_dialog_open
-        || state
-            .coordinator_ownership
-            .pending_incoming_request
-            .is_some()
-        || state.is_tool_install_confirmation_open()
-        || state.tool_priority_editor_active
-        || state.tool_parallel_editor_active
-        || state.supervisor_commands_active()
+pub(crate) fn exclusive(s: &AppState) -> bool {
+    use crate::focus::Layer;
+    match Layer::current(s) {
+        Layer::Page => false,
+        Layer::Hooks => s.hooks.modal(),
+        Layer::Workspace => s.sessions.input_active(),
+        _ => true,
+    }
 }
-
-pub(crate) fn active(state: &AppState) -> Vec<Command> {
-    if state.current_screen() == Screen::Hooks {
-        return rows(state.hooks.bindings());
+fn entering_text(s: &AppState) -> bool {
+    use crate::focus::Layer;
+    match Layer::current(s) {
+        Layer::ToolField | Layer::ConfigField | Layer::Search => true,
+        Layer::Supervisor => s.supervisor_command_editing(),
+        Layer::Workspace => s.sessions.input_active(),
+        Layer::Hooks => s.hooks.input_active(),
+        Layer::Decision => s.decision_center.accepts_text(),
+        Layer::Queue => s.prd_queue_editor.as_ref().is_some_and(|e| e.is_editing()),
+        Layer::Approval => s.approval_window.as_ref().is_some_and(|w| w.is_editing()),
+        Layer::Apply => s.apply_assistant_editing(),
+        _ => false,
     }
-    if state.launch_dialog.is_some() {
-        return rows(vec![
-            ("Tab", "Next option"),
-            ("↑↓", "Select option"),
-            ("←→", "Change value / button"),
-            ("Enter", "Activate selection"),
-            ("PgUp/PgDn", "Scroll launch warnings"),
-            ("Esc", "Cancel launch"),
-        ]);
-    }
-    if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some()
-    {
-        return rows(vec![("Esc", "Close details")]);
-    }
-    if state.decision_center.open {
-        return rows(vec![
-            ("Tab", "Next field or button"),
-            ("Shift+Tab", "Previous field or button"),
-            ("↑↓", "Choose a value / action"),
-            ("Enter", "Edit text or activate focused button"),
-            ("Home", "Evidence / approvals / lifecycle actions"),
-            ("PgUp/PgDn", "Scroll request details"),
-            ("Esc", "Later — keep draft"),
-        ]);
-    }
-    if let Some(window) = &state.approval_window {
-        return rows(window.command_bindings());
-    }
-    if state.has_coordinator_finished_prompt() {
-        return rows(vec![("Enter", "Dismiss"), ("Esc", "Close")]);
-    }
-    if state.has_coordinator_pause_prompt() {
-        return rows(vec![
-            ("d", "Inspect decision / failed check"),
-            ("r", "Retry failed phase"),
-            ("s", "Skip failed phase"),
-            ("o", "Open logs"),
-            ("u", "Resume signal"),
-            ("c", "Continue"),
-            ("Esc", "Keep stopped"),
-        ]);
-    }
-    if let Some(editor) = &state.prd_queue_editor {
-        return rows(editor.command_bindings());
-    }
-    let screen = state.current_screen();
-    if screen == Screen::CoordinatorLive {
-        if state.coordinator_stop_dialog_open || state.coordinator_recover_dialog_open {
-            return rows(vec![
-                ("↑↓", "Select mode"),
-                ("Enter", "Confirm selected mode"),
-                ("Esc", "Cancel"),
-            ]);
+}
+fn contextual(state: &AppState) -> Vec<Command> {
+    use crate::focus::Layer;
+    match Layer::current(state) {
+        Layer::Launch => rows(vec![
+            (k::TAB, "Next option"),
+            (k::BACKTAB, "Previous option"),
+            (k::VERTICAL, "Select option"),
+            (k::HORIZONTAL, "Change value / button"),
+            (k::ENTER, "Activate selection"),
+            (k::PAGES, "Scroll warnings"),
+            (k::ESC, "Cancel launch"),
+        ]),
+        Layer::Apply if state.apply_assistant_open() => rows(state.apply_assistant_bindings()),
+        Layer::Apply => rows(vec![
+            (k::HORIZONTAL, "Choose Cancel / Apply"),
+            (k::TAB, "Next button"),
+            (k::ENTER, "Activate selected button"),
+            (k::BACKSPACE, "Delete consent character"),
+            (k::PAGES, "Scroll reviewed preparation"),
+            (k::ESC, "Cancel confirmation"),
+        ]),
+        Layer::TaskDetail => rows(vec![
+            (k::PAGES, "Scroll details"),
+            (k::ESC, "Close details"),
+        ]),
+        Layer::Decision => rows(vec![
+            (k::TAB, "Next field or button"),
+            (k::BACKTAB, "Previous field or button"),
+            (k::VERTICAL, "Choose a value / action"),
+            (k::HORIZONTAL, "Choose an option"),
+            (k::ENTER, "Edit text or activate focused button"),
+            (k::HOME, "Evidence / approvals / lifecycle actions"),
+            (k::PAGES, "Scroll request details"),
+            (k::ESC, "Later — keep draft"),
+        ]),
+        Layer::Approval => rows(state.approval_window.as_ref().unwrap().command_bindings()),
+        Layer::Finished => rows(vec![(k::ENTER, "Dismiss"), (k::ESC, "Close")]),
+        Layer::Paused => pause_commands(state),
+        Layer::Queue => rows(state.prd_queue_editor.as_ref().unwrap().command_bindings()),
+        Layer::Recovery | Layer::Stop => rows(vec![
+            (k::VERTICAL, "Select mode"),
+            (k::ENTER, "Confirm selected mode"),
+            (k::ESC, "Cancel"),
+        ]),
+        Layer::StopTask => rows(vec![(k::ENTER, "Confirm task stop"), (k::ESC, "Cancel")]),
+        Layer::Takeover => rows(vec![
+            (k::ch('a'), "Accept takeover"),
+            (k::ch('r'), "Reject takeover"),
+            (k::ESC, "Dismiss"),
+        ]),
+        Layer::Install => rows(vec![(k::ENTER, "Confirm installation"), (k::ESC, "Cancel")]),
+        Layer::Priority => rows(vec![
+            (k::VERTICAL, "Select / move tool"),
+            (k::SPACE, "Grab / release"),
+            (k::ENTER, "Release / save"),
+            (k::ch('s'), "Save order"),
+            (k::ESC, "Release / cancel"),
+        ]),
+        Layer::Parallel => rows(vec![
+            (k::VERTICAL, "Select tool"),
+            (k::HORIZONTAL, "Adjust limit"),
+            (k::ENTER, "Finish"),
+            (k::ESC, "Close"),
+        ]),
+        Layer::Supervisor => rows(state.supervisor_command_bindings()),
+        Layer::Hooks => rows(state.hooks.bindings()),
+        Layer::ConfigField | Layer::ToolField | Layer::Search => editor_commands(),
+        Layer::Workspace if state.sessions.input_active() => {
+            let mut cs = editor_commands();
+            if state.current_screen() == Screen::O2 {
+                cs.push(Command::widget(KeyCode::BackTab, "Previous form field"));
+            }
+            cs
         }
-        if state.coordinator_stop_task_confirm_id.is_some() {
-            return rows(vec![("Enter", "Confirm task stop"), ("Esc", "Cancel")]);
+        Layer::Workspace => {
+            let mut cs = state.sessions.commands();
+            if state.sessions.supports_raw() {
+                cs.push(Command::ctrl('r', "Raw evidence", Action::WorkspaceRaw));
+            }
+            cs.extend(rows(state.sessions.navigation_bindings()));
+            cs
         }
+        Layer::Page => pages::commands(state),
     }
-    if state
-        .coordinator_ownership
-        .pending_incoming_request
-        .is_some()
-    {
+}
+fn editor_commands() -> Vec<Command> {
+    rows(vec![
+        (k::ENTER, "Confirm input"),
+        (k::BACKSPACE, "Delete character"),
+        (k::ESC, "Cancel input"),
+    ])
+}
+fn pause_commands(state: &AppState) -> Vec<Command> {
+    let summary = state.coordinator_run_summary.as_ref();
+    if crate::precondition_stop(
+        state.coordinator_pause_error.as_deref().unwrap_or_default(),
+        summary.and_then(|s| s.error_code.as_deref()),
+        summary
+            .map(|s| s.unmet_preconditions.as_slice())
+            .unwrap_or_default(),
+    ) {
         return rows(vec![
-            ("a", "Accept takeover"),
-            ("r", "Reject takeover"),
-            ("Esc", "Dismiss"),
+            (k::ch('d'), "Inspect decision / failed check"),
+            (k::ch('o'), "Open logs"),
+            (k::ESC, "Keep stopped"),
         ]);
     }
-    if screen == Screen::Tools && state.is_tool_install_confirmation_open() {
-        return rows(vec![("Enter", "Confirm installation"), ("Esc", "Cancel")]);
-    }
-    if screen == Screen::Automation && state.tool_priority_editor_active {
-        return rows(vec![
-            ("↑↓", "Select / move tool"),
-            ("Space", "Grab / release"),
-            ("Enter", "Release / save"),
-            ("s", "Save order"),
-            ("Esc", "Release / cancel"),
-        ]);
-    }
-    if screen == Screen::Automation && state.tool_parallel_editor_active {
-        return rows(vec![
-            ("↑↓", "Select tool"),
-            ("←→", "Adjust limit"),
-            ("Enter", "Finish"),
-            ("Esc", "Close"),
-        ]);
-    }
-    if matches!(screen, Screen::Automation | Screen::Settings) && state.supervisor_commands_active()
-    {
-        return rows(state.supervisor_command_bindings());
-    }
-    if screen == Screen::Apply {
-        if state.apply_assistant_open() {
-            return rows(state.apply_assistant_bindings());
+    rows(vec![
+        (k::ch('d'), "Inspect decision / failed check"),
+        (k::ch('r'), "Retry failed phase"),
+        (k::ENTER, "Retry failed phase"),
+        (k::ch('s'), "Skip failed phase"),
+        (k::ch('o'), "Open logs"),
+        (k::ch('u'), "Resume signal"),
+        (k::ch('c'), "Continue"),
+        (k::ESC, "Keep stopped"),
+    ])
+}
+mod execute;
+pub(crate) use execute::execute;
+pub(crate) fn active(s: &AppState) -> Vec<Command> {
+    let mut commands = contextual(s);
+    if !exclusive(s) {
+        let mode = crate::navigation::mode(s);
+        for &(key, dest) in mode.routes() {
+            // Page letters are reserved for navigation. A specialist workspace
+            // operation sharing a letter remains executable by name in the palette.
+            let key = KeyCode::Char(key);
+            if let Some(local) = commands.iter_mut().find(|c| c.key == Some(key)) {
+                local.key = None;
+            }
+            commands.push(Command::bound(key, dest.label(), Action::Go(dest)));
         }
-        if state.apply_confirmation_open() {
-            return rows(vec![
-                ("←→", "Choose Cancel / Apply"),
-                ("Tab", "Next button"),
-                ("Enter", "Activate selected button"),
-                ("Backspace", "Delete consent character"),
-                ("PgUp/PgDn", "Scroll reviewed preparation"),
-                ("Esc", "Cancel confirmation"),
-            ]);
-        }
-        let mut commands = rows(screen_action_bindings(screen));
-        commands.extend(rows(vec![("v", "Toggle technical output")]));
-        if let Some(command) = commands.iter_mut().find(|c| c.key == Some(KeyCode::Enter)) {
-            command.enabled = state.apply_context.is_some()
-                && !state.apply_preparing()
-                && state.apply_feedback.is_none();
-        }
-        return commands;
-    }
-    if input_active(state) {
-        let mut commands = rows(vec![
-            ("Enter", "Confirm input"),
-            ("Backspace", "Delete character"),
-            ("Esc", "Cancel input"),
-        ]);
-        if screen == Screen::O2 {
-            commands.push(Command::new("Shift+Tab", "Previous form field"));
-        }
-        return commands;
-    }
-    if matches!(screen, Screen::Sessions | Screen::O2) {
-        let mut commands = rows(state.sessions.navigation_bindings());
-        commands.extend(state.sessions.commands().into_iter().map(|c| Command {
-            shortcut: match c.key {
-                KeyCode::Char(k) => k.to_string(),
-                _ => c.shortcut.into(),
-            },
-            label: format!("{} — {}", c.label, c.hint),
-            key: Some(c.key),
-            enabled: c.enabled,
-        }));
-        let mut unique: Vec<Command> = Vec::new();
-        for c in commands {
-            if let Some(index) = unique
-                .iter()
-                .position(|existing| existing.shortcut == c.shortcut)
-            {
-                if matches!(unique[index].label.as_str(), "Preview" | "Save" | "Discard") {
-                    let label = format!("{} — {}", unique[index].label, c.label);
-                    unique[index] = Command { label, ..c };
-                } else {
-                    unique[index] = c;
+        commands.push(Command::ctrl('t', mode.other_label(), Action::SwitchMode));
+        if mode == crate::navigation::Mode::Configure
+            && !matches!(s.current_screen(), Screen::O2 | Screen::Sessions)
+        {
+            commands
+                .push(Command::ctrl('z', "Redo edit", Action::Redo).when(!s.redo_stack.is_empty()));
+            for (key, label, action) in [
+                ('s', "Save configuration", Action::Save),
+                ('u', "Undo edit", Action::Undo),
+            ] {
+                if !commands.iter().any(|c| c.key == Some(KeyCode::Char(key))) {
+                    commands.push(Command::bound(KeyCode::Char(key), label, action));
                 }
-            } else {
-                unique.push(c);
             }
         }
-        return unique;
-    }
-    let mut commands = rows(screen_action_bindings(screen));
-    if matches!(screen, Screen::Automation | Screen::Settings) {
-        commands.extend((1..=8).map(|n| Command::new(&n.to_string(), "Open configuration tab")));
-        commands.push(Command::new("Shift+Tab", "Previous tab"));
-        if state.config_tab_index == 7 {
-            commands.push(Command::new("e", "Edit exact decision setting"));
-            commands.push(Command::new(
-                "F12",
-                "Prepare decision policy approval challenge",
+        if !commands.iter().any(|c| c.key == Some(KeyCode::Esc)) {
+            commands.push(Command::bound(
+                KeyCode::Esc,
+                if s.screen_stack.len() > 1 {
+                    "Back"
+                } else {
+                    "Quit"
+                },
+                Action::Back,
             ));
         }
-        commands.push(Command::new(
-            "←→",
-            "Adjust focused tool / supervisor / decisions setting",
-        ));
+        for &dest in crate::navigation::ALL {
+            if !commands.iter().any(|c| c.action == Action::Go(dest)) {
+                commands.push(Command {
+                    key: None,
+                    control: false,
+                    label: dest.label().into(),
+                    hint: dest.mode().label().into(),
+                    action: Action::Go(dest),
+                    enabled: true,
+                });
+            }
+        }
     }
-    if screen == Screen::CoordinatorLive {
-        let selected = state.selected_live_task().is_some();
-        let has_owner = state
-            .coordinator_ownership
-            .record
-            .as_ref()
-            .is_some_and(|r| r.owner.is_some());
-        let can_control = !has_owner || state.coordinator_ownership.is_owner;
+    if !exclusive(s) {
         for c in &mut commands {
-            if matches!(
-                c.key,
-                Some(KeyCode::Char('r' | 's' | 'd')) | Some(KeyCode::Enter)
-            ) {
-                c.enabled = selected;
+            if c.action == Action::Undo {
+                c.enabled = !s.undo_stack.is_empty();
             }
-            if matches!(
-                c.key,
-                Some(KeyCode::Char('R' | 'y' | 'c' | 'u' | 'v' | 'k' | 'r' | 's'))
-            ) {
-                c.enabled &= can_control;
-            }
-            if c.key == Some(KeyCode::Char('T')) {
-                c.enabled = !state.coordinator_ownership.is_owner;
+            if c.action == Action::Save {
+                c.enabled = s.working_copy.is_some()
+                    && (s.current_screen() != Screen::Changes || s.working_copy != s.config);
+                if !c.enabled {
+                    c.hint="Open an outstanding policy draft to use its reviewed save, or edit a configuration setting.".into();
+                }
             }
         }
     }
-    if !commands.iter().any(|c| c.key == Some(KeyCode::Esc)) {
-        commands.push(Command::new(
-            "Esc",
-            if screen == Screen::Home {
-                "Quit"
-            } else {
-                "Back"
-            },
-        ));
+    let mut help = Command::bound(KeyCode::Char('?'), "Help", Action::Help);
+    if entering_text(s) {
+        help.key = None;
     }
-    let mut common = vec![
-        ("h", "Home"),
-        ("t", "Tools"),
-        ("o", "Coordinator settings"),
-        ("m", "MCP servers"),
-        ("g", "Logs"),
-        ("p", "Preview configuration"),
-        ("x", "Apply configuration…"),
-        ("O", "O2 workspace"),
-        ("J", "Sessions"),
-        ("H", "Hooks"),
-        ("A", "Waiting approval"),
-        ("D", "Decisions / autonomy"),
-        ("U", "Redo configuration"),
-    ];
-    if screen != Screen::CoordinatorLive {
-        common.extend([
-            ("e", "General settings"),
-            ("v", "Coordinator live"),
-            ("s", "Save configuration"),
-            ("u", "Undo configuration"),
-        ]);
-    }
-    for c in rows(common) {
-        if !commands.iter().any(|local| local.key == c.key) {
-            commands.push(c);
-        }
-    }
+    commands.extend([help, palette_command(s), quit_command()]);
     commands
 }
 
-pub(crate) fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
-    match screen {
-        Screen::Home => vec![
-            ("r", "Start coordinator"),
-            ("O", "O2 workspace"),
-            ("J", "Sessions"),
-            ("H", "Hooks"),
-            ("d", "Doctor"),
-            ("p", "Preview"),
-        ],
-        Screen::Tools => vec![
-            ("↑↓", "Move"),
-            ("Space", "Toggle"),
-            ("Enter", "Configure"),
-            ("i", "Install"),
-            ("d", "Refresh"),
-            ("f", "Context"),
-        ],
-        Screen::Automation | Screen::Settings => vec![
-            ("Tab/1-8", "Tabs"),
-            ("↑↓", "Move"),
-            ("Space/Enter", "Edit"),
-            ("s", "Save"),
-        ],
-        Screen::ToolSettings => vec![("↑↓", "Move"), ("Space/Enter", "Edit"), ("s", "Save")],
-        Screen::Hooks => vec![
-            ("Space", "Review activation…"),
-            ("i", "Import hook…"),
-            ("r", "Refresh"),
-        ],
-        Screen::Skills => vec![
-            ("r", "Recheck sources"),
-            ("↑↓", "Move"),
-            ("Space/Enter", "Toggle"),
-            ("a", "All"),
-            ("n", "None"),
-            ("/", "Search"),
-        ],
-        Screen::Mcp => vec![
-            ("↑↓", "Move"),
-            ("Space/Enter", "Toggle"),
-            ("a", "All"),
-            ("n", "None"),
-            ("/", "Search"),
-        ],
-        Screen::Agents => vec![
-            ("↑↓", "Move"),
-            ("Space/Enter", "Toggle"),
-            ("a", "All"),
-            ("n", "None"),
-            ("/", "Search"),
-        ],
-        Screen::Logs => vec![
-            ("↑↓", "Files"),
-            ("PgUp/PgDn", "Scroll"),
-            ("r", "Refresh"),
-            ("/", "Search"),
-        ],
-        Screen::Preview => vec![
-            ("↑↓", "Ops"),
-            ("PgUp/PgDn", "Diff"),
-            ("r", "Refresh"),
-            ("x", "Apply"),
-        ],
-        Screen::Apply => vec![
-            ("Enter", "Review and confirm apply…"),
-            ("↑↓", "Select operation"),
-            ("PgUp/PgDn", "Scroll result"),
-            ("r", "Refresh plan"),
-            ("Esc", "Back"),
-        ],
-        Screen::Watch => vec![("↑↓", "Workers"), ("r", "Refresh"), ("/", "Search")],
-        Screen::Sessions | Screen::O2 => vec![
-            ("F2", "Actions"),
-            ("Tab", "Sections"),
-            ("↑↓", "Select"),
-            ("Enter", "Edit / events"),
-            ("p/s", "Preview / apply policy"),
-            ("O/J", "O2 / Sessions"),
-        ],
-        Screen::About => vec![("Esc/q", "Back")],
-        Screen::CoordinatorLive => vec![
-            ("R", "Run coordinator"),
-            ("u", "Resume paused run"),
-            ("y", "Sync registry"),
-            ("c", "Reconcile"),
-            ("v", "Recovery options"),
-            ("l", "Toggle logs"),
-            ("↑↓", "Select task"),
-            ("Enter", "Explain task"),
-            ("d", "Task diff"),
-            ("r", "Requeue selected task"),
-            ("/", "Search"),
-            ("T", "Request ownership"),
-            ("k", "Stop coordinator…"),
-            ("s", "Stop selected task…"),
-        ],
+fn quit_command() -> Command {
+    Command::ctrl('c', "Quit TUI", Action::Quit)
+}
+
+pub(crate) fn palette_command(s: &AppState) -> Command {
+    if entering_text(s) {
+        Command::ctrl('p', "Commands", Action::Palette)
+    } else {
+        let mut command = Command::bound(KeyCode::Char(':'), "Commands", Action::Palette);
+        command.hint = "Also available with Ctrl+P".into();
+        command
     }
+}
+
+pub(crate) fn resolve(state: &AppState, key: KeyCode, control: bool) -> Option<Command> {
+    let commands = focused(state);
+    if control && key == KeyCode::Char('p') {
+        return commands.into_iter().find(|c| {
+            c.action == Action::Palette
+                || (state.command_palette_open && c.key == Some(KeyCode::Char(':')))
+        });
+    }
+    commands
+        .into_iter()
+        .find(|c| c.key == Some(key) && c.control == control)
+}
+
+pub(crate) fn focused(s: &AppState) -> Vec<Command> {
+    overlays::bindings(s).unwrap_or_else(|| active(s))
 }

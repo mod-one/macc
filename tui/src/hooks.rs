@@ -1,4 +1,5 @@
 //! Hook management delegates policy and transactions to the shared application layer.
+use crate::command_catalog::keys as k;
 use crate::{screen::Screen, state::AppState, *};
 #[path = "hooks_view.rs"]
 mod view;
@@ -7,6 +8,8 @@ use macc_core::hooks::{Action, Status};
 pub(crate) struct HooksScreen {
     view: Option<Status>,
     index: usize,
+    native_tab: bool,
+    native_index: usize,
     scroll: u16,
     query: String,
     input: Option<(bool, String)>, // true: external manifest path; false: filter
@@ -44,28 +47,42 @@ impl HooksScreen {
             })
             .unwrap_or_default()
     }
-    pub fn bindings(&self) -> Vec<(&'static str, &'static str)> {
+    pub fn bindings(&self) -> Vec<(k::Keys, &'static str)> {
         if self.input.is_some() {
-            return vec![("Enter", "Review input"), ("Esc", "Cancel input")];
+            return vec![
+                (k::ENTER, "Review input"),
+                (k::BACKSPACE, "Delete character"),
+                (k::ESC, "Cancel input"),
+            ];
         }
         if self.pending.is_some() {
             return vec![
-                ("Enter", "Confirm reviewed change"),
-                ("PgUp/PgDn", "Scroll review"),
-                ("Esc", "Cancel change"),
+                (k::ENTER, "Confirm reviewed change"),
+                (k::PAGES, "Scroll review"),
+                (k::ESC, "Cancel change"),
             ];
         }
-        vec![
-            ("↑↓", "Select hook"),
-            ("PgUp/PgDn", "Scroll details"),
-            ("Space", "Review activation…"),
-            ("d", "Use default…"),
-            ("i", "Import external hook…"),
-            ("Delete", "Remove external hook…"),
-            ("/", "Filter"),
-            ("r", "Refresh"),
-            ("Esc", "Back"),
-        ]
+        let mut common = vec![
+            (k::ch('1'), "Processors"),
+            (k::ch('2'), "Native deployments"),
+            (k::TAB, "Switch section"),
+            (k::BACKTAB, "Previous section"),
+            (k::VERTICAL, "Select row"),
+            (k::PAGES, "Scroll details"),
+            (k::ch('r'), "Refresh"),
+            (k::ESC, "Back"),
+        ];
+        if self.native_tab {
+            return common;
+        }
+        common.extend([
+            (k::SPACE, "Review activation…"),
+            (k::ch('d'), "Use default…"),
+            (k::ch('i'), "Import external hook…"),
+            (k::DELETE, "Remove external hook…"),
+            (k::ch('/'), "Filter"),
+        ]);
+        common
     }
     fn key(&mut self, root: &std::path::Path, key: KeyCode) -> macc_core::Result<bool> {
         if let Some((path_input, text)) = &mut self.input {
@@ -142,6 +159,34 @@ impl HooksScreen {
         }
         if matches!(
             key,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2')
+        ) {
+            self.native_tab = match key {
+                KeyCode::Char('1') => false,
+                KeyCode::Char('2') => true,
+                _ => !self.native_tab,
+            };
+            self.scroll = 0;
+            return Ok(false);
+        }
+        if self.native_tab {
+            match key {
+                KeyCode::Esc => return Ok(true),
+                KeyCode::Char('r') => self.refresh(root),
+                KeyCode::Down => {
+                    self.native_index = (self.native_index + 1).min(
+                        self.view
+                            .as_ref()
+                            .map_or(0, |v| v.native.len().saturating_sub(1)),
+                    )
+                }
+                KeyCode::Up => self.native_index = self.native_index.saturating_sub(1),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        if matches!(
+            key,
             KeyCode::Up | KeyCode::Down | KeyCode::Char(' ' | 'd' | 'i') | KeyCode::Delete
         ) {
             self.scroll = 0;
@@ -188,22 +233,8 @@ impl HooksScreen {
     }
 }
 pub(crate) fn handle(state: &mut AppState, key: KeyCode) -> bool {
-    if key == KeyCode::Char('H')
-        && state.current_screen() != Screen::Hooks
-        && !command_catalog::exclusive(state)
-    {
-        if let Some(paths) = &state.project_paths {
-            state.hooks.refresh(&paths.root);
-        }
-        state.push_screen(Screen::Hooks);
-        return true;
-    }
     if state.current_screen() != Screen::Hooks {
         return false;
-    }
-    if key == KeyCode::Char('?') && !state.hooks.input_active() {
-        state.toggle_help();
-        return true;
     }
     let Some(paths) = state.project_paths.clone() else {
         return true;

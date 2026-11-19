@@ -46,6 +46,16 @@ const MODES: &[(&str, &str)] = &[
     ("upload", "Register an evidence file"),
     ("reuse", "Use a prior direction as fresh scoped guidance"),
 ];
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelInput {
+    Key(KeyCode),
+    Submit,
+    Inspect,
+    ShareEvidence,
+    NextOutcome,
+    Challenge,
+}
+
 impl Panel {
     pub fn show(&mut self) {
         self.open = true;
@@ -360,32 +370,32 @@ impl Panel {
             _ => 2,
         };
     }
-    fn buttons(&self) -> Vec<(&'static str, KeyCode)> {
+    fn buttons(&self) -> Vec<(&'static str, PanelInput)> {
         match self.mode.as_str() {
             "menu" | "analytics" => vec![],
             "evidence" => vec![
-                ("Attach reference", KeyCode::F(5)),
-                ("Review / confirm AI sharing", KeyCode::F(6)),
+                ("Attach reference", PanelInput::Submit),
+                ("Review / confirm AI sharing", PanelInput::ShareEvidence),
             ],
             "approvals" => vec![
-                ("Check approval", KeyCode::F(4)),
-                ("Apply approved action", KeyCode::F(5)),
+                ("Check approval", PanelInput::Inspect),
+                ("Apply approved action", PanelInput::Submit),
             ],
             "operations" => vec![
-                ("Send", KeyCode::F(5)),
-                ("Run trusted probe", KeyCode::F(4)),
-                ("Change outcome", KeyCode::F(11)),
-                ("Prepare challenge", KeyCode::F(12)),
+                ("Send", PanelInput::Submit),
+                ("Run trusted probe", PanelInput::Inspect),
+                ("Change outcome", PanelInput::NextOutcome),
+                ("Prepare challenge", PanelInput::Challenge),
             ],
             "gates" => vec![
-                ("Send", KeyCode::F(5)),
-                ("Change response", KeyCode::F(11)),
-                ("Prepare challenge", KeyCode::F(12)),
+                ("Send", PanelInput::Submit),
+                ("Change response", PanelInput::NextOutcome),
+                ("Prepare challenge", PanelInput::Challenge),
             ],
-            "upload" => vec![("Register evidence", KeyCode::F(5))],
+            "upload" => vec![("Register evidence", PanelInput::Submit)],
             _ => vec![
-                ("Send", KeyCode::F(5)),
-                ("Prepare challenge", KeyCode::F(12)),
+                ("Send", PanelInput::Submit),
+                ("Prepare challenge", PanelInput::Challenge),
             ],
         }
     }
@@ -407,6 +417,13 @@ impl Panel {
             .join("  ");
         format!("{values}\nTab/Shift+Tab: fields and buttons · Enter: activate button · Esc: back\nInput {} / {}", self.field + 1, count)
     }
+    pub(super) fn accepts_text(&self) -> bool {
+        self.button.is_none()
+            && !matches!(
+                self.mode.as_str(),
+                "menu" | "analytics" | "evidence" | "approvals"
+            )
+    }
     pub fn keyboard(
         &mut self,
         key: KeyCode,
@@ -414,7 +431,7 @@ impl Panel {
         snapshot: &Value,
     ) -> Option<Action> {
         if self.mode == "menu" || self.mode == "analytics" {
-            return self.key_event(key, d, snapshot);
+            return self.handle_input(PanelInput::Key(key), d, snapshot);
         }
         let buttons = self.buttons();
         let manual = snapshot["policy"]["trust_mode"] == "secure_approval"
@@ -448,7 +465,7 @@ impl Panel {
         }
         if let Some(button) = self.button {
             if matches!(key, KeyCode::Enter | KeyCode::Char(' ')) {
-                return self.key_event(buttons.get(button)?.1, d, snapshot);
+                return self.handle_input(buttons.get(button)?.1, d, snapshot);
             }
             if matches!(key, KeyCode::Char(_) | KeyCode::Backspace) {
                 return None;
@@ -456,17 +473,17 @@ impl Panel {
         }
         // List views have no text editor: Enter uses their first explicit action.
         if count == 0 && key == KeyCode::Enter {
-            return self.key_event(buttons.first()?.1, d, snapshot);
+            return self.handle_input(buttons.first()?.1, d, snapshot);
         }
-        self.key_event(key, d, snapshot)
+        self.handle_input(PanelInput::Key(key), d, snapshot)
     }
-    pub fn key_event(
+    fn handle_input(
         &mut self,
-        key: KeyCode,
+        key: PanelInput,
         d: Option<&dm::Decision>,
         snapshot: &Value,
     ) -> Option<Action> {
-        if key == KeyCode::Esc {
+        if key == PanelInput::Key(KeyCode::Esc) {
             self.evidence_confirmation = None;
             if self.mode == "menu" {
                 self.open = false;
@@ -478,9 +495,11 @@ impl Panel {
         }
         if self.mode == "menu" {
             match key {
-                KeyCode::Up => self.index = (self.index + MODES.len() - 1) % MODES.len(),
-                KeyCode::Down => self.index = (self.index + 1) % MODES.len(),
-                KeyCode::Enter => {
+                PanelInput::Key(KeyCode::Up) => {
+                    self.index = (self.index + MODES.len() - 1) % MODES.len()
+                }
+                PanelInput::Key(KeyCode::Down) => self.index = (self.index + 1) % MODES.len(),
+                PanelInput::Key(KeyCode::Enter) => {
                     let mode = MODES[self.index].0;
                     if mode == "no_graph" {
                         self.open = false;
@@ -509,7 +528,10 @@ impl Panel {
             return None;
         }
         if self.mode == "gates" {
-            if matches!(key, KeyCode::Up | KeyCode::Down) {
+            if matches!(
+                key,
+                PanelInput::Key(KeyCode::Up) | PanelInput::Key(KeyCode::Down)
+            ) {
                 let gates = snapshot["pending_approvals"]
                     .as_array()
                     .cloned()
@@ -518,7 +540,7 @@ impl Panel {
                     .filter(|g| g["awaiting_decision"] == true)
                     .collect::<Vec<_>>();
                 if !gates.is_empty() {
-                    self.index = if key == KeyCode::Up {
+                    self.index = if key == PanelInput::Key(KeyCode::Up) {
                         (self.index + gates.len() - 1) % gates.len()
                     } else {
                         (self.index + 1) % gates.len()
@@ -529,7 +551,7 @@ impl Panel {
                 }
                 return None;
             }
-            if key == KeyCode::F(11) {
+            if key == PanelInput::NextOutcome {
                 self.outcome = (self.outcome + 1) % 3;
                 return None;
             }
@@ -544,7 +566,7 @@ impl Panel {
                 return None;
             }
             self.index %= rows.len();
-            if key == KeyCode::F(6) {
+            if key == PanelInput::ShareEvidence {
                 let a = &rows[self.index];
                 let id = a["id"].as_str().unwrap_or_default().to_owned();
                 if self.evidence_confirmation.as_ref() == Some(&id) {
@@ -566,9 +588,11 @@ impl Panel {
             }
             self.evidence_confirmation = None;
             match key {
-                KeyCode::Up => self.index = (self.index + rows.len() - 1) % rows.len(),
-                KeyCode::Down => self.index = (self.index + 1) % rows.len(),
-                KeyCode::F(5) => {
+                PanelInput::Key(KeyCode::Up) => {
+                    self.index = (self.index + rows.len() - 1) % rows.len()
+                }
+                PanelInput::Key(KeyCode::Down) => self.index = (self.index + 1) % rows.len(),
+                PanelInput::Submit => {
                     let a = &rows[self.index];
                     return Some(Action::SetArtifact(dm::ArtifactRef {
                         id: a["id"].as_str().unwrap_or_default().into(),
@@ -579,7 +603,7 @@ impl Panel {
             }
             return None;
         }
-        if self.mode == "upload" && key == KeyCode::F(5) {
+        if self.mode == "upload" && key == PanelInput::Submit {
             let draft = self.drafts.get(&self.key(d)).cloned().unwrap_or_default();
             let path = PathBuf::from(draft.text.trim());
             let label = if draft.context.trim().is_empty() {
@@ -607,9 +631,11 @@ impl Panel {
             if !tickets.is_empty() {
                 self.index %= tickets.len();
                 match key {
-                    KeyCode::Up => self.index = (self.index + tickets.len() - 1) % tickets.len(),
-                    KeyCode::Down => self.index = (self.index + 1) % tickets.len(),
-                    KeyCode::F(4) => {
+                    PanelInput::Key(KeyCode::Up) => {
+                        self.index = (self.index + tickets.len() - 1) % tickets.len()
+                    }
+                    PanelInput::Key(KeyCode::Down) => self.index = (self.index + 1) % tickets.len(),
+                    PanelInput::Inspect => {
                         return Some(Action::Approval {
                             ticket: tickets[self.index]["id"]
                                 .as_str()
@@ -618,7 +644,7 @@ impl Panel {
                             apply: false,
                         })
                     }
-                    KeyCode::F(5) => {
+                    PanelInput::Submit => {
                         if matches!(
                             tickets[self.index]["status"].as_str(),
                             Some("approved" | "applying")
@@ -639,10 +665,13 @@ impl Panel {
             return None;
         }
         if self.mode == "operations" {
-            if matches!(key, KeyCode::Up | KeyCode::Down) {
+            if matches!(
+                key,
+                PanelInput::Key(KeyCode::Up) | PanelInput::Key(KeyCode::Down)
+            ) {
                 if let Some(ops) = snapshot["operations"].as_array() {
                     if !ops.is_empty() {
-                        self.index = if key == KeyCode::Up {
+                        self.index = if key == PanelInput::Key(KeyCode::Up) {
                             (self.index + ops.len() - 1) % ops.len()
                         } else {
                             (self.index + 1) % ops.len()
@@ -653,7 +682,7 @@ impl Panel {
                 }
                 return None;
             }
-            if key == KeyCode::F(4) {
+            if key == PanelInput::Inspect {
                 if let Some(op) = &self.operation {
                     return Some(Action::Probe {
                         operation: op["operation_id"].as_str().unwrap_or_default().into(),
@@ -661,24 +690,20 @@ impl Panel {
                     });
                 }
             }
-            if key == KeyCode::F(11) {
+            if key == PanelInput::NextOutcome {
                 self.outcome = (self.outcome + 1) % 3;
                 return None;
             }
         }
         let manual = snapshot["policy"]["trust_mode"] == "secure_approval"
             && snapshot["approval_broker_available"] != true;
-        if key == KeyCode::F(9) {
-            self.field = (self.field + 1) % self.field_count(manual);
-            return None;
-        }
-        if key == KeyCode::F(5) || key == KeyCode::F(12) {
+        if key == PanelInput::Submit || key == PanelInput::Challenge {
             match self.intent(d, snapshot) {
                 Ok((intent, proof)) => {
                     return Some(Action::Operator {
                         intent,
                         proof,
-                        challenge: key == KeyCode::F(12),
+                        challenge: key == PanelInput::Challenge,
                     })
                 }
                 Err(e) => self.notice = e,
@@ -689,9 +714,9 @@ impl Panel {
         let mut draft = self.drafts.remove(&name).unwrap_or_default();
         let value = self.edit(&mut draft, manual);
         match key {
-            KeyCode::Char(c) => value.push(c),
-            KeyCode::Enter => value.push('\n'),
-            KeyCode::Backspace => {
+            PanelInput::Key(KeyCode::Char(c)) => value.push(c),
+            PanelInput::Key(KeyCode::Enter) => value.push('\n'),
+            PanelInput::Key(KeyCode::Backspace) => {
                 value.pop();
             }
             _ => {}
@@ -851,14 +876,18 @@ mod interaction_tests {
             mode: "evidence".into(),
             ..Default::default()
         };
-        assert!(panel.key_event(KeyCode::F(6), None, &snapshot).is_none());
+        assert!(panel
+            .handle_input(PanelInput::ShareEvidence, None, &snapshot)
+            .is_none());
         assert!(panel
             .view(None, &snapshot)
             .1
             .contains("external AI providers"));
-        assert!(panel.key_event(KeyCode::Esc, None, &snapshot).is_none());
+        assert!(panel.keyboard(KeyCode::Esc, None, &snapshot).is_none());
         panel.mode = "evidence".into();
-        assert!(panel.key_event(KeyCode::F(6), None, &snapshot).is_none());
+        assert!(panel
+            .handle_input(PanelInput::ShareEvidence, None, &snapshot)
+            .is_none());
         let Some(Action::Operator {
             intent:
                 dm::OperatorIntent::EvidencePermission {
@@ -868,7 +897,7 @@ mod interaction_tests {
                     version,
                 },
             ..
-        }) = panel.key_event(KeyCode::F(6), None, &snapshot)
+        }) = panel.handle_input(PanelInput::ShareEvidence, None, &snapshot)
         else {
             panic!("Expected explicit evidence consent")
         };

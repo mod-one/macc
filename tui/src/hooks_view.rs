@@ -2,14 +2,64 @@
 use super::*;
 impl HooksScreen {
     pub fn draw(&self, f: &mut Frame, area: Rect) {
-        let parts = Layout::default()
-            .constraints([
-                Constraint::Length(4),
-                Constraint::Percentage(42),
-                Constraint::Min(6),
-            ])
+        let sections = Layout::default()
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(area);
-        f.render_widget(wrapped_paragraph(format!("Hooks · MACC processors and native tool integration\nEnabled means selected; installation and execution are shown separately below.\nFilter: {} · select a hook to inspect deployment",self.query), "Hooks"),parts[0]);
+        workspace_ui::tab_line(
+            f,
+            sections[0],
+            &["Processors", "Native deployments"],
+            usize::from(self.native_tab),
+            theme().configure,
+        );
+        let (list, inspector) = workspace_ui::columns(sections[1]);
+        if self.native_tab {
+            let deployments = self
+                .view
+                .as_ref()
+                .map(|v| v.native.as_slice())
+                .unwrap_or_default();
+            let selected = self.native_index.min(deployments.len().saturating_sub(1));
+            let rows = deployments
+                .iter()
+                .map(|d| {
+                    vec![
+                        d.tool.to_string(),
+                        if d.installed {
+                            "Installed"
+                        } else if d.configured {
+                            "Configured"
+                        } else if d.supported {
+                            "Available"
+                        } else {
+                            "Unsupported"
+                        }
+                        .into(),
+                    ]
+                })
+                .collect();
+            workspace_ui::table(
+                f,
+                list,
+                "Native deployments",
+                &["Tool", "State"],
+                rows,
+                Some(selected),
+                crate::navigation::Mode::Configure,
+            );
+            let detail = deployments.get(selected).map(|d|{
+                let status = |v| if v {"Yes"} else {"No"};
+                format!("{}\n\nConfigured   {}\nInstalled    {}\nVerified     {}\nObserved     {}\n\n{}\n\nLast event reducers: {}",d.tool,status(d.configured),status(d.installed),status(d.locally_verified),status(d.execution_observed),d.detail,d.applied.join(", "))
+            }).unwrap_or_else(|| "No native deployments reported.".into());
+            workspace_ui::details(
+                f,
+                inspector,
+                "Deployment evidence",
+                format!("{detail}\n{}", self.message),
+                self.scroll,
+            );
+            return;
+        }
         let items = self.filtered();
         let selected = self.index.min(items.len().saturating_sub(1));
         let mut selection = ListState::default();
@@ -19,40 +69,68 @@ impl HooksScreen {
                 items
                     .iter()
                     .map(|h| {
-                        ListItem::new(format!(
-                            "[MACC {}] {}{}",
-                            if h.enabled { "on" } else { "off" },
-                            h.hook.name,
-                            if h.required_by.is_empty() {
-                                ""
-                            } else {
-                                " · required"
-                            }
-                        ))
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                if h.enabled { "● On   " } else { "○ Off  " },
+                                Style::default().fg(if h.enabled {
+                                    theme().good
+                                } else {
+                                    theme().muted
+                                }),
+                            ),
+                            Span::raw(h.hook.name.clone()),
+                            Span::styled(
+                                if h.required_by.is_empty() {
+                                    ""
+                                } else {
+                                    " · required"
+                                },
+                                Style::default().fg(theme().configure),
+                            ),
+                        ]))
                     })
                     .collect::<Vec<_>>(),
             )
-            .block(panel("Available hooks"))
+            .block(crate::ui::focus_panel(
+                &format!(
+                    "MACC processors · {}{}",
+                    items.len(),
+                    if self.query.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", self.query)
+                    }
+                ),
+                crate::navigation::Mode::Configure,
+            ))
             .highlight_symbol("› ")
-            .highlight_style(Style::default().fg(theme().accent)),
-            parts[1],
+            .highlight_style(Style::default().bg(theme().configure_selection)),
+            list,
             &mut selection,
         );
         let mut details = if let Some(h) = items.get(selected) {
-            format!("{}\n{}\nVersion: {} · Event: {:?}\nOwners: {}\nManual override: {:?}\nSource: {} / {} ({})\nExplicit skill contracts: {}\n{}",h.hook.id,h.hook.description,h.hook.version,h.hook.event,if h.required_by.is_empty() {"None; user configurable".into()} else {h.required_by.join(", ")},h.manual,h.hook.source.repository,h.hook.source.subpath,h.hook.source.distribution,h.hook.skills.join(", "),h.integration)
+            let owners = if h.required_by.is_empty() {
+                "User configurable".into()
+            } else {
+                h.required_by.join(", ")
+            };
+            let manual = h
+                .manual
+                .map(|v| if v { "On" } else { "Off" })
+                .unwrap_or("Default");
+            let mut detail=format!("{}   v{}\n{}\n\nEvent     {:?}\nOwner     {owners}\nOverride  {manual}\nSource    {} / {} ({})\n\n{}", h.hook.name,h.hook.version,h.hook.description,h.hook.event,h.hook.source.repository,h.hook.source.subpath,h.hook.source.distribution,h.integration);
+            if !h.hook.skills.is_empty() {
+                detail.push_str(&format!("\nSkills    {}", h.hook.skills.join(", ")));
+            }
+            detail
         } else {
             "No matching hook. Use [i] to import a reviewed hook.json snapshot.".into()
         };
-        if let Some(view) = &self.view {
-            details.push_str("\n\nNative tool deployments (output hooks only):");
-            for native in &view.native {
-                details.push_str(&format!("\n{}: supported={} | configured={} | installed={} | local verification={} | execution observed={}\n{}\nLast event reducers: {}",native.tool,native.supported,native.configured,native.installed,native.locally_verified,native.execution_observed,native.detail,native.applied.join(", ")));
-            }
-        }
+        details.push_str("\n\nOpen Native deployments for installation and execution evidence.");
         details.push_str(&format!("\n\n{}", self.message));
         f.render_widget(
             wrapped_paragraph(details, "Hook details").scroll((self.scroll, 0)),
-            parts[2],
+            inspector,
         );
         if let Some((path, text)) = &self.input {
             let popup = ui::centered_rect(80, 35, area);

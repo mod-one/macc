@@ -1,4 +1,37 @@
 use super::*;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) enum MemoryGroup {
+    Ledger,
+    Semantic,
+    Ranking,
+    Mcp,
+    Limits,
+}
+impl MemoryGroup {
+    pub(super) fn from_path(path: &str) -> Option<Self> {
+        let key = path.strip_prefix("memory.")?;
+        Some(match key {
+            "enabled"
+            | "phase_extraction_enabled"
+            | "agent_proposals_allowed"
+            | "mcp_max_proposals_per_session" => Self::Ledger,
+            "semantic_weight" => Self::Ranking,
+            _ if key.starts_with("ranking_") => Self::Ranking,
+            _ if key.starts_with("semantic_") => Self::Semantic,
+            _ if key.starts_with("mcp_") => Self::Mcp,
+            _ => Self::Limits,
+        })
+    }
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Ledger => "Ledger",
+            Self::Semantic => "Semantic search",
+            Self::Ranking => "Ranking weights",
+            Self::Mcp => "MCP access",
+            Self::Limits => "Limits",
+        }
+    }
+}
 impl Panel {
     pub(super) fn settings_edited(&mut self) {
         self.preview = false;
@@ -23,12 +56,51 @@ impl Panel {
             .filter(|(_, f)| f.path.starts_with(&format!("{group}.")))
             .map(|(i, _)| i)
             .collect();
-        indices.sort_by_key(|i| !view.fields[*i].path.ends_with(".enabled"));
+        indices.sort_by_key(|i| {
+            let field = &view.fields[*i];
+            (
+                MemoryGroup::from_path(&field.path),
+                !field.path.ends_with(".enabled"),
+            )
+        });
         indices
+    }
+    pub(super) fn visible_settings(&self) -> Vec<usize> {
+        let Some(view) = &self.view else {
+            return Vec::new();
+        };
+        let mut previous = None;
+        self.setting_indices()
+            .into_iter()
+            .filter(|&i| {
+                let group = MemoryGroup::from_path(&view.fields[i].path);
+                let visible = group != previous || !group.is_some_and(|g| self.folded.contains(&g));
+                previous = group;
+                visible
+            })
+            .collect()
+    }
+    pub(super) fn selected_group(&self) -> Option<MemoryGroup> {
+        MemoryGroup::from_path(&self.view.as_ref()?.fields.get(self.selected)?.path)
     }
     pub(super) fn setting_key(&mut self, root: &Path, key: KeyCode) -> Result<bool> {
         match key {
             KeyCode::Left | KeyCode::Right => {
+                if let Some(group) = self.selected_group() {
+                    if key == KeyCode::Left {
+                        self.folded.insert(group);
+                        if let Some(first) = self.visible_settings().into_iter().find(|&i| {
+                            MemoryGroup::from_path(&self.view.as_ref().unwrap().fields[i].path)
+                                == Some(group)
+                        }) {
+                            self.selected = first;
+                        }
+                    } else {
+                        self.folded.remove(&group);
+                    }
+                }
+            }
+            KeyCode::Char('[' | ']') => {
                 let groups = [
                     "memory",
                     "context_engine",
@@ -45,7 +117,7 @@ impl Panel {
                                 .position(|g| f.path.starts_with(&format!("{g}.")))
                         })
                         .unwrap_or(0);
-                    let next = if key == KeyCode::Right {
+                    let next = if key == KeyCode::Char(']') {
                         (current + 1) % 4
                     } else {
                         (current + 3) % 4
@@ -70,7 +142,7 @@ impl Panel {
                 &["Find policy by canonical path or label"],
             ),
             KeyCode::Up | KeyCode::Down => {
-                let indices = self.setting_indices();
+                let indices = self.visible_settings();
                 if let Some(position) = indices.iter().position(|i| *i == self.selected) {
                     let next = if key == KeyCode::Down {
                         (position + 1).min(indices.len().saturating_sub(1))
@@ -80,7 +152,16 @@ impl Panel {
                     self.selected = indices[next];
                 }
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self
+                    .selected_group()
+                    .is_some_and(|g| self.folded.remove(&g))
+                {
+                    return Ok(true);
+                }
+                if key == KeyCode::Char(' ') && !self.is_boolean_setting() {
+                    return Ok(false);
+                }
                 let f = self
                     .view
                     .as_ref()

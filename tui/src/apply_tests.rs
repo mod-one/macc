@@ -86,6 +86,8 @@ fn project_apply_requires_a_separate_confirmation_and_cancel_does_not_write() {
         "approved content\n"
     );
     assert!(state.apply_feedback.is_some());
+    assert_eq!(state.delivery_baseline, state.config);
+    assert!(crate::workbench::changes::saved(&state).is_empty());
 }
 
 #[test]
@@ -138,7 +140,7 @@ fn all_operations_remain_reachable_and_commands_visible_on_small_terminals() {
         crate::workspace_tests::export_buffer("apply", &state, w, h);
         let text = crate::workspace_tests::text(&crate::workspace_tests::render(&state, w, h));
         assert!(text.contains("output-49.txt"));
-        assert!(text.contains("[F2] Commands"));
+        assert!(text.contains("[:] Commands"));
         assert!(!text.contains("and 40 more"));
         state.attempt_apply();
         crate::workspace_tests::export_buffer("apply-confirmation", &state, w, h);
@@ -261,7 +263,7 @@ fn partial_coverage_can_be_accepted_without_editing_policy_or_bypassing_apply_re
     assert!(state
         .apply_assistant_bindings()
         .iter()
-        .any(|(key, _)| *key == "i"));
+        .any(|(key, _)| key.0 == KeyCode::Char('i')));
     state.apply_key(KeyCode::Enter);
     assert!(state.apply_runtime.inputs.accept_degraded);
     assert!(state.apply_runtime.resume_after_prepare);

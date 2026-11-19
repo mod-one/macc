@@ -38,6 +38,11 @@ impl AppState {
             self.push_screen(Screen::Apply);
             return;
         }
+        if crate::workbench::has_draft(self) {
+            self.push_screen(Screen::Changes);
+            self.set_status(UiStatusLevel::Warning, "Save or discard the configuration draft before Apply. O2 and session settings have their own reviewed save.",Some(std::time::Duration::from_secs(5)));
+            return;
+        }
         self.apply_runtime = Default::default();
         self.apply_context = None;
         self.apply_error = None;
@@ -353,6 +358,7 @@ impl AppState {
         };
         match result {
             Ok(report) => {
+                self.delivery_baseline = self.apply_runtime.planned_config.clone();
                 if let Err(error) = macc_core::service::context::mark_apply_completed(&paths) {
                     self.apply_error = Some(format!(
                         "Changes applied, but readiness tracking failed: {error}"

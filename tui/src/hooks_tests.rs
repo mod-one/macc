@@ -3,17 +3,16 @@ use crate::workspace_tests::{fixture, render, text};
 #[test]
 fn hooks_are_discoverable_and_reviewed_changes_have_visible_commands() {
     let (_temp, mut state) = fixture();
-    assert!(text(&render(&state, 120, 36)).contains("[H] Hooks"));
-    assert!(Screen::Home
-        .help_keybindings()
+    handle_shortcut(&mut state, KeyCode::Char('t'), true);
+    assert!(command_catalog::active(&state)
         .iter()
-        .any(|(key, _)| *key == "H"));
-    handle_key(&mut state, KeyCode::Char('H'));
+        .any(|c| c.key == Some(KeyCode::Char('P')) && c.label == "Hooks"));
+    handle_key(&mut state, KeyCode::Char('P'));
     assert_eq!(state.current_screen(), Screen::Hooks);
     for (width, height) in [(80, 24), (120, 36)] {
         let output = text(&render(&state, width, height));
         assert!(output.contains("Hooks"));
-        assert!(output.contains("[F2] Commands"));
+        assert!(output.contains("[:] Commands"));
     }
     handle_key(&mut state, KeyCode::Char(' '));
     assert!(state.hooks.modal());
@@ -27,7 +26,8 @@ fn hooks_are_discoverable_and_reviewed_changes_have_visible_commands() {
 #[test]
 fn hook_input_is_exclusive_and_cannot_navigate_or_mutate_from_typing() {
     let (_temp, mut state) = fixture();
-    handle_key(&mut state, KeyCode::Char('H'));
+    handle_shortcut(&mut state, KeyCode::Char('t'), true);
+    handle_key(&mut state, KeyCode::Char('P'));
     handle_key(&mut state, KeyCode::Char('i'));
     assert!(state.hooks.input_active());
     for key in "HOs".chars() {
@@ -36,16 +36,21 @@ fn hook_input_is_exclusive_and_cannot_navigate_or_mutate_from_typing() {
     assert_eq!(state.current_screen(), Screen::Hooks);
     assert!(state.hooks.input_active());
     assert!(command_catalog::exclusive(&state));
-    handle_key(&mut state, KeyCode::F(2));
-    assert!(contextual_items(&state)
-        .iter()
-        .all(|c| matches!(c.action, CommandPaletteAction::Key(_))));
+    handle_key(&mut state, KeyCode::Char(':'));
+    assert!(contextual_items(&state).iter().all(|c| matches!(
+        c.action,
+        command_catalog::Action::Widget(_)
+            | command_catalog::Action::Help
+            | command_catalog::Action::Palette
+            | command_catalog::Action::Quit
+    )));
 }
 #[test]
 fn dirty_config_is_not_discarded_by_immediate_hook_settings() {
     let (_temp, mut state) = fixture();
     state.working_copy.as_mut().unwrap().settings.quiet = true;
-    handle_key(&mut state, KeyCode::Char('H'));
+    handle_shortcut(&mut state, KeyCode::Char('t'), true);
+    handle_key(&mut state, KeyCode::Char('P'));
     handle_key(&mut state, KeyCode::Char(' '));
     handle_key(&mut state, KeyCode::Enter);
     assert!(text(&render(&state, 120, 36)).contains("Save or discard"));
@@ -56,8 +61,15 @@ fn dirty_config_is_not_discarded_by_immediate_hook_settings() {
 #[test]
 fn hook_activation_is_not_presented_as_native_installation() {
     let (_temp, mut state) = fixture();
-    handle_key(&mut state, KeyCode::Char('H'));
+    handle_shortcut(&mut state, KeyCode::Char('t'), true);
+    handle_key(&mut state, KeyCode::Char('P'));
     let output = text(&render(&state, 120, 42));
-    assert!(output.contains("[MACC on]"));
-    assert!(output.contains("installation and execution"));
+    assert!(output.contains("MACC processors"));
+    assert!(output.contains("● On"));
+    assert!(output.contains("Native deployments"));
+    handle_key(&mut state, KeyCode::Char('2'));
+    assert!(text(&render(&state, 120, 42)).contains("Deployment evidence"));
+    assert!(!command_catalog::active(&state)
+        .iter()
+        .any(|c| c.label.contains("Review activation")));
 }

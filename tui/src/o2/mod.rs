@@ -31,6 +31,7 @@ use std::path::Path;
 pub struct Panel {
     pub open: bool,
     raw_details: bool,
+    folded: std::collections::BTreeSet<settings::MemoryGroup>,
     pub session_task: Option<String>,
     overview: overview::Overview,
     tuning_field: usize,
@@ -188,6 +189,74 @@ impl Panel {
             .get(self.selected)
             .ok_or_else(|| MaccError::Validation("Select a record first".into()))
     }
+    // Internal section IDs also select the domain operation used for refresh.
+    pub(crate) fn sections(&self) -> &'static [(usize, &'static str)] {
+        if self.configure_section() {
+            &[(4, "Settings"), (2, "Compaction"), (3, "Code intelligence")]
+        } else {
+            &[
+                (0, "Memory"),
+                (1, "Context"),
+                (5, "Overview"),
+                (6, "Trials"),
+            ]
+        }
+    }
+    fn section_index(&self) -> usize {
+        self.sections()
+            .iter()
+            .position(|(tab, _)| *tab == self.tab)
+            .expect("every O2 section belongs to one mode")
+    }
+    pub(crate) fn open_mode(&mut self, root: &Path, configure: bool) -> Result<()> {
+        self.select_section(root, if configure { 4 } else { 5 })
+    }
+    fn select_section(&mut self, root: &Path, tab: usize) -> Result<()> {
+        if self.tab == 5 {
+            self.overview.selected_task = self
+                .rows
+                .get(self.selected)
+                .and_then(|v| v["task_id"].as_str().map(str::to_string));
+        }
+        self.tuning_preview = None;
+        if self.pending.as_ref().is_some_and(|a| {
+            matches!(
+                a,
+                Action::TuningCreate { .. }
+                    | Action::TuningObserve { .. }
+                    | Action::TuningClose { .. }
+                    | Action::TuningApply { .. }
+            )
+        }) {
+            self.pending = None;
+        }
+        self.rows.clear();
+        self.tab = tab;
+        self.selected = 0;
+        self.scroll = 0;
+        self.details.clear();
+        if self.tab == 5 {
+            self.rows = self
+                .overview
+                .snapshot
+                .as_ref()
+                .and_then(|v| v["tasks"].as_array().cloned())
+                .unwrap_or_default();
+            self.selected = self
+                .rows
+                .iter()
+                .position(|v| v["task_id"].as_str() == self.overview.selected_task.as_deref())
+                .unwrap_or(0);
+        }
+        self.refresh(root)?;
+        if tab == 4 {
+            self.focus_policy_field("memory.enabled");
+        }
+        Ok(())
+    }
+    pub(crate) fn toggle_raw(&mut self) {
+        self.raw_details = !self.raw_details;
+    }
     pub fn key(&mut self, root: &Path, key: KeyCode) -> Result<()> {
         if self.form.is_some() {
             return self.form_key(root, key);
@@ -198,63 +267,18 @@ impl Panel {
             self.message = "Reviewed operation discarded; no action was applied.".into();
             return Ok(());
         }
-        if key == KeyCode::F(4) {
-            self.raw_details = !self.raw_details;
-            return Ok(());
-        }
-        if matches!(key, KeyCode::Tab | KeyCode::BackTab) {
-            let next = if key == KeyCode::Tab {
-                (self.tab + 1) % 7
-            } else {
-                (self.tab + 6) % 7
-            };
-            return self.key(root, KeyCode::Char((b'1' + next as u8) as char));
-        }
-        if let KeyCode::Char(c @ '1'..='7') = key {
-            if self.tab == 5 {
-                self.overview.selected_task = self
-                    .rows
-                    .get(self.selected)
-                    .and_then(|v| v["task_id"].as_str().map(str::to_string));
+        let sections = self.sections();
+        let index = self.section_index();
+        let next = match key {
+            KeyCode::Tab => Some((index + 1) % sections.len()),
+            KeyCode::BackTab => Some((index + sections.len() - 1) % sections.len()),
+            KeyCode::Char(c @ '1'..='9') => Some(c as usize - '1' as usize),
+            _ => None,
+        };
+        if let Some(index) = next {
+            if let Some(&(tab, _)) = sections.get(index) {
+                return self.select_section(root, tab);
             }
-            self.tuning_preview = None;
-            if self.pending.as_ref().is_some_and(|a| {
-                matches!(
-                    a,
-                    Action::TuningCreate { .. }
-                        | Action::TuningObserve { .. }
-                        | Action::TuningClose { .. }
-                        | Action::TuningApply { .. }
-                )
-            }) {
-                self.pending = None;
-            }
-            self.rows.clear();
-            self.tab = c as usize - '1' as usize;
-            self.selected = 0;
-            self.scroll = 0;
-            self.details.clear();
-            if self.tab == 4 {
-                self.selected = self
-                    .view
-                    .as_ref()
-                    .and_then(|v| v.fields.iter().position(|f| f.path == "memory.enabled"))
-                    .unwrap_or(0);
-            }
-            if self.tab == 5 {
-                self.rows = self
-                    .overview
-                    .snapshot
-                    .as_ref()
-                    .and_then(|v| v["tasks"].as_array().cloned())
-                    .unwrap_or_default();
-                self.selected = self
-                    .rows
-                    .iter()
-                    .position(|v| v["task_id"].as_str() == self.overview.selected_task.as_deref())
-                    .unwrap_or(0);
-            }
-            self.refresh(root)?;
             return Ok(());
         }
         if self.overview_key(root, key)? {
@@ -274,7 +298,7 @@ impl Panel {
         }
         let previous_selection = self.selected;
         match key {
-            KeyCode::Esc|KeyCode::Char('o')=>{if self.view.as_ref().is_some_and(|v|self.inherit||serde_json::to_value(&v.policy).ok().as_ref()!=Some(&self.draft)){self.message="Unsaved policy draft. Use 5 → x to discard, or p then s to apply.".into();}else{self.open=false;}},
+            KeyCode::Esc|KeyCode::Char('o')=>{if self.dirty(){self.message="Unsaved policy draft. Open Configure → O2 → Settings. Press x to discard or p then s to save.".into();}else{self.open=false;}},
             KeyCode::Char('r')=>self.refresh(root)?,KeyCode::Up=>self.selected=self.selected.saturating_sub(1),KeyCode::Down=>self.selected=(self.selected+1).min(self.rows.len().saturating_sub(1)),KeyCode::PageDown=>self.scroll=self.scroll.saturating_add(10),KeyCode::PageUp=>self.scroll=self.scroll.saturating_sub(10),
             KeyCode::Enter=>{let mut row=self.selected()?.clone();if self.tab==0 && !self.conflicts {row=execute(root,Action::MemoryGet{id:row["memory"]["id"].as_str().unwrap_or_default().into(),access:serde_json::from_value(self.access.clone()).map_err(|e|MaccError::Validation(e.to_string()))?})?;self.rows[self.selected]=row.clone();}self.result(row);},
             KeyCode::Char('d') if self.tab==2=>{let data=execute(root,Action::CompactionState)?;self.result(data);},

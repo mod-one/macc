@@ -1,22 +1,43 @@
 //! Contextual commands are shared by the action picker and help.
 use super::*;
-use crate::workspace_ui::Command;
+use crate::command_catalog::Command;
 impl Panel {
-    pub(crate) fn settings_open(&self) -> bool {
+    pub(crate) fn dirty(&self) -> bool {
+        self.policy_change().is_some()
+    }
+    pub(crate) fn policy_change(&self) -> Option<(Value, &Value, bool)> {
+        let old = serde_json::to_value(&self.view.as_ref()?.policy).ok()?;
+        (self.inherit || old != self.draft).then_some((old, &self.draft, self.inherit))
+    }
+
+    pub(crate) fn focus_policy_field(&mut self, path: &str) {
+        if let Some(index) = self
+            .view
+            .as_ref()
+            .and_then(|v| v.fields.iter().position(|f| f.path == path))
+        {
+            self.selected = index;
+            if let Some(group) = self.selected_group() {
+                self.folded.remove(&group);
+            }
+        }
+    }
+    pub(crate) fn is_boolean_setting(&self) -> bool {
         self.tab == 4
+            && self
+                .view
+                .as_ref()
+                .and_then(|v| v.fields.get(self.selected))
+                .is_some_and(|f| f.kind == "bool")
+    }
+    pub(crate) fn configure_section(&self) -> bool {
+        matches!(self.tab, 2..=4)
     }
 
     pub(crate) fn has_horizontal_controls(&self) -> bool {
-        matches!(self.tab, 4 | 6)
+        self.tab == 6 || self.tab == 4 && self.selected_group().is_some()
     }
 
-    pub fn view_is_missing(&self) -> bool {
-        self.view.is_none()
-    }
-    pub fn dashboard(&mut self) {
-        self.tab = 5;
-        self.selected = 0;
-    }
     pub fn input_active(&self) -> bool {
         self.form.is_some()
     }
@@ -34,28 +55,34 @@ impl Panel {
     pub fn commands(&self) -> Vec<Command> {
         let ready = self.view.as_ref().is_some_and(|v| v.ready);
         let selected = !self.rows.is_empty();
-        let mut commands = vec![
-            Command::new(
-                '5',
-                "Configure O2 features",
-                "Edit grouped policies; preview and save the exact configuration explicitly.",
-            ),
-            Command::new(
-                '6',
-                "Open task overview",
-                "Inspect observed session, checkpoint and memory evidence per task.",
-            ),
-            Command::new(
-                'J',
-                "Open sessions & storage setup",
-                "Prepare SQLite migration in Sessions if the project still uses JSON.",
-            ),
-            Command::new(
-                'r',
-                "Refresh this section",
-                "Refresh the current scope while retaining unsaved settings.",
-            ),
-        ];
+        let mut commands = vec![Command::new(
+            'r',
+            "Refresh this section",
+            "Refresh the current scope while retaining unsaved settings.",
+        )];
+        if self.tab == 4 {
+            commands.push(Command::new(
+                '[',
+                "Previous policy category",
+                "Memory, context, compaction or code intelligence.",
+            ));
+            commands.push(Command::new(
+                ']',
+                "Next policy category",
+                "Memory, context, compaction or code intelligence.",
+            ));
+        }
+        if self.is_boolean_setting()
+            && !self
+                .selected_group()
+                .is_some_and(|g| self.folded.contains(&g))
+        {
+            commands.push(Command::new(
+                ' ',
+                "Toggle setting",
+                "Change the draft. Preview and save to persist.",
+            ));
+        }
         let mut add =
             |key, label, hint, enabled| commands.push(Command::new(key, label, hint).when(enabled));
         match self.tab {
@@ -246,19 +273,19 @@ impl Panel {
                 );
                 add(
                     'p',
-                    "Preview settings draft",
+                    "Preview",
                     "Validate the complete current draft without saving.",
                     true,
                 );
                 add(
                     's',
-                    "Save previewed settings",
+                    "Save",
                     "Requires a successful preview of the exact current revision.",
                     self.preview,
                 );
                 add(
                     'x',
-                    "Discard settings draft",
+                    "Discard",
                     "Reload saved policy values without changing active tasks.",
                     true,
                 );

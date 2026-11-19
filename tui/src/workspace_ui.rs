@@ -1,5 +1,4 @@
 //! Presentation primitives for interactive administration; never execute domain actions.
-use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -8,60 +7,45 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value;
-#[derive(Clone)]
-pub(crate) struct Command {
-    pub key: KeyCode,
-    pub shortcut: &'static str,
-    pub label: &'static str,
-    pub hint: &'static str,
-    pub enabled: bool,
-}
-impl Command {
-    pub fn new(key: char, label: &'static str, hint: &'static str) -> Self {
-        Self {
-            key: KeyCode::Char(key),
-            shortcut: "",
-            label,
-            hint,
-            enabled: true,
-        }
-    }
-    pub fn when(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-}
-pub(crate) fn tabs(f: &mut Frame, area: Rect, labels: &[&str], selected: usize) {
+pub(crate) fn tab_line(
+    f: &mut Frame,
+    area: Rect,
+    labels: &[&str],
+    selected: usize,
+    accent: ratatui::style::Color,
+) {
     let theme = crate::ui::theme();
-    let spans: Vec<_> = labels
+    let mut spans: Vec<_> = labels
         .iter()
         .enumerate()
-        .flat_map(|(i, label)| {
-            [
-                Span::styled(
-                    format!("{}:{} ", i + 1, label),
-                    if i == selected {
-                        Style::default()
-                            .fg(theme.accent)
-                            .bg(theme.highlight_bg)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.muted)
-                    },
-                ),
-                Span::raw(""),
-            ]
+        .map(|(i, label)| {
+            Span::styled(
+                format!("{} {}  ", i + 1, label),
+                if i == selected {
+                    Style::default()
+                        .fg(accent)
+                        .add_modifier(Modifier::UNDERLINED)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.muted)
+                },
+            )
         })
         .collect();
-    f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .wrap(Wrap { trim: false })
-            .block(crate::ui::panel("Sections — number or Tab / Shift+Tab")),
-        area,
-    );
+    // The tab strip has a single content row. Keep the active tab in view
+    // even when the terminal cannot fit all preceding labels.
+    let visible = usize::from(area.width);
+    let mut first = selected.min(spans.len().saturating_sub(1));
+    let mut used = spans.get(first).map_or(0, Span::width);
+    while first > 0 && used + spans[first - 1].width() <= visible {
+        first -= 1;
+        used += spans[first].width();
+    }
+    spans.drain(..first);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 pub(crate) fn columns(area: Rect) -> (Rect, Rect) {
-    let parts = if area.width >= 76 || area.height < 14 {
+    let parts = if area.width >= 72 {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
@@ -80,40 +64,107 @@ pub(crate) fn table(
     headers: &[&str],
     rows: Vec<Vec<String>>,
     selected: Option<usize>,
+    mode: crate::navigation::Mode,
 ) {
     let theme = crate::ui::theme();
-    let weights: Vec<u16> = match headers.len() {
-        2 => vec![65, 35],
-        3 => vec![55, 25, 20],
-        4 => vec![40, 20, 20, 20],
-        5 => vec![30, 18, 22, 20, 10],
-        n => vec![(100 / n.max(1)) as u16; n],
-    };
-    let widths: Vec<_> = weights.iter().map(|w| Constraint::Percentage(*w)).collect();
+    let widths = measured_widths(
+        headers,
+        rows.iter().map(Vec::as_slice),
+        area.width.saturating_sub(4),
+    );
     let mut state = TableState::default().with_selected(selected);
     f.render_stateful_widget(
         Table::new(
-            rows.into_iter()
-                .map(|r| Row::new(r.into_iter().map(Cell::from))),
-            widths,
+            rows.into_iter().map(|r| {
+                Row::new(r.into_iter().map(|text| {
+                    let style = theme
+                        .glyph_color(&text)
+                        .map(|c| Style::default().fg(c))
+                        .unwrap_or_default();
+                    Cell::from(text).style(style)
+                }))
+            }),
+            widths.into_iter().map(Constraint::Length),
         )
         .header(
             Row::new(headers.iter().copied()).style(
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.mode_accent(mode))
                     .add_modifier(Modifier::BOLD),
             ),
         )
-        .block(crate::ui::panel(title))
+        .block(crate::ui::focus_panel(title, mode))
         .highlight_symbol("› ")
-        .highlight_style(Style::default().bg(theme.highlight_bg)),
+        .highlight_style(Style::default().bg(theme.selection(mode))),
         area,
         &mut state,
     );
 }
+/// Allocate cells by displayed width. Short status columns stop growing as
+/// soon as their contents fit, leaving the remaining cells for long subjects.
+pub(crate) fn measured_widths<'a>(
+    headers: &[&str],
+    rows: impl Iterator<Item = &'a [String]> + Clone,
+    width: u16,
+) -> Vec<u16> {
+    let available = usize::from(width).saturating_sub(headers.len().saturating_sub(1));
+    let measure = |s: &str| Span::raw(s).width();
+    let target: Vec<_> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            rows.clone()
+                .filter_map(|r| r.get(i))
+                .map(|c| measure(c))
+                .max()
+                .unwrap_or(0)
+                .max(measure(h))
+                .max(1)
+        })
+        .collect();
+    let mut cells = vec![0usize; headers.len()];
+    // Round-robin allocation avoids starving the final columns on small screens.
+    let mut remaining = available;
+    for limits in [
+        headers
+            .iter()
+            .map(|s| measure(s).max(1))
+            .collect::<Vec<_>>(),
+        target,
+    ] {
+        while remaining > 0 {
+            let before = remaining;
+            for (used, max) in cells.iter_mut().zip(&limits) {
+                if remaining > 0 && *used < *max {
+                    *used += 1;
+                    remaining -= 1;
+                }
+            }
+            if remaining == before {
+                break;
+            }
+        }
+    }
+    cells.into_iter().map(|w| w as u16).collect()
+}
+pub(crate) fn switch(enabled: bool) -> &'static str {
+    if enabled {
+        "● On"
+    } else {
+        "○ Off"
+    }
+}
+pub(crate) fn display_setting(raw: String) -> String {
+    match raw.as_str() {
+        "" => "—".into(),
+        "true" => switch(true).into(),
+        "false" => switch(false).into(),
+        _ => raw,
+    }
+}
 pub(crate) fn value(v: &Value) -> String {
     match v {
-        Value::Bool(v) => if *v { "On" } else { "Off" }.into(),
+        Value::Bool(v) => switch(*v).into(),
         Value::Null => "—".into(),
         Value::String(v) => v.clone(),
         _ => v.to_string(),
@@ -172,7 +223,7 @@ pub(crate) fn evidence(raw: &str, show_raw: bool) -> String {
         vec![prefix.to_string(), String::new()]
     };
     visit(&v, 0, &mut lines);
-    lines.push("\nF4: inspect complete raw evidence".into());
+    lines.push("\n[Ctrl+R] inspect complete raw evidence".into());
     lines.join("\n")
 }
 pub(crate) fn details(f: &mut Frame, area: Rect, title: &str, text: String, scroll: u16) {

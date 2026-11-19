@@ -5,7 +5,7 @@ fn semantic_policy_opt_in_requires_a_reviewed_preview() {
     let r = t.path();
     let mut panel = Panel::default();
     panel.refresh(r).unwrap();
-    panel.key(r, KeyCode::Char('5')).unwrap();
+    panel.open_mode(r, true).unwrap();
     panel.selected = panel
         .view
         .as_ref()

@@ -1,6 +1,7 @@
+use crate::command_catalog::keys as k;
 use crossterm::event::KeyCode;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
@@ -28,6 +29,9 @@ pub enum Outcome {
 }
 
 impl Editor {
+    pub(crate) fn is_editing(&self) -> bool {
+        self.input.is_some()
+    }
     pub fn new(root: PathBuf, files: Vec<String>) -> Self {
         let message = match macc_core::prd_queue::load(&root) {
             Ok(progress) if !progress.entries.is_empty() => format!(
@@ -48,26 +52,26 @@ impl Editor {
         }
     }
 
-    pub(crate) fn command_bindings(&self) -> Vec<(&'static str, &'static str)> {
+    pub(crate) fn command_bindings(&self) -> Vec<(k::Keys, &'static str)> {
         if self.confirm_reset {
-            return vec![("y", "Confirm reset"), ("Esc", "Cancel reset")];
+            return vec![(k::ch('y'), "Confirm reset"), (k::ESC, "Cancel reset")];
         }
         if self.input.is_some() {
             return vec![
-                ("Enter", "Import"),
-                ("Backspace", "Delete character"),
-                ("Esc", "Cancel input"),
+                (k::ENTER, "Import"),
+                (k::BACKSPACE, "Delete character"),
+                (k::ESC, "Cancel input"),
             ];
         }
         vec![
-            ("↑↓", "Select / move PRD"),
-            ("Space", "Grab / release"),
-            ("a", "Import PRD…"),
-            ("Delete", "Remove PRD"),
-            ("R", "Reset progress…"),
-            ("PgUp/PgDn", "Scroll import report"),
-            ("Enter", "Save queue"),
-            ("Esc", "Cancel"),
+            (k::VERTICAL, "Select / move PRD"),
+            (k::SPACE, "Grab / release"),
+            (k::ch('a'), "Import PRD…"),
+            (k::DELETE, "Remove PRD"),
+            (k::ch('R'), "Reset progress…"),
+            (k::PAGES, "Scroll import report"),
+            (k::ENTER, "Save queue"),
+            (k::ESC, "Cancel"),
         ]
     }
 
@@ -200,7 +204,7 @@ impl Editor {
             lines.push(if index == self.selected {
                 line.style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(crate::ui::theme().accent)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
@@ -224,7 +228,7 @@ impl Editor {
                 )
                 .style(
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(crate::ui::theme().warn)
                         .add_modifier(Modifier::BOLD),
                 ),
             );
@@ -240,9 +244,9 @@ impl Editor {
         if report_height > 0 {
             let paragraph = Paragraph::new(self.message.as_str())
                 .style(Style::default().fg(if self.message.contains("Warning:") {
-                    Color::Yellow
+                    crate::ui::theme().warn
                 } else {
-                    Color::Cyan
+                    crate::ui::theme().accent
                 }))
                 .wrap(Wrap { trim: false });
             let max_scroll = paragraph

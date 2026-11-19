@@ -46,7 +46,7 @@ client must reload and review again; MACC does not silently overwrite another ed
 ## Clients
 
 - CLI: `macc hooks list` or `macc hooks list --json`.
-- TUI: `[H] Hooks` from Home, or search Hooks in `[F2] Commands`.
+- TUI: `[P] Hooks` in Configure, or search Hooks in `[:] Commands`.
   Select a row for integration, owner and source details. Space reviews activation,
   `d` restores defaults, PgUp/PgDn scroll details or a review, `i` imports a local manifest, Delete removes an external
   snapshot, `/` filters and `r` reloads. Enter confirms a reviewed change.

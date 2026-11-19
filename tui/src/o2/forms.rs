@@ -76,7 +76,7 @@ impl Panel {
             "semantic_search" => {self.query=v[0].clone();self.conflicts=false;Action::MemorySearch {search:serde_json::from_value(json!({"query":self.query,"access":self.access,"include_inactive":false})).map_err(|e|MaccError::Validation(e.to_string()))?}},
             "find_field" => {
                 let needle = v[0].to_ascii_lowercase();
-                if let Some((index, _)) = self
+                if let Some((index, field)) = self
                     .view
                     .as_ref()
                     .unwrap()
@@ -90,7 +90,9 @@ impl Panel {
                     })
                 {
                     self.selected = index;
-                    self.scroll = index.saturating_sub(3) as u16;
+                    if let Some(g)=settings::MemoryGroup::from_path(&field.path) { self.folded.remove(&g); }
+                    self.details.clear();
+                    self.scroll = 0;
                 } else {
                     self.message = "No matching policy field".into();
                 }

@@ -82,7 +82,7 @@ selections:
   - macc-reviewer
 automation:
   coordinator:
-    coordinator_tool: agy
+    coordinator_tool: claude
     reference_branch: adt/web
     tool_priority:
     - agy

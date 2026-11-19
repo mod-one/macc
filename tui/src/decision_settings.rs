@@ -38,9 +38,13 @@ pub(super) const FIELDS: &[Field] = &[
  field!("Governance rules (JSON)","governance_rules","json",&[],"Advanced rule array: scope, minimum risk, standing directions and required forms. Existing rules are preserved until explicitly edited."),
  field!("Approval manifests (JSON)","approval_manifests","json",&[],"Object mapping gate IDs to explicit repository-relative source files."),
  field!("Operation adapters (JSON)","operation_adapters","json",&[],"Trusted native operation adapters. Configure explicit executables, targets and bounded execution; a reservation alone is not completion."),
- field!("Approver attestation (advanced)","proof","proof",&[],"Optional isolated attestation JSON for this exact policy change; never saved in macc.yaml. F12 exports its challenge. A configured broker can also approve the save through Decisions > Actions > Independent approval requests."),
+ field!("Approver attestation (advanced)","proof","proof",&[],"Optional isolated attestation JSON for this exact policy change; never saved in macc.yaml. a exports its challenge. A configured broker can also approve the save through Decisions > Actions > Independent approval requests."),
 ];
 impl AppState {
+    pub(crate) fn decision_field_index(key: &str) -> Option<usize> {
+        FIELDS.iter().position(|field| field.key == key)
+    }
+
     pub(super) fn decision_policy(&self) -> dm::Policy {
         policy_from(self.working_copy.as_ref())
     }
@@ -81,7 +85,7 @@ impl AppState {
     }
     pub fn decision_field_info(&self, index: usize) -> String {
         let field = &FIELDS[index];
-        let mut text=format!("{}\n\n{}\n\nValue: {}\n\nEnter/Space: toggle, cycle or edit. Left/Right: adjust. e: exact entry.\ns: save configuration. F12: isolated approval challenge.\nQuestions, answers and history remain in the Decisions center (D).",field.label,field.help,self.decision_field_value(index));
+        let mut text=format!("{}\n\n{}\n\nValue: {}\n\nEnter/Space: toggle, cycle or edit. Left/Right: adjust. e: exact entry.\ns: save configuration. a: isolated approval challenge.\nQuestions, answers and history remain in the Decisions center (D).",field.label,field.help,self.decision_field_value(index));
         if let Err(e) = self.decision_policy().validate() {
             text.push_str(&format!("\n\nDraft validation: {e}"));
         }

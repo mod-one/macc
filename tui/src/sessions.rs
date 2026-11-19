@@ -83,6 +83,9 @@ impl SessionsScreen {
         }
     }
     fn path(&self) -> Option<String> {
+        if self.tab != 0 {
+            return None;
+        }
         self.view
             .as_ref()?
             .fields
@@ -165,23 +168,6 @@ impl SessionsScreen {
             return Ok(false);
         }
         match key {
-            KeyCode::F(4) => {
-                self.raw_details = !self.raw_details;
-            }
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2') => {
-                self.tab = match key {
-                    KeyCode::Char('1') => 0,
-                    KeyCode::Char('2') => 1,
-                    _ => 1 - self.tab,
-                };
-                self.selected = if self.tab == 0 {
-                    0
-                } else {
-                    self.view.as_ref().map(|v| v.fields.len()).unwrap_or(0)
-                };
-                self.details.clear();
-                self.scroll = 0;
-            }
             KeyCode::Esc | KeyCode::Char('q') => {
                 if self.plan.is_some() || self.closing.is_some() {
                     self.plan = None;
@@ -204,8 +190,7 @@ impl SessionsScreen {
                 return Ok(true);
             }
             KeyCode::Char('o') => {
-                self.o2.refresh(root)?;
-                self.o2.open = true;
+                self.open_o2(root, false)?;
             }
             KeyCode::Char('t') => {
                 self.usage.refresh(root)?;
@@ -235,7 +220,9 @@ impl SessionsScreen {
                         }
                     })
                     .unwrap_or(0);
-                self.selected = (self.selected + 1).min(n.saturating_sub(1));
+                if n > 0 && self.selected < n {
+                    self.selected = (self.selected + 1).min(n - 1);
+                }
             }
             KeyCode::Enter => {
                 if let Some(path) = self.path() {

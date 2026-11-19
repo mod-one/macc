@@ -83,7 +83,7 @@ fn declining_an_intervention_never_claims_it_was_performed() {
     assert!(!fields.contains_key("result"));
 }
 #[test]
-fn actual_app_routes_modal_keys_and_draws_one_footer_without_function_keys() {
+fn actual_app_routes_modal_keys_and_keeps_one_shared_command_footer() {
     let (_temp, mut state) = crate::workspace_tests::fixture();
     state.decision_center = intervention();
     for (width, height) in [(40, 12), (80, 24), (110, 36)] {
@@ -94,11 +94,8 @@ fn actual_app_routes_modal_keys_and_draws_one_footer_without_function_keys() {
             rendered.contains("1 yes") && rendered.contains("2 no"),
             "choice values must stay visible on small terminals: {rendered}"
         );
-        assert!(!rendered.contains("[F"), "{rendered}");
-        assert!(
-            !rendered.contains("Commands ·"),
-            "duplicate outer command bar: {rendered}"
-        );
+        assert!(rendered.contains("[Ctrl+P] Commands"));
+        assert_eq!(rendered.matches("Commands ·").count(), 1);
         crate::workspace_tests::export_buffer("intervention-form", &state, width, height);
     }
     crate::handle_key(&mut state, KeyCode::Tab);
