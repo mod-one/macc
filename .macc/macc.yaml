@@ -1,0 +1,137 @@
+version: v1
+tools:
+  enabled:
+  - claude
+  - codex
+  config:
+    agy:
+      context:
+        protect: true
+      model: Gemini 3.5 Flash (Medium)
+      model_tiers:
+        heavy:
+          model: Gemini 3.5 Flash (High)
+        mini:
+          model: Gemini 3.5 Flash (Low)
+        standard:
+          model: Gemini 3.5 Flash (Medium)
+      sandbox: true
+    claude:
+      context:
+        protect: true
+      effortLevel: Medium
+      language: English
+      model: sonnet
+      model_tiers:
+        heavy:
+          effort: High
+          model: opus
+        mini:
+          effort: Medium
+          model: haiku
+        standard:
+          effort: Medium
+          model: sonnet
+      permissions: safe
+    codex:
+      approval_policy: never
+      context:
+        protect: true
+      features:
+        shell_snapshot: false
+        undo: true
+      model: gpt-5.3-codex
+      model_reasoning_effort: medium
+      model_tiers:
+        heavy:
+          effort: high
+          model: gpt-5.5
+        mini:
+          effort: low
+          model: gpt-5.4
+        standard:
+          effort: medium
+          model: gpt-5.5
+      profiles:
+        deep-review:
+          approval_policy: never
+          model: gpt-5.5
+          model_reasoning_effort: medium
+      rules_enabled: true
+      sandbox_mode: workspace-write
+      skills:
+      - apple-design
+      - macc-auditor
+      - macc-performer
+      - macc-prd-planner
+      - macc-reviewer
+      - rust-async-patterns
+      - rust-cli-builder
+    gemini:
+      context:
+        protect: true
+    vibe:
+      context:
+        protect: true
+standards: {}
+selections:
+  skills:
+  - macc-auditor
+  - macc-performer
+  - macc-prd-planner
+  - macc-reviewer
+automation:
+  coordinator:
+    coordinator_tool: agy
+    reference_branch: adt/web
+    tool_priority:
+    - agy
+    max_parallel_per_tool:
+      agy: 1
+    max_dispatch: 1
+    max_parallel: 1
+    merge_ai_fix: true
+    destructive_actions: double_confirm
+    phases:
+      testing:
+        enabled: false
+        mode: disabled
+      review:
+        enabled: true
+        mode: required
+settings:
+  quiet: false
+  debug: true
+  offline: false
+mcp_templates:
+- id: brave-search
+  title: Brave Search
+  description: Search the web via the Brave Search API (placeholder only).
+  command: node
+  args:
+  - scripts/brave-search-mcp.js
+  env_placeholders:
+  - name: BRAVE_API_KEY
+    placeholder: ${BRAVE_API_KEY}
+    description: Brave Search API key placeholder; set this locally before running.
+  auth_notes: Provide ${BRAVE_API_KEY} via your environment; MACC only writes the placeholder.
+- id: github-issues
+  title: GitHub Issues
+  description: Manage GitHub issues for the current repository (placeholder auth).
+  command: python
+  args:
+  - scripts/github-issues-mcp.py
+  env_placeholders:
+  - name: GITHUB_TOKEN
+    placeholder: ${GITHUB_TOKEN}
+    description: Personal access token with repo scope; MACC keeps only the placeholder.
+  auth_notes: Set ${GITHUB_TOKEN} locally and keep the real token out of version control.
+- id: local-notes
+  title: Local Notes
+  description: Expose project notes stored in the repository without additional authentication.
+  command: bash
+  args:
+  - scripts/local-notes.sh
+  - --dir
+  - ./notes
+  auth_notes: No secrets required; reads from the checked-in notes directory.

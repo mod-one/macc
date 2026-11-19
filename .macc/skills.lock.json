@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "generated_by": "macc 0.3.0",
+  "generated_at": "",
+  "skills": [
+    {
+      "id": "apple-design",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "requested_ref": "main",
+        "resolved_ref": "64eb3deb9a5fbfa041faf783e0bc3fd635872e9c",
+        "checksum": null,
+        "subpath": "skills/apple-design",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "apple-design",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/9d78a047c123222b583b85f2e5c4f969f8af081570c7e78217670f18d6cd121f"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/apple-design/SKILL.md",
+            "dest": ".codex/skills/apple-design/SKILL.md",
+            "digest": "sha256:7fbacf928637e136da6d475358d0639667a3637ba772f03f8e815bb4c0b86946",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rust-async-patterns",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/wshobson/agents.git",
+        "requested_ref": "main",
+        "resolved_ref": "42203085cfc5736204bf0f6d436dff7e1da0bf3f",
+        "checksum": null,
+        "subpath": "plugins/systems-programming/skills/rust-async-patterns",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "rust-async-patterns",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/19cd3f978a8d738d171b0fbd39fb0615a0019a7b6e0fa721cac57455f343b89a"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "plugins/systems-programming/skills/rust-async-patterns/SKILL.md",
+            "dest": ".codex/skills/rust-async-patterns/SKILL.md",
+            "digest": "sha256:8e9a951c21bb1ee671dd2e7391b193e8e3d362b95ef29c470915837d73bf87df",
+            "owner": "macc"
+          },
+          {
+            "src": "plugins/systems-programming/skills/rust-async-patterns/references/details.md",
+            "dest": ".codex/skills/rust-async-patterns/references/details.md",
+            "digest": "sha256:cd8a987c59cf704b7a2145e0dea6891b10194e7304b894bd14a5692d9fdfa76d",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rust-cli-builder",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/davila7/claude-code-templates.git",
+        "requested_ref": "main",
+        "resolved_ref": "619db084fd2e94742710f74680db4168ca2bd470",
+        "checksum": null,
+        "subpath": "cli-tool/components/skills/development/rust-cli-builder",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "rust-cli-builder",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/aac5ed16a9861b7781edf6a7362f6890fe2f7de65c83a731785f4cc984ea1a74"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "cli-tool/components/skills/development/rust-cli-builder/SKILL.md",
+            "dest": ".codex/skills/rust-cli-builder/SKILL.md",
+            "digest": "sha256:2bf3ab3bceab7ffca09d0d2b0679d2d93dbd0445625a0ec88fe044119d86654a",
+            "owner": "macc"
+          }
+        ]
+      }
+    }
+  ]
+}
