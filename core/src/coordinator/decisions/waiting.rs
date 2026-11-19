@@ -1,6 +1,7 @@
 //! Native unresolved prerequisites; a wait is not a provider failure.
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingDecision {
     pub id: String,
@@ -15,15 +16,34 @@ pub struct PendingDecision {
     #[serde(default)]
     pub inaccessible_reason: Option<String>,
 }
-pub fn pending_for_task(
-    root: &std::path::Path,
+pub fn pending_for_task(root: &Path, task: &str) -> crate::Result<Option<PendingDecision>> {
+    find_pending(root, task, false)
+}
+
+pub(crate) fn pending_owned_intervention(
+    root: &Path,
     task: &str,
+) -> crate::Result<Option<PendingDecision>> {
+    find_pending(root, task, true)
+}
+
+fn find_pending(
+    root: &Path,
+    task: &str,
+    owned_intervention_only: bool,
 ) -> crate::Result<Option<PendingDecision>> {
     if !policy(root)?.enabled {
         return Ok(None);
     }
     let (store, plan) = active_plan(root)?;
     for d in store.applicable_decisions(&plan)? {
+        if owned_intervention_only
+            && (d.request.task_id != task
+                || !matches!(d.status.as_str(), "blocked_external" | "pending_human")
+                || d.request.intervention.is_none())
+        {
+            continue;
+        }
         if matches!(
             d.status.as_str(),
             "pending_human"
@@ -54,6 +74,36 @@ pub fn pending_for_task(
     }
     Ok(None)
 }
+/// A propagated gate must not replace a consumer's independent failure.
+pub(super) fn independent_consumer_failure(
+    task: &crate::coordinator::model::Task,
+    owner: &str,
+) -> bool {
+    if task.state != "blocked" || task.id == owner {
+        return false;
+    }
+    match task.task_runtime.last_error_code.as_deref() {
+        None | Some("E905") => false,
+        Some("E903") => {
+            task.task_runtime.last_error_origin.as_deref() == Some("precondition")
+                || crate::coordinator::phase_diagnostics::compliance_block(task).is_some()
+        }
+        Some(_) => true,
+    }
+}
+pub(super) fn clear_wait_binding(runtime: &mut crate::coordinator::model::TaskRuntime) {
+    for key in [
+        "decision_wait",
+        "decision_wait_status",
+        "decision_wait_owner",
+        "decision_wait_action",
+        "decision_wait_reason",
+        "native_context_refresh",
+    ] {
+        runtime.extra.remove(key);
+    }
+}
+
 impl PendingDecision {
     pub fn reason(&self) -> String {
         if self.status == "blocked_external" {
@@ -64,7 +114,7 @@ impl PendingDecision {
             self.id, self.status, self.question
         )
     }
-    pub fn apply(&self, runtime: &mut crate::coordinator::model::TaskRuntime) {
+    pub(super) fn record_binding(&self, runtime: &mut crate::coordinator::model::TaskRuntime) {
         runtime
             .extra
             .insert("decision_wait".into(), serde_json::json!(self.id));
@@ -76,18 +126,44 @@ impl PendingDecision {
             "decision_wait_owner".into(),
             serde_json::json!(self.owner_task_id),
         );
+        if let Some(action) = &self.action {
+            runtime
+                .extra
+                .insert("decision_wait_action".into(), serde_json::json!(action));
+        } else {
+            runtime.extra.remove("decision_wait_action");
+        }
+        runtime.extra.insert(
+            "decision_wait_reason".into(),
+            serde_json::json!(self.reason()),
+        );
+    }
+    pub fn apply(&self, runtime: &mut crate::coordinator::model::TaskRuntime) {
+        self.record_binding(runtime);
+        runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+        if self.task_id == self.owner_task_id
+            && runtime.last_error_origin.as_deref() == Some("precondition")
+            && runtime.last_error_code.as_deref() == Some("E903")
+            && (!runtime.unmet_preconditions.is_empty()
+                || !crate::coordinator::result_protocol::missing_precondition_explanation(
+                    runtime.result_explanation.as_deref(),
+                ))
+        {
+            // Preserve the performer's actual result. The durable request and action
+            // are still available for diagnostics and normal decision reconciliation.
+            return;
+        }
         runtime.set_last_error_details("E903", "decisions", self.reason());
         runtime.last_error = Some(self.reason());
         runtime.completion_kind = Some("precondition_unmet".into());
         runtime.result_explanation = Some(self.reason());
         runtime.unmet_preconditions = vec![self.reason()];
-        runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
     }
 }
 
 /// Catch requests created after the cycle's initial reconciliation.
 pub fn refresh_waits(
-    root: &std::path::Path,
+    root: &Path,
     registry: &mut crate::coordinator::model::TaskRegistry,
 ) -> crate::Result<bool> {
     let mut changed = false;
@@ -102,19 +178,16 @@ pub fn refresh_waits(
                 .and_then(serde_json::Value::as_str)
                 == Some("context_refresh")
             {
-                for key in [
-                    "decision_wait",
-                    "decision_wait_status",
-                    "decision_wait_owner",
-                    "native_context_refresh",
-                ] {
-                    changed |= task.task_runtime.extra.remove(key).is_some();
-                }
+                clear_wait_binding(&mut task.task_runtime);
+                changed = true;
             }
             continue;
         }
         if task.state == "blocked" && !task.task_runtime.extra.contains_key("decision_wait") {
             if let Some(pending) = pending_for_task(root, &task.id)? {
+                if independent_consumer_failure(task, &pending.owner_task_id) {
+                    continue;
+                }
                 pending.apply(&mut task.task_runtime);
                 changed = true;
             } else if task
@@ -134,10 +207,7 @@ pub fn refresh_waits(
 }
 
 /// Only applicable native revisions are relevant to a cached human-gate diagnosis.
-pub fn gate_revision(
-    root: &std::path::Path,
-    tasks: &[String],
-) -> crate::Result<Vec<serde_json::Value>> {
+pub fn gate_revision(root: &Path, tasks: &[String]) -> crate::Result<Vec<serde_json::Value>> {
     if !policy(root)?.enabled {
         return Ok(vec![]);
     }

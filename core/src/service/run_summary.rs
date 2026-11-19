@@ -1,4 +1,5 @@
 use crate::coordinator::model::{Task, TaskRegistry};
+use crate::coordinator::wait_attribution::DecisionWaits;
 use crate::coordinator::WorkflowState;
 use crate::coordinator_storage::{CoordinatorRun, SqliteStorage};
 use crate::Result;
@@ -52,7 +53,10 @@ pub fn load_latest_run_summary(
     let Some(latest) = runs.first() else {
         return Ok(None);
     };
-    let blocked_task = blocked_root_for_run(registry, latest);
+    let waits = DecisionWaits::new(registry);
+    let reported =
+        blocked_root_for_run(registry, latest, &waits).map(|task| waits.reported_task(task));
+    let blocked_task = reported.as_deref();
     let dependent_task_ids = blocked_task
         .map(|task| dependent_tasks(registry, &task.id))
         .unwrap_or_default();
@@ -78,7 +82,9 @@ pub fn load_latest_run_summary(
     let task_id = blocked_task.map(|task| task.id.clone());
     let severity = severity_for(latest, blocked_task.is_some(), registry);
     let headline = headline_for(latest, blocked_task, dependent_task_ids.len());
-    let next_action = next_action_for(latest, blocked_task, error_code.as_deref());
+    let next_action = blocked_task
+        .and_then(|task| waits.next_action(task))
+        .unwrap_or_else(|| next_action_for(latest, blocked_task, error_code.as_deref()));
     let signature = outcome_signature(latest);
     let repeated_count = runs
         .iter()
@@ -132,19 +138,27 @@ fn out_of_scope_fix_paths(task: &Task) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn blocked_root_for_run<'a>(registry: &'a TaskRegistry, run: &CoordinatorRun) -> Option<&'a Task> {
-    let blocked = |task: &&Task| task.workflow_state() == Some(WorkflowState::Blocked);
-    let current_run_root = registry
+fn blocked_root_for_run<'a>(
+    registry: &'a TaskRegistry,
+    run: &CoordinatorRun,
+    waits: &DecisionWaits<'a>,
+) -> Option<&'a Task> {
+    let terminal = matches!(run.status.as_str(), "blocked" | "failed" | "crashed");
+    registry
         .tasks
         .iter()
-        .filter(blocked)
-        .find(|task| task.task_runtime.run_id.as_deref() == Some(run.run_id.as_str()));
-    if current_run_root.is_some() {
-        return current_run_root;
-    }
-    matches!(run.status.as_str(), "blocked" | "failed" | "crashed")
-        .then(|| registry.tasks.iter().find(blocked))
-        .flatten()
+        .filter(|task| {
+            task.workflow_state() == Some(WorkflowState::Blocked)
+                || terminal && waits.is_owner(task)
+        })
+        .filter(|task| terminal || task.task_runtime.run_id.as_deref() == Some(&run.run_id))
+        .min_by_key(|task| {
+            (
+                waits.is_consumer(task)
+                    || task.task_runtime.last_error_code.as_deref() == Some("E905"),
+                task.task_runtime.run_id.as_deref() != Some(&run.run_id),
+            )
+        })
 }
 
 fn task_error_message(task: &Task) -> Option<String> {

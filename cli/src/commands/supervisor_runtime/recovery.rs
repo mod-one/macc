@@ -414,7 +414,7 @@ async fn restart(
 /// A crashed engine can leave performers alive. Signal only their recorded groups.
 async fn stop_orphan_jobs(incident: &macc_core::supervisor::incident::Incident) -> Result<()> {
     #[cfg(unix)]
-    for task in &incident.tasks {
+    for task in incident.tasks.iter().filter(|task| task.state != "todo") {
         if let Some(pid) = task.task_runtime.pid {
             if !macc_core::coordinator::helpers::is_pid_running(pid) {
                 continue;

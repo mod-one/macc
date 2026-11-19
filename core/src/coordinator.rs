@@ -39,6 +39,7 @@ pub mod state_runtime;
 pub mod task_selector;
 pub mod types;
 pub mod view_model;
+pub(crate) mod wait_attribution;
 pub mod worktree_recovery;
 pub mod worktree_roles;
 

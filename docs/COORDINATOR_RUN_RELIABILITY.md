@@ -230,3 +230,17 @@ current policy. The ledger evaluator verifies the same authority rather than
 alternating between delegated approval and zero human quorum. Revocation,
 subject/policy changes and a live verified human rejection or changes-request
 invalidate delegation. Delegation never creates human votes.
+
+### External decision prerequisites
+
+When a performer stops with `precondition_unmet`, the final response can include its
+decision acknowledgement between the explanation, named prerequisites and result.
+MACC keeps the task evidence together and checks the acknowledgement separately.
+If the performer omits both details, the coordinator can use an unresolved external
+intervention owned by that task to explain the stop.
+
+The run summary and supervisor identify the task that owns the decision and the
+action in Decisions. A dependent task waiting on the same request remains affected
+even if the owner finished its invocation or returned to the queue. Independent
+failures retain their own causes. Providing native test evidence and resolving the
+decision are still required before delivery can proceed.

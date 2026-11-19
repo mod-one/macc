@@ -151,38 +151,44 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             }
         }
         task.task_runtime.extra.remove("decision_planning");
+        // A running consumer can acquire its own error after the decision
+        // was projected. Resolution of the old wait must not retry this error.
+        if task
+            .task_runtime
+            .extra
+            .get("decision_wait_owner")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|owner| super::waiting::independent_consumer_failure(task, owner))
+        {
+            super::waiting::clear_wait_binding(&mut task.task_runtime);
+        }
         if let Some(decision) = pending {
+            if super::waiting::independent_consumer_failure(task, &decision.request.task_id) {
+                continue;
+            }
             task.task_runtime.extra.remove("native_context_refresh");
-            task.task_runtime
-                .extra
-                .insert("decision_wait_status".into(), json!(decision.status));
-            task.task_runtime
-                .extra
-                .insert("decision_wait".into(), json!(decision.id));
-            task.task_runtime.extra.insert(
-                "decision_wait_owner".into(),
-                json!(decision.request.task_id),
-            );
-            if !active {
+            let pending = super::waiting::PendingDecision {
+                id: decision.id.clone(),
+                version: decision.version,
+                status: decision.status.clone(),
+                task_id: task.id.clone(),
+                owner_task_id: decision.request.task_id.clone(),
+                question: decision.request.question.clone(),
+                action: decision
+                    .request
+                    .intervention
+                    .as_ref()
+                    .map(|i| i.action.clone()),
+                inaccessible_reason: decision
+                    .request
+                    .intervention
+                    .as_ref()
+                    .map(|i| i.inaccessible_reason.clone()),
+            };
+            if active {
+                pending.record_binding(&mut task.task_runtime);
+            } else {
                 task.set_workflow_state(WorkflowState::Blocked);
-                let pending = super::waiting::PendingDecision {
-                    id: decision.id.clone(),
-                    version: decision.version,
-                    status: decision.status.clone(),
-                    task_id: task.id.clone(),
-                    owner_task_id: decision.request.task_id.clone(),
-                    question: decision.request.question.clone(),
-                    action: decision
-                        .request
-                        .intervention
-                        .as_ref()
-                        .map(|i| i.action.clone()),
-                    inaccessible_reason: decision
-                        .request
-                        .intervention
-                        .as_ref()
-                        .map(|i| i.inaccessible_reason.clone()),
-                };
                 pending.apply(&mut task.task_runtime);
             }
             continue;
@@ -246,10 +252,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             task.task_runtime.pid = None;
             task.task_runtime.clear_last_error_details();
             task.task_runtime.last_error = None;
-            task.task_runtime.extra.remove("decision_wait");
-            task.task_runtime.extra.remove("decision_wait_status");
-            task.task_runtime.extra.remove("decision_wait_owner");
-            task.task_runtime.extra.remove("native_context_refresh");
+            super::waiting::clear_wait_binding(&mut task.task_runtime);
         }
         if p.human_question_min_risk != Consultation::NeverAsk {
             task.task_runtime.extra.remove("delegated_gate_resolution");

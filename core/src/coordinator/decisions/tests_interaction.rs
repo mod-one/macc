@@ -53,7 +53,7 @@ fn performer_can_request_essential_physical_action_and_receives_exact_human_resu
 }
 #[test]
 fn never_ask_does_not_fabricate_a_physical_action_and_can_return_to_consultation() {
-    let (_tmp, mut s, plan, _, mut p) = fixture();
+    let (tmp, mut s, plan, _, mut p) = fixture();
     p.human_question_min_risk = Consultation::NeverAsk;
     let d = s
         .submit(
@@ -65,6 +65,14 @@ fn never_ask_does_not_fabricate_a_physical_action_and_can_return_to_consultation
         )
         .unwrap();
     assert_eq!(d.status, "blocked_external");
+    let fallback = pending_owned_intervention(tmp.path(), "A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(fallback.id, d.id);
+    assert!(fallback.reason().contains("Connect the phone"));
+    assert!(pending_owned_intervention(tmp.path(), "B")
+        .unwrap()
+        .is_none());
     assert!(s.resolve_delegated(&d.id, &p).is_err());
     s.reevaluate_pending(&plan, &p).unwrap();
     assert_eq!(s.decision(&d.id).unwrap().status, "blocked_external");
@@ -74,6 +82,80 @@ fn never_ask_does_not_fabricate_a_physical_action_and_can_return_to_consultation
     assert_eq!(s.decision(&d.id).unwrap().status, "pending_human");
     s.verify().unwrap();
 }
+#[test]
+fn propagated_intervention_preserves_worker_evidence_and_independent_failure() {
+    let (tmp, mut store, plan, mut registry, mut policy) = fixture();
+    policy.human_question_min_risk = Consultation::NeverAsk;
+    let decision = store
+        .submit(
+            &plan,
+            physical_request("external"),
+            "agent:A",
+            "agent",
+            &policy,
+        )
+        .unwrap();
+    let performer = registry.find_task_mut("A").unwrap();
+    performer.state = "blocked".into();
+    performer.task_runtime.set_last_error_details(
+        "E903",
+        "precondition",
+        "Native verification unavailable",
+    );
+    performer.task_runtime.result_explanation = Some("The portable checks passed".into());
+    performer.task_runtime.unmet_preconditions = vec!["Native device".into()];
+    let other = registry.find_task_mut("B").unwrap();
+    other.state = "blocked".into();
+    // The binding was projected while B was running, before its own failure.
+    other
+        .task_runtime
+        .extra
+        .insert("decision_wait_owner".into(), json!("A"));
+    other
+        .task_runtime
+        .extra
+        .insert("decision_wait".into(), json!(decision.id));
+    other
+        .task_runtime
+        .set_last_error_details("E103", "output_protocol", "Missing final marker");
+    for _ in 0..2 {
+        refresh_waits(tmp.path(), &mut registry).unwrap();
+        sync(tmp.path(), &tmp.path().join("prd.json"), &mut registry).unwrap();
+        let owner = &registry.find_task("A").unwrap().task_runtime;
+        assert_eq!(
+            owner.result_explanation.as_deref(),
+            Some("The portable checks passed")
+        );
+        assert_eq!(owner.unmet_preconditions, ["Native device"]);
+        assert_eq!(owner.extra["decision_wait"], decision.id);
+        let consumer = &registry.find_task("B").unwrap().task_runtime;
+        assert!(!consumer.extra.contains_key("decision_wait"));
+        assert_eq!(consumer.last_error_code.as_deref(), Some("E103"));
+    }
+    policy.human_question_min_risk = Consultation::Critical;
+    store.reevaluate_pending(&plan, &policy).unwrap();
+    let pending = store.decision(&decision.id).unwrap();
+    let mut answer = AnswerInput {
+        text: "Device connected".into(),
+        ..Default::default()
+    };
+    answer.fields.insert("performed".into(), "yes".into());
+    answer
+        .fields
+        .insert("result".into(), "ABC listed as device".into());
+    let resolved = store
+        .answer_details(&pending.id, pending.version, &answer, "Human", &policy)
+        .unwrap();
+    assert_eq!(resolved.status, "resolved");
+    sync(tmp.path(), &tmp.path().join("prd.json"), &mut registry).unwrap();
+    let consumer = registry.find_task("B").unwrap();
+    assert_eq!(consumer.state, "blocked");
+    assert_eq!(
+        consumer.task_runtime.last_error_code.as_deref(),
+        Some("E103")
+    );
+}
+
 #[test]
 fn human_rejection_of_unavailable_intervention_never_becomes_a_result() {
     let (_tmp, mut s, plan, _, p) = fixture();

@@ -115,3 +115,21 @@ fn a_later_assistant_response_without_result_cannot_reuse_an_older_success() {
     assert!(completion_projection("codex\nMACC_TASK_RESULT: success_with_changes\nexec\ncommand output\ncodex\nIncomplete final response without a marker\n").is_empty());
     assert!(completion_projection("MACC_TASK_RESULT: success_with_changes\nuser\nMACC_PROMPT_BEGIN: actual new invocation\nMACC_PROMPT_END: actual new invocation\ncodex\nNo result\n").is_empty());
 }
+
+#[test]
+fn decision_ack_preserves_task_fields_only_in_the_current_result_block() {
+    let fields = "MACC_TASK_RESULT_EXP: native installer requires a desktop\n\nMACC_TASK_PRECONDITION: interactive desktop";
+    let ack = format!("MACC_DECISION_ACK: sha256:{}", "a".repeat(64));
+    let result = "MACC_TASK_RESULT: precondition_unmet";
+    let raw = format!("assistant\n{fields}\n\n{ack}  \n{result}");
+    assert_eq!(
+        completion_projection(&raw),
+        format!("{}\n{result}", fields.replace("\n\n", "\n"))
+    );
+    for boundary in ["assistant", "unrelated prose", "MACC_DECISION_ACK: invalid"] {
+        assert_eq!(
+            completion_projection(&format!("{fields}\n{boundary}\n{ack}\n{result}")),
+            result
+        );
+    }
+}

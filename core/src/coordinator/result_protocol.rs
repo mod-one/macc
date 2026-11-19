@@ -18,6 +18,11 @@ pub fn valid_explanation(value: &str) -> bool {
         .iter()
         .any(|p| value.to_ascii_lowercase().contains(p))
 }
+/// The shell transport records this sentinel when the performer omits its explanation.
+pub(crate) fn missing_precondition_explanation(value: Option<&str>) -> bool {
+    value.map(str::trim).is_none_or(|s| s.is_empty() || s == "(no explanation provided: the tool reported precondition_unmet without the required MACC_TASK_RESULT_EXP line)")
+}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 enum Channel {
     #[default]
@@ -139,6 +144,14 @@ pub fn completion_projection(raw: &str) -> String {
                 boundary = false;
             }
             fields.push(line);
+        } else if line.strip_prefix("MACC_DECISION_ACK:").is_some_and(|ack| {
+            ack.trim().strip_prefix("sha256:").is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+        }) {
+            // ACK validation belongs to decision control. A protocol sibling in
+            // the same response does not terminate the surrounding task fields.
+            continue;
         } else if !fields.is_empty() {
             boundary = true;
         }

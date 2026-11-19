@@ -45,10 +45,21 @@ pub fn resumable_by_restart(incident: &Incident) -> bool {
 /// A task left between phases (testing, reviewing…) by a stopped engine is
 /// part of the incident too: it is what the restarted run must resume.
 pub fn repair_candidate(task: &Task) -> bool {
-    (matches!(
-        task.state.as_str(),
-        "blocked" | "failed" | "claimed" | "in_progress"
-    ) || in_flight_phase(task))
+    let requeued_owner = task.state == "todo"
+        && task.task_runtime.last_error_code.as_deref() == Some("E903")
+        && crate::coordinator::phase_diagnostics::decision_wait_id(task).is_some()
+        && task
+            .task_runtime
+            .extra
+            .get("decision_wait_owner")
+            .and_then(Value::as_str)
+            == Some(task.id.as_str());
+    (requeued_owner
+        || matches!(
+            task.state.as_str(),
+            "blocked" | "failed" | "claimed" | "in_progress"
+        )
+        || in_flight_phase(task))
         && task.task_runtime.last_error_code.as_deref() != Some("E905")
         && !task.is_human_approval_gate()
         && task.blocked_on_external.is_none()
@@ -88,10 +99,14 @@ pub fn inspect_with_config(
     }) {
         return Ok(None);
     }
+    let waits = crate::coordinator::wait_attribution::DecisionWaits::new(&registry);
     let tasks: Vec<_> = registry
         .tasks
-        .into_iter()
-        .filter(repair_candidate)
+        .iter()
+        .filter(|task| !waits.is_consumer(task))
+        .map(|task| waits.reported_task(task))
+        .filter(|task| repair_candidate(task))
+        .map(|task| task.into_owned())
         .collect();
     // A terminal block consisting only of protected gates is an operator decision.
     if tasks.is_empty() && run.as_ref().is_some_and(|r| r.status == "blocked") {

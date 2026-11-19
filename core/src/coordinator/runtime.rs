@@ -1366,7 +1366,7 @@ pub fn spawn_performer_job(
         let reported_success = success;
         let completion_details=read_last_completion_details(&repo_root_owned,&task_id_owned,&event_source_owned).await;
         let mut completion_details_source=completion_details.as_ref().map(|_|"sqlite".to_string());
-        let completion_details = match crate::session_store::decision_wait::waiting_for_invocation(
+        let mut completion_details = match crate::session_store::decision_wait::waiting_for_invocation(
             &repo_root_owned, &task_id_owned, &event_source_owned,
         ) {
             Ok(Some(wait)) => {
@@ -1386,6 +1386,13 @@ pub fn spawn_performer_job(
                 completion_details
             }
         };
+        if let Some(details) = completion_details.as_mut() {
+            match details.fill_missing_intervention(&repo_root_owned, &task_id_owned) {
+                Ok(true) => completion_details_source = Some("native_intervention_fallback".into()),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(task=%task_id_owned,%error,"Cannot read the task's pending intervention"),
+            }
+        }
         let ipc_completion_kind = completion_details
             .as_ref()
             .and_then(|details| details.result_kind);
@@ -1466,6 +1473,26 @@ struct CompletionDetails {
     gate_verdict: Option<crate::coordinator::model::GateVerdict>,
     unmet_preconditions: Vec<String>,
     normalizer_input: Option<crate::coordinator::engine::NormalizerInput>,
+}
+
+impl CompletionDetails {
+    fn fill_missing_intervention(&mut self, root: &Path, task_id: &str) -> Result<bool> {
+        if self.result_kind != Some(PerformerCompletionKind::PreconditionUnmet)
+            || !self.unmet_preconditions.is_empty()
+            || !super::result_protocol::missing_precondition_explanation(
+                self.result_explanation.as_deref(),
+            )
+        {
+            return Ok(false);
+        }
+        let Some(wait) = super::decisions::pending_owned_intervention(root, task_id)? else {
+            return Ok(false);
+        };
+        let reason = wait.reason();
+        self.result_explanation = Some(reason.clone());
+        self.unmet_preconditions.push(reason);
+        Ok(true)
+    }
 }
 
 fn read_last_error_details(

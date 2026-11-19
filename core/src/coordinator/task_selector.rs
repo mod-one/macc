@@ -390,52 +390,6 @@ fn blocked_task_reason(task: &Task) -> String {
     format!("blocked ({code}): {message}")
 }
 
-/// The same native request may block its owner and every transitive consumer.
-/// Other errors and different requests remain independent roots.
-fn shared_wait_root(
-    task: &Task,
-    tasks: &HashMap<&str, &Task>,
-    visiting: &mut HashSet<String>,
-) -> Option<String> {
-    if task.task_runtime.last_error_code.as_deref() != Some("E903")
-        || task.task_runtime.last_error_origin.as_deref() != Some("decisions")
-        || !visiting.insert(task.id.clone())
-    {
-        return None;
-    }
-    let wait = task.task_runtime.extra.get("decision_wait")?.as_str()?;
-    let same_wait = |other: &&Task| {
-        other.state == "blocked"
-            && other.task_runtime.last_error_code.as_deref() == Some("E903")
-            && other.task_runtime.last_error_origin.as_deref() == Some("decisions")
-            && other
-                .task_runtime
-                .extra
-                .get("decision_wait")
-                .and_then(Value::as_str)
-                == Some(wait)
-    };
-    if let Some(owner) = task
-        .task_runtime
-        .extra
-        .get("decision_wait_owner")
-        .and_then(Value::as_str)
-        .filter(|id| *id != task.id)
-    {
-        if tasks.get(owner).is_some_and(same_wait) {
-            return Some(owner.into());
-        }
-    }
-    for id in task.dependency_ids() {
-        if let Some(other) = tasks.get(id.as_str()).filter(|t| same_wait(t)) {
-            return Some(
-                shared_wait_root(other, tasks, visiting).unwrap_or_else(|| other.id.clone()),
-            );
-        }
-    }
-    None
-}
-
 /// Explain why no `todo` task was dispatchable.
 ///
 /// This mirrors [`select_next_ready_task_typed`]'s filters one-for-one and lives
@@ -505,12 +459,22 @@ pub fn diagnose_unschedulable_tasks(
 
     // Root causes come first. Previously blocked tasks were skipped entirely,
     // leaving clients with dependency symptoms but no error code or explanation.
+    let waits = super::wait_attribution::DecisionWaits::new(registry);
     for task in &registry.tasks {
-        if task.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked) {
-            let shared = shared_wait_root(task, &tasks_by_id, &mut HashSet::new()).is_some();
+        if task.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked)
+            || waits.is_owner(task)
+        {
+            let shared = waits.is_consumer(task);
+            let reason = match waits.next_action(task) {
+                Some(action) => format!(
+                    "{}\n{action}",
+                    blocked_task_reason(&waits.reported_task(task))
+                ),
+                None => blocked_task_reason(task),
+            };
             out.push(UnschedulableTask {
                 id: task.id.clone(),
-                reason: blocked_task_reason(task),
+                reason,
                 branch: task.branch().map(ToString::to_string),
                 blocked_root: task.task_runtime.last_error_code.as_deref() != Some("E905")
                     && !shared,
@@ -521,7 +485,9 @@ pub fn diagnose_unschedulable_tasks(
     }
 
     for task in &registry.tasks {
-        if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
+        if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo)
+            || waits.is_owner(task)
+        {
             continue;
         }
         let branch = task.branch().map(ToString::to_string);

@@ -23,6 +23,16 @@ pub(super) fn requeue(
         let task = registry
             .find_task(id)
             .ok_or_else(|| MaccError::Validation(format!("Unknown repaired task {id}")))?;
+        if task.state == "todo" && task.task_runtime.last_error_code.as_deref() == Some("E903") {
+            // Already queued: never reset its assignment. Check current authority
+            // again before allowing the coordinator to resume this task.
+            if let Some(wait) =
+                macc_core::coordinator::decisions::pending_for_task(&paths.root, id)?
+            {
+                return Err(MaccError::Validation(wait.reason()));
+            }
+            continue;
+        }
         if !incident::repair_candidate(task) {
             return Err(MaccError::Validation(format!(
                 "Task {id} is not an eligible repair root"
