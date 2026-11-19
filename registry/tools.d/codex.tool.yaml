@@ -76,14 +76,14 @@ performer:
     args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec", "resume", "{session_id}"]
 model_tiers:
   mini:
-    model: gpt-6-luna
-    effort: xhigh
+    model: gpt-6.1-terra
+    effort: low
   standard:
-    model: gpt-6.1-sol
+    model: gpt-6.2-sol
     effort: medium
   heavy:
-    model: gpt-6.1-sol
-    effort: high
+    model: gpt-6.2-sol
+    effort: xhigh
 defaults:
   approval_policy: never
   sandbox_mode: workspace-write
@@ -112,16 +112,26 @@ fields:
     label: Model
     kind:
       type: enum
-      options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
-    help: Codex model id (e.g., gpt-5.5).
+      options: &codex_models
+        - gpt-6.2-sol
+        - gpt-6.2-astra
+        - gpt-6.1-terra
+        - gpt-6.1-sol
+        - gpt-6-astra
+        - gpt-6-sol
+        - gpt-6-luna
+        - gpt-5.6-sol
+        - gpt-5.6-terra
+        - gpt-5.6-luna
+    help: Codex model ID (e.g., gpt-6.2-sol).
     pointer: /tools/config/codex/model
-    default: "gpt-6.1-sol"
+    default: "gpt-6.2-sol"
   - id: model_reasoning_effort
     label: Reasoning Effort
     kind:
       type: enum
-      options: ["low", "medium", "high", "xhigh"]
-    help: Reasoning effort (e.g., low, medium, high).
+      options: &codex_efforts [low, medium, high, xhigh, max, ultra]
+    help: "xhigh is Extra high. Max and Ultra consume usage limits faster. The selected model determines which levels are supported."
     pointer: /tools/config/codex/model_reasoning_effort
     default: "medium"
   - id: approval_policy
@@ -180,15 +190,15 @@ fields:
     label: Profile Deep Review Model
     kind:
       type: enum
-      options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
+      options: *codex_models
     help: Model for the deep-review profile.
     pointer: /tools/config/codex/profiles/deep-review/model
-    default: "gpt-6.1-sol"
+    default: "gpt-6.2-sol"
   - id: profile_deep_review_model_reasoning_effort
     label: Profile Deep Review Reasoning
     kind:
       type: enum
-      options: ["low", "medium", "high", "xhigh"]
+      options: *codex_efforts
     help: Reasoning effort for deep-review profile.
     pointer: /tools/config/codex/profiles/deep-review/model_reasoning_effort
     default: "medium"
@@ -218,31 +228,31 @@ fields:
     label: Mini tier — model
     kind:
       type: enum
-      options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
+      options: *codex_models
     help: "Model used when routing tier = mini."
     pointer: /tools/config/codex/model_tiers/mini/model
-    default: "gpt-6-luna"
+    default: "gpt-6.1-terra"
   - id: tier_mini_effort
     label: Mini tier — reasoning effort
     kind:
       type: enum
-      options: ["low", "medium", "high", "xhigh"]
+      options: *codex_efforts
     help: "Reasoning effort for the mini tier."
     pointer: /tools/config/codex/model_tiers/mini/effort
-    default: "xhigh"
+    default: "low"
   - id: tier_standard_model
     label: Standard tier — model
     kind:
       type: enum
-      options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
+      options: *codex_models
     help: "Model used when routing tier = standard."
     pointer: /tools/config/codex/model_tiers/standard/model
-    default: "gpt-6.1-sol"
+    default: "gpt-6.2-sol"
   - id: tier_standard_effort
     label: Standard tier — reasoning effort
     kind:
       type: enum
-      options: ["low", "medium", "high", "xhigh", "max"]
+      options: *codex_efforts
     help: "Reasoning effort for the standard tier."
     pointer: /tools/config/codex/model_tiers/standard/effort
     default: "medium"
@@ -250,18 +260,18 @@ fields:
     label: Heavy tier — model
     kind:
       type: enum
-      options: [gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
+      options: *codex_models
     help: "Model used when routing tier = heavy (complex work)."
     pointer: /tools/config/codex/model_tiers/heavy/model
-    default: "gpt-6.1-sol"
+    default: "gpt-6.2-sol"
   - id: tier_heavy_effort
     label: Heavy tier — reasoning effort
     kind:
       type: enum
-      options: ["low", "medium", "high", "xhigh", "max", "ultra"]
+      options: *codex_efforts
     help: "Reasoning effort for the heavy tier."
     pointer: /tools/config/codex/model_tiers/heavy/effort
-    default: "high"
+    default: "xhigh"
 doctor:
   - kind: which
     value: codex
