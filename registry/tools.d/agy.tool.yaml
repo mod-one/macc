@@ -36,11 +36,11 @@ performer:
     args: ["--model", "{model}", "--conversation", "{session_id}", "--dangerously-skip-permissions"]
 model_tiers:
   mini:
-    model: "Gemini 3.8 Flash (Low)"
+    model: "Gemini 4 Neon (Medium)"
   standard:
-    model: "Gemini 3.8 Flash (Medium)"
+    model: "Gemini 4 Neon (Low)"
   heavy:
-    model: "Gemini 3.8 Flash (High)"
+    model: "Gemini 4 Hydrogen (Low)"
 defaults:
   sandbox: true
 install:
@@ -71,10 +71,33 @@ fields:
     label: Model
     kind:
       type: enum
-      options: ["Gemini 4 Argon (High)", "Gemini 4 Argon (Medium)", "Gemini 4 Argon (Low)", "Gemini 3.8 Flash (High)", "Gemini 3.8 Flash (Medium)", "Gemini 3.8 Flash (Low)", "Claude Opus 5.5 (High)", "Claude Opus 5.5 (Medium)", "Claude Opus 5.5 (Low)", "Claude Sonnet 5.5 (High)", "Claude Sonnet 5.5 (Medium)", "Claude Sonnet 5.5 (Low)", "GPT-OSS 120B (Medium)"]
+      options: &agy_models
+        - "Gemini 4 Neon (High)"
+        - "Gemini 4 Neon (XHigh)"
+        - "Gemini 4 Neon (Medium)"
+        - "Gemini 4 Neon (Low)"
+        - "Gemini 4 Argon (Medium)"
+        - "Gemini 4 Argon (High)"
+        - "Gemini 4 Argon (Low)"
+        - "Gemini 4 Hydrogen (High)"
+        - "Gemini 4 Hydrogen (XHigh)"
+        - "Gemini 4 Hydrogen (Medium)"
+        - "Gemini 4 Hydrogen (Low)"
+        - "Orchestrator (Neon)"
+        - "Orchestrator (Argon)"
+        - "Gemini 3.8 Flash (High)"
+        - "Gemini 3.8 Flash (Medium)"
+        - "Gemini 3.8 Flash (Low)"
+        - "Claude Opus 5.5 (Low)"
+        - "Claude Opus 5.5 (Medium)"
+        - "Claude Opus 5.5 (High)"
+        - "Claude Sonnet 5.5 (Low)"
+        - "Claude Sonnet 5.5 (Medium)"
+        - "Claude Sonnet 5.5 (High)"
+        - "GPT-OSS 120B (Medium)"
     help: Antigravity model preset for workspace settings.
     pointer: /tools/config/agy/model
-    default: "Gemini 3.8 Flash (Medium)"
+    default: "Gemini 4 Neon (Low)"
   - id: sandbox
     label: Sandbox
     kind:
@@ -100,26 +123,26 @@ fields:
     label: Mini tier — model
     kind:
       type: enum
-      options: ["Gemini 4 Argon (High)", "Gemini 4 Argon (Medium)", "Gemini 4 Argon (Low)", "Gemini 3.8 Flash (High)", "Gemini 3.8 Flash (Medium)", "Gemini 3.8 Flash (Low)", "Claude Opus 5.5 (High)", "Claude Opus 5.5 (Medium)", "Claude Opus 5.5 (Low)", "Claude Sonnet 5.5 (High)", "Claude Sonnet 5.5 (Medium)", "Claude Sonnet 5.5 (Low)", "GPT-OSS 120B (Medium)"]
+      options: *agy_models
     help: "Model used when routing tier = mini."
     pointer: /tools/config/agy/model_tiers/mini/model
-    default: "Gemini 3.8 Flash (Low)"
+    default: "Gemini 4 Hydrogen (Low)"
   - id: tier_standard_model
     label: Standard tier — model
     kind:
       type: enum
-      options: ["Gemini 4 Argon (High)", "Gemini 4 Argon (Medium)", "Gemini 4 Argon (Low)", "Gemini 3.8 Flash (High)", "Gemini 3.8 Flash (Medium)", "Gemini 3.8 Flash (Low)", "Claude Opus 5.5 (High)", "Claude Opus 5.5 (Medium)", "Claude Opus 5.5 (Low)", "Claude Sonnet 5.5 (High)", "Claude Sonnet 5.5 (Medium)", "Claude Sonnet 5.5 (Low)", "GPT-OSS 120B (Medium)"]
+      options: *agy_models
     help: "Model used when routing tier = standard."
     pointer: /tools/config/agy/model_tiers/standard/model
-    default: "Gemini 3.8 Flash (Medium)"
+    default: "Gemini 4 Neon (Low)"
   - id: tier_heavy_model
     label: Heavy tier — model
     kind:
       type: enum
-      options: ["Gemini 4 Argon (High)", "Gemini 4 Argon (Medium)", "Gemini 4 Argon (Low)", "Gemini 3.8 Flash (High)", "Gemini 3.8 Flash (Medium)", "Gemini 3.8 Flash (Low)", "Claude Opus 5.5 (High)", "Claude Opus 5.5 (Medium)", "Claude Opus 5.5 (Low)", "Claude Sonnet 5.5 (High)", "Claude Sonnet 5.5 (Medium)", "Claude Sonnet 5.5 (Low)", "GPT-OSS 120B (Medium)"]
+      options: *agy_models
     help: "Model used when routing tier = heavy."
     pointer: /tools/config/agy/model_tiers/heavy/model
-    default: "Gemini 3.8 Flash (High)"
+    default: "Gemini 4 Neon (Medium)"
 doctor:
   - kind: which
     value: agy
