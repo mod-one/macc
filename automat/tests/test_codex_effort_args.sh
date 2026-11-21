@@ -79,9 +79,10 @@ TOML
 cp "$WORK/repo/.codex/config.toml" "$WORK/expected.toml"
 rm -f "$WORK/repo/.macc/state/tool-sessions.json"
 L="$WORK/b.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto run "$L" --attempt 1 --max-attempts 1
+tier_effort="$(jq -er '.model_tiers.heavy.effort' "$WORK/repo/.macc/tool.json")"
 tier_model="$(jq -r '.model_tiers.heavy.model' "$WORK/repo/.macc/tool.json")"
 pair "--model" "$tier_model" "$L" && pass "tier model applied" || fail "tier model; argv: $(argv "$L")"
-pair "-c" 'model_reasoning_effort="high"' "$L" \
+pair "-c" "model_reasoning_effort=\"$tier_effort\"" "$L" \
   && pass "tier effort applied on the command line" || fail "tier effort; argv: $(argv "$L")"
 grep -qF 'model_reasoning_effort="medium"' "$L" && fail "stale configured effort still present" || pass "no stale effort left"
 cmp -s "$WORK/expected.toml" "$WORK/repo/.codex/config.toml" \
@@ -92,7 +93,7 @@ cmp -s "$WORK/expected.toml" "$WORK/repo/.codex/config.toml" \
 L="$WORK/c.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto \
   run "$L" --attempt 2 --max-attempts 3 --session-id 01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1
 pair "resume" "01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1" "$L" && pass "exec resume <session_id>" || fail "resume; argv: $(argv "$L")"
-pair "-c" 'model_reasoning_effort="high"' "$L" && pass "resume carries the tier effort" || fail "resume effort; argv: $(argv "$L")"
+pair "-c" "model_reasoning_effort=\"$tier_effort\"" "$L" && pass "resume carries the tier effort" || fail "resume effort; argv: $(argv "$L")"
 [[ "$(grep -cxF -- '-c' "$L")" == "1" ]] && pass "effort passed once (no duplicate -c)" || fail "duplicate -c; argv: $(argv "$L")"
 
 # 4. Without a root effort key, routing must not append it inside [features].
@@ -107,7 +108,7 @@ rm "$WORK/repo/.codex/config.toml"
 L="$WORK/e.log"; MACC_MODEL_TIER=heavy run "$L" --attempt 1 --max-attempts 1
 [[ ! -f "$WORK/repo/.codex/config.toml" ]] \
   && pass "CLI override does not create a config file" || fail "unexpected config file"
-pair "-c" 'model_reasoning_effort="high"' "$L" \
+pair "-c" "model_reasoning_effort=\"$tier_effort\"" "$L" \
   && pass "config-free run receives tier effort" || fail "tier effort missing"
 
 log "Passed: $PASS  Failed: $FAIL"; [[ $FAIL -eq 0 ]]

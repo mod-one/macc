@@ -133,3 +133,24 @@ fn decision_ack_preserves_task_fields_only_in_the_current_result_block() {
         );
     }
 }
+
+#[test]
+fn only_the_last_response_can_acknowledge_the_current_phase() {
+    let raw = "assistant\nMACC_DECISION_ACK: stale\nREVIEW_VERDICT: OK\nexec\ncommand output\nassistant\nMACC_DECISION_ACK: current\n";
+    assert_eq!(final_projection(raw), "MACC_DECISION_ACK: current\n");
+    assert!(
+        !final_projection(&format!("{raw}final\nNo acknowledgement\n"))
+            .contains("MACC_DECISION_ACK:")
+    );
+}
+
+#[test]
+fn a_command_printing_an_old_review_cannot_hide_the_fix_response() {
+    let raw = "codex\nWorking\nexec\nread previous review log\n succeeded in 0ms:\ncodex\nMACC_DECISION_ACK: stale\nREVIEW_VERDICT: CHANGES_REQUESTED\n```\nhook: PostToolUse\nhook: PostToolUse Completed\ncodex\nMACC_TASK_RESULT: success_with_changes\nMACC_DECISION_ACK: current\n";
+    assert!(!projection(raw).contains("stale"));
+    assert!(final_projection(raw).contains("MACC_DECISION_ACK: current"));
+    assert_eq!(
+        completion_projection(raw),
+        "MACC_TASK_RESULT: success_with_changes"
+    );
+}

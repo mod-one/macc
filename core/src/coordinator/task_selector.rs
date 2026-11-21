@@ -97,7 +97,7 @@ pub fn dispatch_block_reason_typed(
         return None;
     }
 
-    let satisfied_ids = satisfied_dependency_ids(registry);
+    let satisfied_ids = effective_dependency_ids(registry, config.external_merged_ids.iter());
     let resource_locks = &registry.resource_locks;
 
     for task in &registry.tasks {
@@ -112,7 +112,11 @@ pub fn dispatch_block_reason_typed(
         if task.id.is_empty() || task.priority_rank() != 0 {
             continue;
         }
-        if !dependencies_ready(task, &satisfied_ids, &config.external_merged_ids) {
+        if !task
+            .dependencies
+            .iter()
+            .all(|id| satisfied_ids.contains(id))
+        {
             continue;
         }
         if !resources_available(task, resource_locks) {
@@ -156,7 +160,7 @@ pub fn select_next_ready_task_typed(
         return None;
     }
 
-    let satisfied_ids = satisfied_dependency_ids(registry);
+    let satisfied_ids = effective_dependency_ids(registry, config.external_merged_ids.iter());
 
     let mut active_by_tool: HashMap<String, usize> = HashMap::new();
     for task in active_tasks {
@@ -193,7 +197,11 @@ pub fn select_next_ready_task_typed(
         if task.id.is_empty() {
             continue;
         }
-        if !dependencies_ready(task, &satisfied_ids, &config.external_merged_ids) {
+        if !task
+            .dependencies
+            .iter()
+            .all(|id| satisfied_ids.contains(id))
+        {
             continue;
         }
         if !resources_available(task, resource_locks) {
@@ -350,6 +358,14 @@ fn blocked_task_reason(task: &Task) -> String {
         .map(|item| item.trim())
         .filter(|item| !item.is_empty())
         .collect();
+    if code == "E903" && !preconditions.is_empty() {
+        let detail = super::engine::transitions::describe_unmet_preconditions(
+            &task.id,
+            &task.task_runtime.unmet_preconditions,
+            task.task_runtime.result_explanation.as_deref(),
+        );
+        return format!("{detail} [{code}]");
+    }
     if code != "E903" && !preconditions.is_empty() {
         return format!(
             "blocked ({code}): unmet precondition{}: {}",
@@ -438,11 +454,7 @@ pub fn diagnose_unschedulable_tasks(
         return out;
     }
 
-    let local_satisfied_ids = satisfied_dependency_ids(registry);
-    let satisfied_ids: HashSet<String> = local_satisfied_ids
-        .union(&config.external_merged_ids)
-        .cloned()
-        .collect();
+    let satisfied_ids = effective_dependency_ids(registry, config.external_merged_ids.iter());
     let mut active_by_tool: HashMap<String, usize> = HashMap::new();
     for task in active_tasks {
         if let Some(tool) = task.task_tool() {
@@ -517,10 +529,13 @@ pub fn diagnose_unschedulable_tasks(
             } else {
                 "no branch to resume".to_string()
             };
-            push(
-                &mut out,
-                format!("worktree attached, not resumable: {}", detail),
-            );
+            out.push(UnschedulableTask {
+                id: task.id.clone(),
+                reason: format!("worktree attached, not resumable: {detail}"),
+                branch,
+                blocked_root: task.is_awaiting_same_worktree_retry(),
+                depends_on_blocked: false,
+            });
             continue;
         }
         if task.id.is_empty() {
@@ -530,9 +545,7 @@ pub fn diagnose_unschedulable_tasks(
         let unmet: Vec<String> = task
             .dependency_ids()
             .iter()
-            .filter(|dep| {
-                !local_satisfied_ids.contains(*dep) && !config.external_merged_ids.contains(*dep)
-            })
+            .filter(|dep| !satisfied_ids.contains(*dep))
             .cloned()
             .collect();
         if !unmet.is_empty() {
@@ -623,14 +636,15 @@ pub fn diagnose_unschedulable_tasks(
     out
 }
 
-fn dependencies_ready(
-    task: &Task,
-    satisfied_ids: &HashSet<String>,
-    external_merged_ids: &HashSet<String>,
-) -> bool {
-    task.dependency_ids().iter().all(|dependency| {
-        satisfied_ids.contains(dependency) || external_merged_ids.contains(dependency)
-    })
+/// External delivery evidence only applies to IDs outside this PRD.
+pub(crate) fn effective_dependency_ids<'a>(
+    registry: &TaskRegistry,
+    external: impl Iterator<Item = &'a String>,
+) -> HashSet<String> {
+    let mut satisfied = satisfied_dependency_ids(registry);
+    let local: HashSet<_> = registry.tasks.iter().map(|t| &t.id).collect();
+    satisfied.extend(external.filter(|id| !local.contains(id)).cloned());
+    satisfied
 }
 
 pub(crate) fn satisfied_dependency_ids(registry: &TaskRegistry) -> HashSet<String> {
@@ -1005,6 +1019,24 @@ mod tests {
         };
         let selected = select_next_ready_task(&registry, &cfg).expect("selected task");
         assert_eq!(selected.id, "CURRENT");
+    }
+
+    #[test]
+    fn historic_delivery_does_not_override_a_local_waiting_approval() {
+        let registry = TaskRegistry::from_value(&serde_json::json!({"tasks":[
+            {"id":"GATE","state":"waiting_approval","gate":{"kind":"human_approval"}},
+            {"id":"CURRENT","state":"todo","tool":"codex","dependencies":["GATE"]}
+        ]}))
+        .unwrap();
+        let config = TaskSelectorConfig {
+            external_merged_ids: ["GATE".to_owned()].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(
+            !effective_dependency_ids(&registry, config.external_merged_ids.iter())
+                .contains("GATE")
+        );
+        assert!(select_next_ready_task_typed(&registry, &config).is_none());
     }
 
     #[test]

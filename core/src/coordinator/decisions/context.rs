@@ -519,7 +519,7 @@ impl Store {
         let raw_has_ack = output
             .lines()
             .any(|l| l.trim_start().starts_with("MACC_DECISION_ACK:"));
-        let projected_output = crate::coordinator::result_protocol::projection(output);
+        let projected_output = crate::coordinator::result_protocol::final_projection(output);
         let output = projected_output.as_str();
         let raw: String = sql(self.db.query_row(
             "SELECT receipt FROM contexts WHERE plan_id=?1 AND attempt_id=?2 AND phase=?3",

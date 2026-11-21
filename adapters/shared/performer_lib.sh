@@ -453,7 +453,7 @@ sid=""
 
 cleanup_runner() {
   # Repeated cancellation must not interrupt the lifetime barrier or lease release.
-  trap '' TERM INT HUP
+  trap '' TERM INT HUP USR1
   stop_provider_process
   if [[ "$session_backend" == sqlite ]]; then
     cleanup_sqlite_session
@@ -465,6 +465,9 @@ cleanup_runner() {
     fi
   fi
   rm -f "$output_capture"
+  if [[ "${sqlite_lease_lost:-false}" == true ]]; then
+    runner_failure E901 "Session lease heartbeat failed; verify lease ownership before resuming this worktree"
+  fi
 }
 trap cleanup_runner EXIT
 trap 'exit 143' TERM

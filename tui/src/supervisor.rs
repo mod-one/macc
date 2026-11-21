@@ -61,8 +61,8 @@ pub fn row_cells(live: &SupervisorLive, now: chrono::DateTime<chrono::Utc>) -> [
         live.subject(),
         live.status.clone(),
         live.tool.clone().unwrap_or_else(|| "-".into()),
-        "-".into(),
-        "-".into(),
+        live.model.clone().unwrap_or_else(|| "-".into()),
+        live.effort.clone().unwrap_or_else(|| "-".into()),
         elapsed_label(live.started_at.as_deref(), now),
         elapsed_label(live.phase_started_at.as_deref(), now),
     ]
@@ -158,6 +158,8 @@ mod tests {
             incident_id: "run-1-2".into(),
             task_ids: vec!["WEB-BFF-002".into()],
             tool: Some("claude".into()),
+            model: Some("review-model".into()),
+            effort: Some("high".into()),
             activity: active.then(|| "Validation 3/5: pnpm run test".into()),
             started_at: Some("2026-10-12T02:00:00Z".into()),
             phase_started_at: Some("2026-10-12T02:17:00Z".into()),
@@ -181,7 +183,7 @@ mod tests {
         assert_eq!(cells[1], "SUPERVISOR");
         assert_eq!(cells[2], "repair WEB-BFF-002");
         assert_eq!(cells[3], "validating");
-        assert_eq!(cells[4], "claude");
+        assert_eq!(&cells[4..7], &["claude", "review-model", "high"]);
         assert_eq!(cells[7], "21m");
         assert_eq!(cells[8], "4m");
         assert_eq!(row_cells(&sample(false), now())[0], "▲ SUP");

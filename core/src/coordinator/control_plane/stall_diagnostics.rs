@@ -40,10 +40,10 @@ pub fn diagnose_stall_native(
         .count();
     let diagnosed =
         crate::coordinator::task_selector::diagnose_unschedulable_tasks(&registry, &selector_cfg);
-    let terminal_dependents = diagnosed
+    let terminal_todos = diagnosed
         .iter()
         .filter(|task| {
-            task.depends_on_blocked
+            (task.depends_on_blocked || task.blocked_root)
                 && registry
                     .find_task(&task.id)
                     .is_some_and(|t| t.state == "todo")
@@ -61,13 +61,15 @@ pub fn diagnose_stall_native(
         .map(|stuck| {
             let mut line = format!("{} ({})", stuck.id, stuck.reason);
             if let Some(branch) = stuck.branch {
-                let commits = crate::git::commits_between(repo_root, &base_branch, &branch)
-                    .map(|c| c.len())
-                    .unwrap_or(0);
-                line.push_str(&format!(
-                    "; branch {} holds {} unmerged commit(s)",
-                    branch, commits
-                ));
+                match crate::git::commits_between(repo_root, &base_branch, &branch) {
+                    Ok(commits) => line.push_str(&format!(
+                        "; branch {branch} holds {} unmerged commit(s)",
+                        commits.len()
+                    )),
+                    Err(_) => line.push_str(&format!(
+                        "; could not verify branch {branch} against {base_branch}"
+                    )),
+                }
             }
             line
         })
@@ -80,8 +82,7 @@ pub fn diagnose_stall_native(
     }
     crate::coordinator::engine::StallDiagnosis {
         lines,
-        terminal_blocked: has_blocked_root
-            && (todo_count == 0 || terminal_dependents == todo_count),
+        terminal_blocked: has_blocked_root && (todo_count == 0 || terminal_todos == todo_count),
     }
 }
 

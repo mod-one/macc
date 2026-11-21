@@ -103,6 +103,7 @@ pub struct CoordinatorTaskSnapshot {
     pub active: usize,
     pub blocked: usize,
     pub merged: usize,
+    pub approved: usize,
     pub active_tasks: Vec<macc_core::coordinator::view_model::LiveTaskRow>,
     /// RL-TUI-007: tools currently throttled due to rate-limiting.
     pub throttled_tools: Vec<ThrottledToolInfo>,
@@ -926,6 +927,7 @@ impl AppState {
             active: 0,
             blocked: 0,
             merged: 0,
+            approved: 0,
             active_tasks: Vec::new(),
             throttled_tools: Vec::new(),
         };
@@ -987,7 +989,8 @@ impl AppState {
                     // Keep it out of live-active rendering to avoid a misleading "still running" signal.
                 }
                 "blocked" | "rejected" => snapshot.blocked += 1,
-                "merged" | "approved" => snapshot.merged += 1,
+                "merged" => snapshot.merged += 1,
+                "approved" => snapshot.approved += 1,
                 _ => {}
             }
         }
@@ -2707,6 +2710,18 @@ impl AppState {
     pub fn status_line(&self) -> Option<(UiStatusLevel, String)> {
         let status = self.ui_status.as_ref()?;
         Some((status.level, status.message.clone()))
+    }
+
+    pub fn unresolved_run(&self) -> Option<&CoordinatorRunSummary> {
+        self.coordinator_run_summary.as_ref().filter(|summary| {
+            !self.is_coordinator_running()
+                && !self.is_coordinator_paused()
+                && matches!(summary.status.as_str(), "blocked" | "failed" | "crashed")
+                && self
+                    .coordinator_snapshot
+                    .as_ref()
+                    .is_some_and(|tasks| tasks.active == 0 && (tasks.blocked > 0 || tasks.todo > 0))
+        })
     }
 
     pub fn is_coordinator_running(&self) -> bool {
@@ -7848,11 +7863,11 @@ mod tests {
                 snapshot.todo,
                 snapshot.active,
                 snapshot.blocked,
-                snapshot.merged
+                snapshot.merged + snapshot.approved
             ),
             registry.counts()
         );
-        assert_eq!(snapshot.merged, 2);
+        assert_eq!((snapshot.merged, snapshot.approved), (1, 1));
         assert_eq!(snapshot.blocked, 1);
         assert!(snapshot.active_tasks.is_empty());
     }

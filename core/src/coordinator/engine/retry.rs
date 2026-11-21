@@ -108,12 +108,10 @@ pub(super) fn resolve_retry_strategy(
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
-    if classification.error_code == "E103"
-        && matches!(
-            classification.error_origin.as_str(),
-            "output_protocol" | "runner"
-        )
-    {
+    if super::completion::is_runner_failure(
+        &classification.error_code,
+        &classification.error_origin,
+    ) {
         return RetryStrategy::Block {
             reason: classification.error_message.clone(),
             outcome: BlockOutcome::TerminalFailure {

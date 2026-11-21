@@ -304,7 +304,7 @@ pub(super) async fn acquire_worktree_for_dispatch(
             });
     }
 
-    let (reusable, _reuse_prepare_error) = find_reusable_worktree_native(
+    let (reusable, reuse_prepare_error) = find_reusable_worktree_native(
         repo_root,
         registry,
         &task.tool,
@@ -376,6 +376,17 @@ pub(super) async fn acquire_worktree_for_dispatch(
         });
     }
 
+    if let Some((reason, detail)) = reuse_prepare_error {
+        let _ = append_coordinator_event_with_severity(
+            repo_root,
+            "worktree_retained",
+            &task.id,
+            "dispatch",
+            "info",
+            &format!("Allocating another worker: {reason}: {detail}"),
+            "info",
+        );
+    }
     let _roles = crate::coordinator::worktree_roles::lock(repo_root)?;
     let create_spec = crate::WorktreeCreateSpec {
         slug: crate::coordinator::helpers::next_free_worker_slug(repo_root, &task.tool)?,

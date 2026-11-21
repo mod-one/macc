@@ -13,8 +13,8 @@ pub struct Agent {
     config: SupervisorConfig,
     pub id: String,
     performer: ToolPerformerSpec,
-    model: String,
-    effort: String,
+    pub(super) model: String,
+    pub(super) effort: String,
     timeout: Duration,
 }
 impl Agent {

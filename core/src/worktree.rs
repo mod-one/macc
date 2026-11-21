@@ -40,6 +40,9 @@ pub struct WorktreeMetadata {
     pub feature: Option<String>,
     pub base: String,
     pub branch: String,
+    /// Detached commit released by MACC after verified integration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_head: Option<String>,
 }
 
 pub fn list_worktrees(cwd: &Path) -> Result<Vec<WorktreeEntry>> {
@@ -103,6 +106,7 @@ pub fn create_worktrees(
                 feature: spec.feature.clone(),
                 base: spec.base.clone(),
                 branch: branch.clone(),
+                released_head: None,
             },
         )?;
 
@@ -176,23 +180,15 @@ fn parse_porcelain(output: &str) -> Vec<WorktreeEntry> {
     entries
 }
 
-fn write_worktree_metadata(path: &Path, metadata: WorktreeMetadata) -> Result<()> {
-    let macc_dir = path.join(".macc");
-    std::fs::create_dir_all(&macc_dir).map_err(|e| MaccError::Io {
-        path: macc_dir.to_string_lossy().into(),
-        action: "create .macc directory".into(),
-        source: e,
+pub(crate) fn write_worktree_metadata(path: &Path, metadata: WorktreeMetadata) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(&metadata).map_err(|e| {
+        MaccError::Validation(format!("Failed to serialize worktree metadata: {e}"))
     })?;
-
-    let file_path = macc_dir.join("worktree.json");
-    let content = serde_json::to_string_pretty(&metadata)
-        .map_err(|e| MaccError::Validation(format!("Failed to serialize worktree.json: {}", e)))?;
-    std::fs::write(&file_path, content).map_err(|e| MaccError::Io {
-        path: file_path.to_string_lossy().into(),
-        action: "write worktree.json".into(),
-        source: e,
-    })?;
-    Ok(())
+    crate::atomic_write(
+        &ProjectPaths::from_root(path),
+        &path.join(".macc/worktree.json"),
+        &bytes,
+    )
 }
 
 pub fn read_worktree_metadata(path: &Path) -> Result<Option<WorktreeMetadata>> {

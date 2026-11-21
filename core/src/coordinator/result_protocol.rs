@@ -98,12 +98,60 @@ impl State {
         self.fence.is_none() && !line.trim_start().starts_with('>')
     }
 }
+/// A captured command can print an entire earlier transcript, including role
+/// markers and unmatched Markdown fences. Strip its payload when the adapter
+/// supplies both a command completion header and the native post-tool footer.
+/// Streams without that framing use the ordinary role parser.
+fn transcript_lines(raw: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut state = State::default();
+    let mut command = false;
+    let mut payload = None;
+    for line in raw.lines() {
+        state.line(line);
+        if line == "exec" && !state.prompt && state.channel == Channel::Transcript {
+            command = true;
+        } else if command && line.starts_with(" succeeded in ") && line.ends_with(':') {
+            payload.get_or_insert(lines.len());
+            command = false;
+        } else if line == "hook: PostToolUse Completed"
+            && lines.last() == Some(&"hook: PostToolUse")
+        {
+            if let Some(start) = payload.take() {
+                lines.truncate(start);
+                lines.push("exec");
+                state = State {
+                    channel: Channel::Transcript,
+                    ..Default::default()
+                };
+            }
+            command = false;
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// Prompt echoes, tool transcripts and fenced examples cannot provide protocol.
 pub fn projection(raw: &str) -> String {
+    project(raw, false)
+}
+
+/// Decision validation uses the final assistant response in this invocation.
+pub(super) fn final_projection(raw: &str) -> String {
+    project(raw, true)
+}
+
+fn project(raw: &str, final_only: bool) -> String {
     let mut state = State::default();
     let mut out = String::new();
-    for line in raw.lines() {
-        if !state.line(line) {
+    for line in transcript_lines(raw) {
+        let epoch = state.epoch;
+        let accepted = state.line(line);
+        if final_only && epoch != state.epoch {
+            out.clear();
+        }
+        if !accepted {
             continue;
         }
         let trimmed = line.trim();
@@ -124,7 +172,7 @@ pub fn completion_projection(raw: &str) -> String {
     let mut state = State::default();
     let mut fields = Vec::new();
     let mut boundary = false;
-    for line in raw.lines() {
+    for line in transcript_lines(raw) {
         let epoch = state.epoch;
         let accepted = state.line(line);
         if epoch != state.epoch {

@@ -204,6 +204,7 @@ pub(crate) struct HeaderContext<'a> {
     pub draft_count: usize,
     pub coordinator_active: bool,
     pub coordinator_paused: bool,
+    pub coordinator_stopped: bool,
     pub action_needed: bool,
     pub next_step: &'a str,
     pub status: Option<(UiStatusLevel, String)>,
@@ -249,6 +250,8 @@ pub(crate) fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'stat
         ("▲ paused", t.warn)
     } else if ctx.coordinator_active {
         ("● running", t.good)
+    } else if ctx.coordinator_stopped {
+        ("▲ stopped", t.warn)
     } else {
         ("○ idle", t.muted)
     };

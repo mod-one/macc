@@ -25,7 +25,11 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
             ),
         )
     } else {
-        ("○", theme.muted, "Idle".to_owned())
+        if let Some(run) = state.unresolved_run() {
+            ("▲", theme.warn, format!("Stopped · {}", run.status))
+        } else {
+            ("○", theme.muted, "Idle".to_owned())
+        }
     };
     let project = Line::from(vec![
         Span::styled(format!("{marker} {status}  "), Style::default().fg(color)),
@@ -58,6 +62,12 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
                 Style::default().fg(theme.good),
             ),
         ]);
+        if tasks.approved > 0 {
+            summary.push(Span::styled(
+                format!("  ✓ approved {}", tasks.approved),
+                Style::default().fg(theme.good),
+            ));
+        }
     } else {
         summary.push(Span::raw("Tasks unavailable"));
     }
@@ -309,6 +319,23 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
                         Style::default().fg(theme.muted),
                     ),
                 ]));
+                if let Some(reason) = summary
+                    .recent_runs
+                    .iter()
+                    .find(|run| run.run_id == summary.run_id)
+                    .and_then(|run| run.stop_reason.as_deref())
+                    .and_then(|reason| reason.lines().next())
+                    .filter(|reason| {
+                        !reason.trim().is_empty()
+                            && *reason != summary.cause
+                            && *reason != summary.status
+                    })
+                {
+                    logs_lines.push(Line::from(vec![
+                        Span::styled("Run stopped: ", Style::default().fg(theme.warn)),
+                        Span::raw(reason.to_owned()),
+                    ]));
+                }
                 logs_lines.push(Line::from(Span::styled(
                     summary.headline.clone(),
                     Style::default().add_modifier(Modifier::BOLD),

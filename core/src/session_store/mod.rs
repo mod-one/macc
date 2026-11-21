@@ -49,9 +49,15 @@ pub(crate) fn bytes(path: &Path) -> Result<Vec<u8>> {
     })
 }
 pub(crate) fn lock(root: &Path) -> Result<crate::fs_lock::AdvisoryLock> {
+    lock_with_timeout(root, std::time::Duration::from_secs(8))
+}
+fn lock_with_timeout(
+    root: &Path,
+    timeout: std::time::Duration,
+) -> Result<crate::fs_lock::AdvisoryLock> {
     crate::fs_lock::AdvisoryLock::acquire_with_retry(
         &legacy_path(root).with_extension("json.lock"),
-        std::time::Duration::from_secs(8),
+        timeout,
         std::time::Duration::from_millis(50),
         "session store authority",
     )

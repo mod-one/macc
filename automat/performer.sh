@@ -987,9 +987,22 @@ run_tool() {
     fi
   fi
 
+  # The runner may lose its lease after the provider already printed a result.
+  # Only a trailing runner diagnostic on a failed invocation supersedes it.
+  local runner_code="" runner_detail=""
+  if (( status != 0 )); then
+    local trailer
+    trailer="$(tail -n 2 "$output_capture")"
+    case "$trailer" in
+      "MACC_RUNNER_ERROR: E901"$'\n'"MACC_TASK_RESULT_EXP: "*)
+        runner_code=E901
+        runner_detail="${trailer#*$'\n'MACC_TASK_RESULT_EXP: }"
+        ;;
+    esac
+  fi
   # A structured terminal precondition remains authoritative even when the
   # adapter propagates a non-zero exit. Never turn it into a quota/retry error.
-  if [[ "$status" -eq 0 ]] || [[ "$(extract_task_result_marker "$output_capture")" == "precondition_unmet" ]]; then
+  if [[ "$status" -eq 0 ]] || [[ -z "$runner_code" && "$(extract_task_result_marker "$output_capture")" == "precondition_unmet" ]]; then
     local result_kind=""
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
@@ -1140,10 +1153,11 @@ run_tool() {
     if [[ -z "$LAST_ERROR_CODE" || "$LAST_ERROR_CODE" == "E101" ]]; then
       set_last_error "E101" "runner" "runner exited non-zero"
     fi
-    local runner_code
-    runner_code="$(sed -n 's/^MACC_RUNNER_ERROR: \(E[0-9][0-9][0-9]\)$/\1/p' "$output_capture" | tail -1)"
+    if [[ -z "$runner_code" ]]; then
+      runner_code="$(sed -n 's/^MACC_RUNNER_ERROR: \(E[0-9][0-9][0-9]\)$/\1/p' "$output_capture" | tail -1)"
+    fi
     if [[ "$runner_code" == E103 || "$runner_code" == E901 ]]; then
-      set_last_error "$runner_code" "runner" "checkpoint/output finalization failed; retained work requires inspection"
+      set_last_error "$runner_code" "runner" "${runner_detail:-checkpoint/output finalization failed; retained work requires inspection}"
     fi
     local result_exp=""
     if [[ "$LAST_ERROR_CODE" == E602 ]]; then

@@ -390,8 +390,8 @@ fn no_progress_abort_reports_the_stuck_tasks() {
     let msg = err.to_string();
     assert!(msg.contains("made no progress"), "got: {msg}");
     assert!(
-        msg.contains("2 task(s) could not be dispatched"),
-        "the abort must say how many are stuck: {msg}"
+        msg.contains("Dispatch diagnosis:"),
+        "the abort must introduce the dispatch diagnosis: {msg}"
     );
     assert!(
         msg.contains("L4H-ADDPERSON-001") && msg.contains("retry budget spent"),
@@ -435,7 +435,7 @@ fn no_progress_abort_without_a_diagnosis_stays_terse() {
         .to_string();
     assert!(msg.contains("made no progress"));
     assert!(
-        !msg.contains("could not be dispatched"),
+        !msg.contains("Dispatch diagnosis:"),
         "no diagnosis means no empty section: {msg}"
     );
 }

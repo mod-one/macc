@@ -349,3 +349,55 @@ fn a_changed_scratch_identity_refuses_cleanup_and_keeps_stray_files() {
         "do not erase"
     );
 }
+
+#[test]
+fn detached_merged_worker_is_reused_without_losing_ignored_or_unmerged_work() {
+    let dir = fixture();
+    let root = dir.path();
+    let mut task = worker(root, "worker-01");
+    let path = Path::new(task.worktree_path().unwrap()).to_owned();
+    git(&path, &["checkout", "--detach"]).unwrap();
+    std::fs::write(path.join("private.cache"), "private").unwrap();
+    let reuse = |task: &Task| {
+        super::super::helpers::find_reusable_worktree_native(
+            root,
+            &serde_json::json!({"tasks":[task]}),
+            "future",
+            "main",
+            0,
+            &HashMap::new(),
+        )
+        .unwrap()
+        .0
+    };
+    assert!(reuse(&task).is_none());
+    task.state = "merged".into();
+    let released = git(&path, &["rev-parse", "HEAD"]).unwrap();
+    git(
+        &path,
+        &["commit", "--allow-empty", "-qm", "retained detached commit"],
+    )
+    .unwrap();
+    assert!(reuse(&task).is_none());
+    git(&path, &["checkout", "--detach", released.trim()]).unwrap();
+    std::fs::write(root.join("private.cache"), "new tracked file").unwrap();
+    git(root, &["add", "-f", "private.cache"]).unwrap();
+    git(root, &["commit", "-qm", "track conflicting path"]).unwrap();
+    assert!(reuse(&task).is_none());
+    assert_eq!(
+        std::fs::read_to_string(path.join("private.cache")).unwrap(),
+        "private"
+    );
+    git(root, &["rm", "private.cache"]).unwrap();
+    git(root, &["commit", "-qm", "remove collision"]).unwrap();
+    let (selected, branch, ..) = reuse(&task).expect("released worker");
+    assert_eq!(selected, path);
+    assert_eq!(
+        git(&path, &["branch", "--show-current"]).unwrap().trim(),
+        branch
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("private.cache")).unwrap(),
+        "private"
+    );
+}

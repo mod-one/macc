@@ -2,7 +2,7 @@ use crate::coordinator::model::{PrdInput, TaskRegistry};
 use crate::coordinator::runtime as coordinator_runtime;
 use crate::coordinator_storage::append_event_sqlite;
 use crate::{MaccError, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub fn now_iso_coordinator() -> String {
@@ -41,19 +41,7 @@ fn sanitize_slug(input: &str) -> String {
 }
 
 fn is_worktree_clean(worktree_path: &Path) -> Result<bool> {
-    Ok(!crate::git::is_dirty(worktree_path)?)
-}
-
-fn active_task_worktree_paths(registry: &serde_json::Value) -> HashSet<String> {
-    TaskRegistry::from_value(registry)
-        .map(|typed| typed.active_task_worktree_paths())
-        .unwrap_or_default()
-}
-
-fn can_reuse_worktree_slot(registry: &serde_json::Value, worktree_path: &Path) -> bool {
-    TaskRegistry::from_value(registry)
-        .map(|typed| typed.can_reuse_worktree_slot(&worktree_path.to_string_lossy()))
-        .unwrap_or(false)
+    Ok(crate::git::status_porcelain_v1(worktree_path, true)?.is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,36 +212,6 @@ pub fn is_worktree_activity_recent(
     )
 }
 
-fn has_in_progress_or_queued_on_worktree(
-    registry: &serde_json::Value,
-    worktree_path: &Path,
-) -> bool {
-    TaskRegistry::from_value(registry)
-        .map(|typed| typed.has_in_progress_or_queued_on_worktree(&worktree_path.to_string_lossy()))
-        .unwrap_or(false)
-}
-
-fn write_worktree_metadata_file(
-    worktree_path: &Path,
-    metadata: &crate::WorktreeMetadata,
-) -> Result<()> {
-    let macc_dir = worktree_path.join(".macc");
-    std::fs::create_dir_all(&macc_dir).map_err(|e| MaccError::Io {
-        path: macc_dir.to_string_lossy().into(),
-        action: "create worktree .macc dir".into(),
-        source: e,
-    })?;
-    let path = macc_dir.join("worktree.json");
-    let data = serde_json::to_string_pretty(metadata).map_err(|e| {
-        MaccError::Validation(format!("Failed to serialize worktree metadata: {}", e))
-    })?;
-    std::fs::write(&path, data).map_err(|e| MaccError::Io {
-        path: path.to_string_lossy().into(),
-        action: "write worktree metadata".into(),
-        source: e,
-    })
-}
-
 pub fn build_non_task_worker_slug(worker_number: usize) -> String {
     format!("worker-{:02}", worker_number)
 }
@@ -301,201 +259,25 @@ fn build_reuse_branch_name(tool: &str, worktree_path: &Path) -> String {
     )
 }
 
-fn git_current_branch_name(worktree_path: &Path) -> Option<String> {
-    crate::git::current_branch(worktree_path).ok()
-}
-
-fn task_id_for_worktree(registry: &serde_json::Value, worktree_path: &Path) -> Option<String> {
-    let key = worktree_path.to_string_lossy();
-    TaskRegistry::from_value(registry)
-        .ok()
-        .and_then(|typed| {
-            typed
-                .tasks
-                .iter()
-                .find(|task| task.worktree_path().is_some_and(|path| path == key))
-                .map(|task| task.id.clone())
-        })
-        .filter(|id| !id.trim().is_empty())
-}
-
-fn extract_task_id_from_text(input: &str) -> Option<String> {
-    let mut best = String::new();
-    let mut current = String::new();
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' {
-            current.push(ch);
-        } else {
-            if current.matches('-').count() >= 2
-                && current.chars().any(|c| c.is_ascii_alphabetic())
-                && current.chars().any(|c| c.is_ascii_digit())
-                && current.len() > best.len()
-            {
-                best = current.clone();
-            }
-            current.clear();
-        }
+/// Check the worker's actual HEAD, including a detached or renamed branch.
+pub(crate) fn integrity_pause_reason(
+    worker: &Path,
+    base: &str,
+    code: Option<&str>,
+    cause: &str,
+) -> Option<String> {
+    if code != Some("E901") {
+        return None;
     }
-    if current.matches('-').count() >= 2
-        && current.chars().any(|c| c.is_ascii_alphabetic())
-        && current.chars().any(|c| c.is_ascii_digit())
-        && current.len() > best.len()
-    {
-        best = current;
-    }
-    if best.is_empty() {
-        None
-    } else {
-        Some(best)
-    }
-}
-
-fn sanitize_tag_component(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-            out.push(ch);
-        } else {
-            out.push('-');
-        }
-    }
-    while out.contains("--") {
-        out = out.replace("--", "-");
-    }
-    out.trim_matches('-').trim_matches('.').to_string()
-}
-
-fn resolve_abandon_task_id(
-    worktree_path: &Path,
-    branch_hint: Option<&str>,
-    task_id_hint: Option<&str>,
-) -> String {
-    if let Some(id) = task_id_hint {
-        let trimmed = id.trim();
-        if !trimmed.is_empty() {
-            return sanitize_tag_component(trimmed);
-        }
-    }
-    if let Some(branch) = branch_hint {
-        if let Some(id) = extract_task_id_from_text(branch) {
-            return sanitize_tag_component(&id);
-        }
-    }
-    if let Some(branch) = git_current_branch_name(worktree_path) {
-        if let Some(id) = extract_task_id_from_text(&branch) {
-            return sanitize_tag_component(&id);
-        }
-    }
-    if let Ok(Some(metadata)) = crate::read_worktree_metadata(worktree_path) {
-        if let Some(id) = extract_task_id_from_text(&metadata.branch) {
-            return sanitize_tag_component(&id);
-        }
-    }
-    "unknown-task".to_string()
-}
-
-fn create_abandonment_tag_if_needed(
-    repo_root: &Path,
-    worktree_path: &Path,
-    base_branch: &str,
-    branch_hint: Option<&str>,
-    task_id_hint: Option<&str>,
-) -> Result<Option<String>> {
-    let commits = crate::git::commits_ahead_of_base(worktree_path, base_branch)?;
-    if commits.is_empty() {
-        return Ok(None);
-    }
-
-    let task_id = resolve_abandon_task_id(worktree_path, branch_hint, task_id_hint);
-    let head = crate::git::head_commit(worktree_path)?;
-    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let base_tag = format!("macc/abandoned/{}-{}", task_id, timestamp);
-    let mut tag = base_tag.clone();
-    let mut index = 0usize;
-    while crate::git::rev_parse_verify(repo_root, &format!("refs/tags/{}", tag)).unwrap_or(false) {
-        index += 1;
-        tag = format!("{}-{}", base_tag, index);
-    }
-    crate::git::create_tag(repo_root, &tag, &head)?;
-
-    let branch_for_log = branch_hint
-        .map(|s| s.to_string())
-        .or_else(|| git_current_branch_name(worktree_path))
-        .unwrap_or_else(|| "<detached>".to_string());
-    let message = format!(
-        "created abandonment tag {} for branch {} at {}",
-        tag, branch_for_log, head
-    );
-    if let Err(err) = append_coordinator_event_with_severity(
-        repo_root, "progress", &task_id, "dispatch", "ok", &message, "info",
-    ) {
-        tracing::warn!("failed to append abandonment tag event: {}", err);
-    }
-    Ok(Some(tag))
-}
-
-fn prepare_reused_worktree_base(
-    repo_root: &Path,
-    worktree_path: &Path,
-    base_branch: &str,
-    branch_hint: Option<&str>,
-    task_id_hint: Option<&str>,
-) -> Result<(bool, bool)> {
-    let _ = create_abandonment_tag_if_needed(
-        repo_root,
-        worktree_path,
-        base_branch,
-        branch_hint,
-        task_id_hint,
-    )?;
-    if !crate::git::reset_hard(worktree_path, "HEAD")? {
-        return Ok((false, false));
-    }
-    if !crate::git::clean_fd(worktree_path)? {
-        return Ok((false, false));
-    }
-    // Detach directly. Probing a checkout of the operator's reference branch
-    // emits a misleading fatal error and must never claim that branch here.
-    let detached = crate::git::run_git_output_mapped(
-        worktree_path,
-        &["checkout", "--detach"],
-        "detach reused worktree",
-    )?;
-    if !detached.status.success() {
-        tracing::error!(path=%worktree_path.display(),cause=%String::from_utf8_lossy(&detached.stderr),"Could not detach reused worktree");
-        return Ok((false, false));
-    }
-    // Fetch is best-effort: a network failure should not permanently block
-    // worktree reuse.  This mirrors the behaviour of prepare_clean_worktree
-    // which only hard-fails on fetch when fail_on_fetch_error is set.
-    if crate::git::git_remote_exists(worktree_path, "origin")? {
-        crate::git::fetch_housekeeping_sync(worktree_path, "origin")?;
-    }
-    if !crate::git::reset_hard(worktree_path, base_branch)? {
-        return Ok((false, false));
-    }
-    if !crate::git::reset_hard(worktree_path, "HEAD")? {
-        return Ok((false, false));
-    }
-    if !crate::git::clean_fd(worktree_path)? {
-        return Ok((false, false));
-    }
-    Ok((true, false))
-}
-
-pub(crate) fn is_branch_merged_into_base(
-    worktree_path: &Path,
-    branch: &str,
-    base_branch: &str,
-) -> bool {
-    if branch.is_empty() || branch == base_branch {
-        return true;
-    }
-    let exists = crate::git::rev_parse_verify(worktree_path, branch).unwrap_or(false);
-    if !exists {
-        return true;
-    }
-    crate::git::merge_base_is_ancestor(worktree_path, branch, base_branch).unwrap_or(false)
+    let retained = match crate::git::commits_ahead_of_base(worker, base) {
+        Ok(commits) if commits.is_empty() => return None,
+        Ok(commits) => format!("{} unmerged commit(s) relative to {base}", commits.len()),
+        Err(error) => format!("could not verify integration into {base}: {error}"),
+    };
+    Some(format!(
+        "E901: {cause}. Worktree {} retained for review ({retained}).",
+        worker.display()
+    ))
 }
 
 type ReusableWorktree = (std::path::PathBuf, String, String, bool, bool);
@@ -513,14 +295,16 @@ pub fn find_reusable_worktree_native(
     Option<ReusableWorktreePrepareError>,
 )> {
     let _roles = super::worktree_roles::lock(repo_root)?;
-    let active_paths = active_task_worktree_paths(registry);
+    let registry = TaskRegistry::from_value(registry)?;
     let entries = crate::list_worktrees(repo_root)?;
     let sessions_state = load_tool_sessions_state(repo_root);
     let now_epoch = chrono::Utc::now().timestamp();
     let mut ranked_entries = entries
         .into_iter()
         .enumerate()
-        .filter(|(_, entry)| super::worktree_roles::performer(repo_root, &entry.path))
+        .filter(|(_, entry)| {
+            !entry.locked && !entry.prunable && !super::worktree_roles::reserved(&entry.path)
+        })
         .map(|(idx, entry)| {
             let warmth = score_worktree_session_warmth_from_state(
                 sessions_state.as_ref(),
@@ -547,29 +331,37 @@ pub fn find_reusable_worktree_native(
     let mut last_prepare_error: Option<(String, String)> = None;
     for (_, entry, _, _) in ranked_entries {
         let key = entry.path.to_string_lossy().to_string();
-        if active_paths.contains(&key) {
-            continue;
-        }
-        if !can_reuse_worktree_slot(registry, &entry.path) {
-            continue;
-        }
-        let dirty_before = !is_worktree_clean(&entry.path)?;
-        if dirty_before && has_in_progress_or_queued_on_worktree(registry, &entry.path) {
+        if !registry.can_reuse_worktree_slot(&key) {
             last_prepare_error = Some((
-                "dirty_inflight_guard".to_string(),
-                format!(
-                    "worktree {} is dirty and still assigned to an in_progress/queued task",
-                    entry.path.display()
-                ),
+                "worktree_assigned".into(),
+                format!("{key} is reserved by a task"),
             ));
             continue;
         }
-        let merge_head = crate::git::rev_parse_verify(&entry.path, "MERGE_HEAD").unwrap_or(false);
-        if merge_head {
+        let Some(metadata) = super::worktree_roles::performer_metadata(repo_root, &entry.path)
+        else {
+            continue;
+        };
+        let previous_branch = crate::git::current_branch_name(&entry.path)?;
+        let released = previous_branch.is_empty()
+            && entry.branch.is_none()
+            && metadata.base == base_branch
+            && (metadata
+                .released_head
+                .as_ref()
+                .is_some_and(|head| entry.head.as_ref() == Some(head))
+                || registry.tasks.iter().any(|t| {
+                    t.state == "merged"
+                        && t.worktree_path() == Some(key.as_str())
+                        && t.branch() == Some(metadata.branch.as_str())
+                }));
+        if (!released && previous_branch != metadata.branch)
+            || !super::engine::is_worktree_healthy(&entry.path)
+        {
             last_prepare_error = Some((
-                "merge_head_present".to_string(),
+                "worktree_not_available".into(),
                 format!(
-                    "worktree {} has unresolved MERGE_HEAD",
+                    "{}: ownership changed or Git operation in progress",
                     entry.path.display()
                 ),
             ));
@@ -588,9 +380,7 @@ pub fn find_reusable_worktree_native(
             continue;
         }
 
-        let previous_branch = git_current_branch_name(&entry.path).unwrap_or_default();
-        let task_id_hint = task_id_for_worktree(registry, &entry.path);
-        if !is_branch_merged_into_base(&entry.path, &previous_branch, base_branch) {
+        if !crate::git::merge_base_is_ancestor(&entry.path, "HEAD", base_branch)? {
             last_prepare_error = Some((
                 "previous_branch_not_merged".into(),
                 format!(
@@ -601,7 +391,9 @@ pub fn find_reusable_worktree_native(
             ));
             continue;
         }
-        if dirty_before || !crate::project_ownership::unowned_ignored_files(&entry.path)?.is_empty()
+        if !is_worktree_clean(&entry.path)?
+            || (!released
+                && !crate::project_ownership::unowned_ignored_files(&entry.path)?.is_empty())
         {
             last_prepare_error = Some((
                 "retained_local_work".into(),
@@ -613,32 +405,11 @@ pub fn find_reusable_worktree_native(
             continue;
         }
 
-        let (prepared, skipped_reset) = prepare_reused_worktree_base(
-            repo_root,
-            &entry.path,
-            base_branch,
-            Some(&previous_branch),
-            task_id_hint.as_deref(),
-        )?;
-        if !prepared {
-            last_prepare_error = Some((
-                "sanitize_failed".to_string(),
-                format!(
-                    "sanitize failed for worktree {} on base {}",
-                    entry.path.display(),
-                    base_branch
-                ),
-            ));
-            continue;
+        // A normal checkout carries ignored files forward and refuses collisions.
+        // Never reset or clean a released slot to make room for another task.
+        if crate::git::git_remote_exists(&entry.path, "origin")? {
+            crate::git::fetch_housekeeping_sync(&entry.path, "origin")?;
         }
-        if !is_worktree_clean(&entry.path)? {
-            last_prepare_error = Some((
-                "sanitize_dirty_after".to_string(),
-                format!("sanitize left worktree {} dirty", entry.path.display()),
-            ));
-            continue;
-        }
-
         let mut branch = build_reuse_branch_name(tool, &entry.path);
         let mut i = 0usize;
         loop {
@@ -660,6 +431,7 @@ pub fn find_reusable_worktree_native(
             ));
             continue;
         }
+        crate::project_ownership::record_branch(repo_root, &branch)?;
         if !previous_branch.is_empty()
             && previous_branch != base_branch
             && previous_branch != branch
@@ -686,37 +458,15 @@ pub fn find_reusable_worktree_native(
         }
         let last_commit = crate::git::head_commit(&entry.path).unwrap_or_default();
 
-        let existing = crate::read_worktree_metadata(&entry.path)?.unwrap_or_else(|| {
-            let folder_name = entry
-                .path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("worker")
-                .to_string();
-            crate::WorktreeMetadata {
-                id: folder_name.clone(),
-                slug: folder_name,
-                tool: tool.to_string(),
-                scope: None,
-                feature: None,
-                base: base_branch.to_string(),
-                branch: branch.clone(),
-            }
-        });
         let updated = crate::WorktreeMetadata {
-            id: existing.id,
-            slug: existing.slug,
             tool: tool.to_string(),
-            scope: existing.scope,
-            feature: existing.feature,
             base: base_branch.to_string(),
             branch: branch.clone(),
+            released_head: None,
+            ..metadata
         };
-        write_worktree_metadata_file(&entry.path, &updated)?;
-        return Ok((
-            Some((entry.path, branch, last_commit, skipped_reset, dirty_before)),
-            None,
-        ));
+        crate::worktree::write_worktree_metadata(&entry.path, updated)?;
+        return Ok((Some((entry.path, branch, last_commit, true, false)), None));
     }
     Ok((None, last_prepare_error))
 }

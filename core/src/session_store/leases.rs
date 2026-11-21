@@ -331,6 +331,34 @@ pub fn bind(root: &Path, key: &LeaseKey, provider: &str) -> Result<()> {
         )
     })
 }
+/// Only the current, live owner may wait past the normal authority lock timeout.
+/// Verification runs again inside the write transaction after acquisition.
+fn lease_lock(root: &Path, key: &LeaseKey) -> Result<crate::fs_lock::AdvisoryLock> {
+    lease_lock_after(root, key, std::time::Duration::from_secs(8))
+}
+
+pub(super) fn lease_lock_after(
+    root: &Path,
+    key: &LeaseKey,
+    first_wait: std::time::Duration,
+) -> Result<crate::fs_lock::AdvisoryLock> {
+    match super::lock_with_timeout(root, first_wait) {
+        Err(crate::MaccError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            let (db, _) = db::readonly(root)?;
+            verify(&db, key)?;
+            let expires: i64 = sql(db.query_row(
+                "SELECT expires_at FROM session_leases WHERE logical_session_id=?1 AND lease_token=?2 AND fencing_counter=?3",
+                params![key.session_id, key.lease_token, key.generation], |r| r.get(0),
+            ))?;
+            let remaining = u64::try_from(expires.saturating_sub(now())).unwrap_or(0);
+            drop(db);
+            super::lock_with_timeout(root, std::time::Duration::from_secs(remaining))
+        }
+        result => result,
+    }
+}
 pub fn heartbeat(root: &Path, key: &LeaseKey) -> Result<()> {
     mutate(root, key, |tx| {
         sql(tx.execute("UPDATE session_leases SET expires_at=?2+(expires_at-heartbeat_at),heartbeat_at=?2 WHERE logical_session_id=?1",params![key.session_id,now()]))?;
@@ -338,7 +366,7 @@ pub fn heartbeat(root: &Path, key: &LeaseKey) -> Result<()> {
     })
 }
 pub fn release(root: &Path, key: &LeaseKey, clean: bool) -> Result<()> {
-    let _guard = lock(root)?;
+    let _guard = lease_lock(root, key)?;
     let (mut db, _) = db::active(root)?;
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     // Repeated release is harmless only for the exact last generation/token.
@@ -377,7 +405,7 @@ pub(super) fn with_verified_lease<T>(
     key: &LeaseKey,
     operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
-    let _guard = lock(root)?;
+    let _guard = lease_lock(root, key)?;
     let (mut db, _) = db::active(root)?;
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     verify(&tx, key)?;

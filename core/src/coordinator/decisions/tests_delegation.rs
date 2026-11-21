@@ -245,3 +245,34 @@ fn an_explicit_live_human_veto_is_never_overridden_by_standing_delegation() {
         .unwrap();
     assert_eq!(registry.find_task("G").unwrap().state, "rejected");
 }
+
+#[test]
+fn never_ask_cannot_supply_required_pull_request_reviews() {
+    let (dir, mut registry) = fixture();
+    let root = dir.path();
+    let prd = root.join("prd.json");
+    let mut graph: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&prd).unwrap()).unwrap();
+    graph["tasks"][1]["gate"]["evidence_type"] = "pull_request_review".into();
+    std::fs::write(&prd, serde_json::to_vec(&graph).unwrap()).unwrap();
+    registry
+        .find_task_mut("G")
+        .unwrap()
+        .gate
+        .as_mut()
+        .unwrap()
+        .evidence_type = Some("pull_request_review".into());
+    save(root, &registry);
+    for _ in 0..2 {
+        sync(root, &prd, &mut registry).unwrap();
+        reconcile_human_gates_for_project(root, &mut registry, "2026-11-09T12:00:00Z").unwrap();
+        let gate = registry.find_task("G").unwrap();
+        assert_eq!(gate.state, "waiting_approval");
+        assert!(!gate.satisfies_dependants());
+        assert!(!gate
+            .task_runtime
+            .extra
+            .contains_key("delegated_gate_resolution"));
+        save(root, &registry);
+    }
+}

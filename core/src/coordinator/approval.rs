@@ -218,8 +218,10 @@ fn reconcile_gates(
 ) -> Vec<HumanGateTransition> {
     // Tasks delivered by earlier PRD lots satisfy dependencies too, exactly as
     // they do for the dispatcher.
-    let mut satisfied = crate::coordinator::task_selector::satisfied_dependency_ids(registry);
-    satisfied.extend(registry.external_merged_task_ids.iter().cloned());
+    let mut satisfied = crate::coordinator::task_selector::effective_dependency_ids(
+        registry,
+        registry.external_merged_task_ids.iter(),
+    );
     let mut transitions = Vec::new();
     for task in &mut registry.tasks {
         let Some(gate) = task.gate.clone().filter(TaskGate::is_human_approval) else {
@@ -601,10 +603,7 @@ pub fn validate_decision(
         .map(str::trim)
         .filter(|e| !e.is_empty())
         .map(str::to_string);
-    let evidence_required = gate
-        .evidence_type
-        .as_deref()
-        .is_some_and(|kind| kind != "manual");
+    let evidence_required = gate.requires_approval_evidence();
     if request.decision == ApprovalDecision::Approved && evidence_required && evidence.is_none() {
         return Err(MaccError::Validation(format!(
             "Gate '{}' requires {} evidence: pass --evidence <url-or-path>.",
@@ -780,10 +779,7 @@ pub fn pending_approvals(
                 .subject_revision
                 .clone()
                 .unwrap_or_else(|| "<commit-sha>".to_string());
-            let evidence_required = gate
-                .evidence_type
-                .as_deref()
-                .is_some_and(|kind| kind != "manual");
+            let evidence_required = gate.requires_approval_evidence();
             let evidence = if evidence_required {
                 " --evidence <url>"
             } else {

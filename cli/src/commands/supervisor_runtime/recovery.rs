@@ -159,6 +159,8 @@ pub(super) async fn intervene(
     }
     let agent = tool::Agent::resolve(&paths.root, canonical, config)?;
     report.tool = Some(agent.id.clone());
+    report.model = (!agent.model.is_empty()).then(|| agent.model.clone());
+    report.effort = (!agent.effort.is_empty()).then(|| agent.effort.clone());
     let target = super::workspace::target(&paths.root, canonical.automation.coordinator.as_ref())?;
     report.target_branch = target.branch.clone();
     let worktree = super::workspace::prepare(

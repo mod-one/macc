@@ -6,6 +6,7 @@ session_service() {
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/checkpoint.sh"
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/usage.sh"
 sqlite_heartbeat_pid=""
+sqlite_lease_lost=false
 sqlite_lease_key=""
 sqlite_clean=false
 stop_sqlite_heartbeat() {
@@ -57,7 +58,10 @@ run_sqlite_session() {
   request="$(jq -nc --argjson identity "$session_identity" --arg request "runner-$$-$(date +%s)-${RANDOM}" \
     --arg checkpoint "$checkpoint_id" --argjson pid "$$" --arg preferred "$caller_session_id" --argjson generate "$generate" '
     {identity:$identity,request_id:$request,owner_pid:$pid,preferred_provider_id:(if $preferred=="" then null else $preferred end),generate_provider_id:$generate,checkpoint_id:(if $checkpoint=="" then null else $checkpoint end)}')"
-  grant="$(printf '%s' "$request" | session_service acquire)" || return 1
+  if ! grant="$(printf '%s' "$request" | session_service acquire)"; then
+    runner_failure E901 "Could not acquire the session lease; inspect its owner before resuming"
+    return 1
+  fi
   sqlite_lease_key="$(jq -c '{session_id,lease_token,generation}' <<<"$grant")"
   sid="$(jq -r '.provider_session_id // empty' <<<"$grant")"
   sid_is_new="$(jq -r 'if .is_new then 1 else 0 end' <<<"$grant")"
@@ -73,6 +77,7 @@ run_sqlite_session() {
   interval="$(jq -r '.heartbeat_seconds' <<<"$grant")"
   log_session_event "$(jq -r 'if .is_new then "session_reserved" else "session_reused" end' <<<"$grant")" "${sid:-pending}" "$$" "SQLite logical session $(jq -r .session_id <<<"$grant") generation=$(jq -r .generation <<<"$grant")"
   local owner="$$"
+  trap 'sqlite_lease_lost=true; exit 143' USR1
   (
     local sleeper=""
     trap '[[ -z "$sleeper" ]] || kill "$sleeper" 2>/dev/null; exit 0' TERM INT
@@ -83,8 +88,7 @@ run_sqlite_session() {
       kill -0 "$owner" 2>/dev/null || exit 0
       local heartbeat
       if ! heartbeat="$(printf '%s' "$sqlite_lease_key" | session_service heartbeat)"; then
-        echo 'Error: session lease heartbeat failed; stopping runner' >&2
-        kill -TERM "$owner" 2>/dev/null || true
+        kill -USR1 "$owner" 2>/dev/null || true
         exit 1
       fi
       if [[ "$(jq -r '.status // empty' <<<"$heartbeat")" == waiting_decision ]]; then

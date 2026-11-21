@@ -380,10 +380,17 @@ async fn repair_round(
         dir,
         &phase("verification"),
     )?;
-    let source_check = super::repair_evidence::verified(worktree, &validated);
+    let observed = super::repair_evidence::snapshot(worktree)?;
+    let source_check = if observed != validated {
+        Err(MaccError::Validation(
+            "Independent verifier modified validated source, index, HEAD or worktree. Inspect the verification evidence before retrying.".into(),
+        ))
+    } else {
+        super::repair_evidence::require_changes(worktree)
+    };
     super::report::write_json(
         &dir.join(format!("{}-source.json", phase("verification"))),
-        &serde_json::json!({"expected":validated,"observed":super::repair_evidence::snapshot(worktree)?,"unchanged":source_check.is_ok(),"error":source_check.as_ref().err().map(ToString::to_string)}),
+        &serde_json::json!({"expected":validated,"observed":observed,"unchanged":source_check.is_ok(),"error":source_check.as_ref().err().map(ToString::to_string)}),
     )?;
     source_check?;
     verification_result?;

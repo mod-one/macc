@@ -74,8 +74,10 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
         .extra
         .entry("decision_execution_id".into())
         .or_insert_with(|| json!(uuid::Uuid::new_v4().to_string()));
-    let mut satisfied = crate::coordinator::task_selector::satisfied_dependency_ids(registry);
-    satisfied.extend(registry.external_merged_task_ids.iter().cloned());
+    let mut satisfied = crate::coordinator::task_selector::effective_dependency_ids(
+        registry,
+        registry.external_merged_task_ids.iter(),
+    );
     for task in &mut registry.tasks {
         if task.is_merged() {
             continue;

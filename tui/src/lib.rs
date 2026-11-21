@@ -325,6 +325,7 @@ fn draw_client(f: &mut Frame, state: &AppState, full_clear: bool) {
         errors: state.errors.len(),
         coordinator_active: state.is_coordinator_running(),
         coordinator_paused: state.is_coordinator_paused(),
+        coordinator_stopped: state.unresolved_run().is_some(),
         action_needed: state.project_paths.is_none()
             || snapshot.is_some_and(|obs| overview_view::next_step(&obs.readiness).is_some()),
         next_step: next_step.strip_prefix("Next step: ").unwrap_or(&next_step),
@@ -907,6 +908,15 @@ fn next_step_text(state: &AppState, max_chars: usize) -> String {
         );
     };
 
+    if let Some(run) = state.unresolved_run() {
+        return ui::truncate_middle(
+            &format!(
+                "Last run {}. {}  C Coordinator live",
+                run.status, run.headline
+            ),
+            max_chars,
+        );
+    }
     let Some(obs) = &state.observations.latest else {
         return "Checking project readiness…".into();
     };
@@ -1595,6 +1605,7 @@ mod tests {
             draft_count: 2,
             coordinator_active: false,
             coordinator_paused: false,
+            coordinator_stopped: false,
             action_needed: false,
             next_step: "",
             status: None,

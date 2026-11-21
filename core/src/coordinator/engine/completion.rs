@@ -20,6 +20,13 @@ pub struct ErrorClassification {
     pub tool_error: Option<ToolError>,
 }
 
+pub(super) fn is_runner_failure(code: &str, origin: &str) -> bool {
+    matches!(
+        (code, origin),
+        ("E103", "output_protocol" | "runner") | ("E901", "runner")
+    )
+}
+
 pub fn classify_completion_error(
     input: &JobCompletionInput,
     normalizer: Option<&dyn ErrorNormalizer>,
@@ -51,10 +58,9 @@ pub fn classify_completion_error(
             .unmet_preconditions
             .iter()
             .any(|p| !p.trim().is_empty());
-    let protocol_failure =
-        raw_error_code == "E103" && matches!(error_origin.as_str(), "output_protocol" | "runner");
+    let runner_failure = !input.success && is_runner_failure(&raw_error_code, &error_origin);
     let tool_error: Option<ToolError> =
-        if !input.success && !reported_preconditions && !protocol_failure {
+        if !input.success && !reported_preconditions && !runner_failure {
             input.normalizer_input.as_ref().and_then(|ni| {
                 let stderr = crate::coordinator::result_protocol::provider_output(&ni.stderr);
                 let stdout = crate::coordinator::result_protocol::provider_output(&ni.stdout);
@@ -74,7 +80,7 @@ pub fn classify_completion_error(
         };
 
     // Override caller-supplied error code/message with normalizer output.
-    let error_code = if reported_preconditions {
+    let error_code = if reported_preconditions && !runner_failure {
         "E903".to_string()
     } else {
         tool_error
@@ -84,7 +90,7 @@ pub fn classify_completion_error(
     };
     // The structured report outranks normalized log text, which is only an
     // excerpt of the performer log.
-    let error_message = if protocol_failure {
+    let error_message = if runner_failure {
         Some(raw_error_message.clone())
     } else {
         structured_error_message(input)
@@ -97,19 +103,19 @@ pub fn classify_completion_error(
         .unwrap_or_else(|| error_code_to_canonical_class(&error_code));
 
     // Resolve authority last, after normalization is complete.
+    let completion_kind = input.completion_kind.filter(|_| !runner_failure);
     let completion_resolution =
-        resolve_completion_authority(input.completion_kind, has_commits, input.success);
-    let completion_success = if input.completion_kind.is_some() {
+        resolve_completion_authority(completion_kind, has_commits, input.success);
+    let completion_success = if completion_kind.is_some() {
         completion_resolution.success
     } else {
         input.success
     };
-    let completion_kind = input.completion_kind;
 
     ErrorClassification {
         canonical_class,
         error_code,
-        error_origin: if reported_preconditions {
+        error_origin: if reported_preconditions && !runner_failure {
             "precondition".into()
         } else {
             error_origin

@@ -265,6 +265,53 @@ fn termination_quarantines_lease_and_stops_the_provider() {
     assert_eq!(status["sessions"][0]["status"], "abandoned");
     assert!(status["sessions"][0]["owner_pid"].is_null());
 }
+#[cfg(unix)]
+#[test]
+fn failed_heartbeat_stops_provider_and_emits_final_lease_diagnostic() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temp, lib) = setup();
+    let root = temp.path();
+    let service = root.join(".macc/test-session-service");
+    std::fs::write(
+        &service,
+        r#"#!/bin/bash
+set -eo pipefail
+case "$4" in
+  acquire) "$TEST_MACC" "$@" | jq '.heartbeat_seconds=1' ;;
+  heartbeat) exit 1 ;;
+  *) exec "$TEST_MACC" "$@" ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&service, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ready = root.join("ready.pid");
+    let out = runner(root, &lib, "A", "performer")
+        .env("FAKE_MODE", "sleep")
+        .env("READY_FILE", &ready)
+        .env("MACC_SESSION_SERVICE_BIN", &service)
+        .env("TEST_MACC", env!("CARGO_BIN_EXE_macc"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(143));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut trailer = stderr.lines().rev();
+    assert!(
+        trailer
+            .next()
+            .unwrap()
+            .starts_with("MACC_TASK_RESULT_EXP: Session lease heartbeat failed"),
+        "{stderr}"
+    );
+    assert_eq!(trailer.next(), Some("MACC_RUNNER_ERROR: E901"));
+    let pid = std::fs::read_to_string(ready)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!macc_core::coordinator::helpers::is_pid_running(pid));
+}
+
 #[test]
 fn fresh_session_requires_acknowledgement_before_success_can_be_accepted() {
     let (temp, lib) = setup();

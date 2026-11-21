@@ -24,6 +24,7 @@ use super::phase_runner::{
     append_task_lifecycle_event_with_session, refresh_task_active_session_id_in_registry,
     task_active_session_id_from_registry,
 };
+#[cfg(test)]
 use super::sanitize::{prepare_clean_worktree, SanitizeOptions};
 #[cfg(test)]
 use super::{
@@ -343,86 +344,52 @@ async fn switch_worktree_to_base_after_merge(
     let base_branch = task.base_branch("master");
 
     let wt = Path::new(worktree_path);
-    let failed_step = prepare_clean_worktree(
-        wt,
-        &base_branch,
-        SanitizeOptions {
-            fetch_remote: true,
-            fail_on_fetch_error: false,
-            tag_abandoned: true,
-        },
-    )
-    .await?;
-
-    if let Some(step) = failed_step {
-        if step == "fetch_origin" {
-            let msg = format!(
-                "worktree switch warning task={} path={} base={} reason=fetch_failed",
-                task_id, worktree_path, base_branch
-            );
-            let _ = append_coordinator_event_with_severity(
-                repo_root,
-                "worktree_switch",
-                task_id,
-                "merge",
-                "warning",
-                &msg,
-                "warning",
-            );
-            if let Some(log) = logger {
-                let _ = log.note(format!("- {}", msg));
-            }
-            return Ok(());
+    let _roles = crate::coordinator::worktree_roles::lock(repo_root)?;
+    let metadata = crate::coordinator::worktree_roles::performer_metadata(repo_root, wt);
+    let current_branch = crate::git::current_branch_name(wt)?;
+    let result = if metadata
+        .as_ref()
+        .is_none_or(|metadata| metadata.branch != current_branch)
+        || Some(current_branch.as_str()) != task.branch()
+    {
+        Err("ownership changed")
+    } else if !coordinator_engine::is_worktree_healthy(wt)
+        || !crate::git::status_porcelain_v1(wt, true)?.is_empty()
+    {
+        Err("local changes or Git operation in progress")
+    } else if !crate::git::merge_base_is_ancestor(wt, "HEAD", &base_branch)? {
+        Err("worker HEAD has unmerged commits")
+    } else if crate::git::checkout_detach_async(wt).await? {
+        if let Some(mut metadata) = metadata {
+            metadata.released_head = Some(crate::git::head_commit(wt)?);
+            crate::worktree::write_worktree_metadata(wt, metadata)?;
         }
-        if step == "reset_hard_base_branch" {
-            let msg = format!(
-                "worktree switch warning task={} path={} base={} reason=reset_hard_failed",
-                task_id, worktree_path, base_branch
-            );
-            let _ = append_coordinator_event_with_severity(
-                repo_root,
-                "worktree_switch",
-                task_id,
-                "merge",
-                "warning",
-                &msg,
-                "warning",
-            );
-            if let Some(log) = logger {
-                let _ = log.note(format!("- {}", msg));
-            }
-            return Ok(());
-        }
-        let msg = format!(
-            "worktree switch skipped task={} path={} base={} reason=checkout_failed",
-            task_id, worktree_path, base_branch
-        );
-        let _ = append_coordinator_event_with_severity(
-            repo_root,
-            "worktree_switch",
-            task_id,
-            "merge",
-            "failed",
-            &msg,
+        Ok(())
+    } else {
+        Err("Git refused to detach the merged branch")
+    };
+    // Detaching at the integrated commit requires no file changes. The next
+    // assignment checks out its own base with ignored-file protection.
+    let (status, severity, msg) = match result {
+        Ok(()) => (
+            "success",
+            "info",
+            format!("Released merged worktree {} for {task_id}", wt.display()),
+        ),
+        Err(reason) => (
+            "retained",
             "warning",
-        );
-        if let Some(log) = logger {
-            let _ = log.note(format!("- {}", msg));
-        }
-        return Ok(());
-    }
-    let msg = format!(
-        "worktree switched to base task={} path={} base={}",
-        task_id, worktree_path, base_branch
-    );
+            format!("Retained worktree {} for {task_id}: {reason}", wt.display()),
+        ),
+    };
     let _ = append_coordinator_event_with_severity(
         repo_root,
         "worktree_switch",
         task_id,
         "merge",
-        "success",
+        status,
         &msg,
-        "info",
+        severity,
     );
     if let Some(log) = logger {
         let _ = log.note(format!("- {}", msg));
@@ -1520,56 +1487,25 @@ pub async fn monitor_active_jobs_native(
                     }
                 }
 
-                // Coordinator Integrity Guard (see
-                // docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md §4.3):
-                // E901 means the performer exited without persisting a valid
-                // terminal phase_result event -- a protocol/contract failure,
-                // not a routine task failure. If the worktree still holds
-                // commits that are not merged into base, continuing on to
-                // auto-retry/salvage/dispatch below risks silently losing or
-                // obscuring that work. Pause immediately instead, before any
-                // retry or worktree-reuse logic can run.
-                if evt.error_code.as_deref() == Some("E901") {
-                    let has_commits =
-                        crate::git::has_commits_ahead(&job.worktree_path, &job.base_branch);
-                    if has_commits {
-                        let branch = TaskRegistry::from_value(&registry)
-                            .ok()
-                            .and_then(|typed| typed.find_task(&evt.task_id).cloned())
-                            .and_then(|task| task.task_runtime.branch)
-                            .unwrap_or_default();
-                        let merged = crate::coordinator::helpers::is_branch_merged_into_base(
-                            &job.worktree_path,
-                            &branch,
-                            &job.base_branch,
-                        );
-                        if crate::coordinator::model::requires_integrity_pause(
-                            evt.error_code.as_deref(),
-                            has_commits,
-                            merged,
-                        ) {
-                            let reason = format!(
-                                "Task {} produced commits but terminal result was not persisted (E901); work was protected and requires operator review.",
-                                evt.task_id
-                            );
-                            let _ = append_coordinator_event_with_severity(
-                                repo_root,
-                                "coordinator_diagnostic",
-                                &evt.task_id,
-                                "dev",
-                                "needs_operator_review",
-                                &reason,
-                                "blocking",
-                            );
-                            if let Some(log) = logger {
-                                let _ = log.note(format!(
-                                    "- Integrity guard: task={} error_code=E901 has_commits_ahead=true branch_merged=false -> pausing run",
-                                    evt.task_id
-                                ));
-                            }
-                            return Ok(Some((evt.task_id.clone(), reason)));
-                        }
+                if let Some(reason) = crate::coordinator::helpers::integrity_pause_reason(
+                    &job.worktree_path,
+                    &job.base_branch,
+                    evt.error_code.as_deref(),
+                    evt.error_message.as_deref().unwrap_or(&evt.status_text),
+                ) {
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "coordinator_diagnostic",
+                        &evt.task_id,
+                        "dev",
+                        "needs_operator_review",
+                        &reason,
+                        "blocking",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- Integrity guard: {}: {reason}", evt.task_id));
                     }
+                    return Ok(Some((evt.task_id.clone(), reason)));
                 }
 
                 let completion_event_message = format!(
@@ -2585,14 +2521,32 @@ pub async fn monitor_merge_jobs_native(
                     if let Ok(registry_snapshot) = TaskRegistry::from_value(&registry) {
                         if let Some(task_snapshot) = registry_snapshot.find_task(&evt.task_id) {
                             // Post-merge order is strict:
-                            // 1) switch worktree to base (release task branch)
+                            // 1) detach the clean, integrated worker at its current commit
                             // 2) cleanup merged task branch
-                            let _ = switch_worktree_to_base_after_merge(
+                            if let Err(error) = switch_worktree_to_base_after_merge(
                                 repo_root,
                                 task_snapshot,
                                 logger,
                             )
-                            .await;
+                            .await
+                            {
+                                let message = format!(
+                                    "Could not release merged worktree for {}: {error}",
+                                    evt.task_id
+                                );
+                                let _ = append_coordinator_event_with_severity(
+                                    repo_root,
+                                    "worktree_switch",
+                                    &evt.task_id,
+                                    "merge",
+                                    "retained",
+                                    &message,
+                                    "warning",
+                                );
+                                if let Some(log) = logger {
+                                    let _ = log.note(message);
+                                }
+                            }
                             let branch = task_snapshot.branch().unwrap_or_default();
                             let base = task_snapshot.base_branch("master");
                             if !branch.is_empty() && branch != base {
@@ -3120,6 +3074,71 @@ mod tests {
             "codex"
         );
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn integrity_pause_uses_detached_head_and_reports_the_actual_runner_cause() {
+        use crate::coordinator::helpers::integrity_pause_reason;
+        let root = make_test_repo();
+        run_git(&root, &["checkout", "--detach"]);
+        let check = |base, code| integrity_pause_reason(&root, base, code, "Session lease expired");
+        assert!(check("main", Some("E901")).is_none());
+        run_git(&root, &["commit", "--allow-empty", "-qm", "pending work"]);
+        let reason = check("main", Some("E901")).unwrap();
+        assert!(reason.contains("Session lease expired"));
+        assert!(reason.contains("1 unmerged commit"));
+        assert!(check("unavailable-base", Some("E901"))
+            .unwrap()
+            .contains("could not verify"));
+        assert!(check("main", Some("E101")).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn released_worker_survives_registry_rotation() {
+        let root = make_test_repo();
+        fs::write(root.join(".gitignore"), ".macc/\n").unwrap();
+        run_git(&root, &["add", ".gitignore"]);
+        run_git(&root, &["commit", "-qm", "ignore MACC runtime"]);
+        let worker = crate::create_worktrees(
+            &root,
+            &crate::WorktreeCreateSpec {
+                slug: "worker-01".into(),
+                tool: "fixture".into(),
+                count: 1,
+                base: "main".into(),
+                dir: ".macc/worktree".into(),
+                scope: None,
+                feature: None,
+            },
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let task: Task = serde_json::from_value(json!({"id":"A","state":"merged","worktree":{
+            "worktree_path":worker.path,"branch":worker.branch,"base_branch":"main"
+        }}))
+        .unwrap();
+        run_async_test(super::switch_worktree_to_base_after_merge(
+            &root, &task, None,
+        ))
+        .unwrap();
+        let (selected, _) = crate::coordinator::helpers::find_reusable_worktree_native(
+            &root,
+            &json!({"tasks":[]}),
+            "fixture",
+            "main",
+            0,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(selected.unwrap().0, worker.path);
+        assert!(crate::read_worktree_metadata(&worker.path)
+            .unwrap()
+            .unwrap()
+            .released_head
+            .is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -24,40 +24,35 @@ fn run(
     dir: &Path,
     apply: bool,
 ) -> Result<Option<Vec<String>>> {
-    let roots: Vec<_> = incident
+    let mut roots = Vec::new();
+    for task in incident
         .tasks
         .iter()
         .filter(|t| macc_core::supervisor::incident::repair_candidate(t))
-        .collect();
-    if roots.is_empty()
-        || !roots.iter().all(|t| {
-            t.task_runtime.last_error_code.as_deref() == Some("E903")
-                && t.task_runtime
-                    .last_error_message
-                    .as_deref()
-                    .is_some_and(|m| {
-                        m.contains(macc_core::session_store::checkpoints::recovery::CODE)
-                            || m.contains("DM_STALE:")
-                            || (m.contains("Checkpoint") && m.contains("reconciliation"))
-                    })
-        })
     {
-        return Ok(None);
-    }
-    if !apply
-        && !roots
-            .iter()
-            .all(|t| macc_core::coordinator::phase_diagnostics::context_refresh_blocked(t))
-    {
-        return Ok(None);
-    }
-    for task in &roots {
-        if !macc_core::session_store::checkpoints::recovery::has_task_checkpoint(
-            &paths.root,
-            &task.id,
-        )? {
-            return Ok(None);
+        if task.task_runtime.last_error_code.as_deref() == Some("E903")
+            && task
+                .task_runtime
+                .last_error_message
+                .as_deref()
+                .is_some_and(|message| {
+                    !message.contains("DM_PENDING:")
+                        && (message.contains(macc_core::session_store::checkpoints::recovery::CODE)
+                            || message.contains("DM_STALE:")
+                            || (message.contains("Checkpoint")
+                                && message.contains("reconciliation")))
+                })
+            && (apply || macc_core::coordinator::phase_diagnostics::context_refresh_blocked(task))
+            && macc_core::session_store::checkpoints::recovery::has_task_checkpoint(
+                &paths.root,
+                &task.id,
+            )?
+        {
+            roots.push(task);
         }
+    }
+    if roots.is_empty() {
+        return Ok(None);
     }
     let diagnostics: Vec<_> =
         macc_core::session_store::checkpoints::recovery::diagnostics(&paths.root)?
@@ -265,6 +260,22 @@ mod tests {
         );
         assert!(dir.join("checkpoint-transfer-0.json").is_file());
     }
+    #[test]
+    fn unrelated_human_decision_stays_blocked_during_checkpoint_recovery() {
+        let (_temp, paths, mut incident) = fixture(false);
+        let mut pending = incident.tasks[0].clone();
+        pending.id = "EXTERNAL".into();
+        pending.task_runtime.set_last_error_details(
+            "E903",
+            "decisions",
+            "DM_PENDING: requires device approval",
+        );
+        incident.tasks.push(pending);
+        let dir = paths.macc_dir.join("checkpoint-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(recover(&paths, &incident, &dir).unwrap().unwrap(), ["A"]);
+    }
+
     #[test]
     fn conflicting_retained_evidence_produces_a_specific_durable_diagnostic() {
         let (_temp, paths, incident) = fixture(true);

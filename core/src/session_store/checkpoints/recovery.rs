@@ -296,7 +296,7 @@ pub fn diagnostics(root: &Path) -> Result<Vec<Value>> {
     for checkpoint in ids {
         let id = checkpoint.id;
         match reconcile(root,&id,None) {
-            Ok(v) if checkpoint.validation_state=="needs_reconciliation" || v["diagnostic"]["requires_contract_review"]==true || v["diagnostic"]["previous_worktree"]!=v["diagnostic"]["execution_worktree"] => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"diagnostic":v["diagnostic"],"next_command":format!("macc session-store reconcile {id} --expected-sha256 {}",v["current_sha256"].as_str().unwrap_or_default())})),
+            Ok(v) if checkpoint.validation_state=="needs_reconciliation" || v["diagnostic"]["needs_context_update"]==true || v["diagnostic"]["requires_contract_review"]==true || v["diagnostic"]["previous_worktree"]!=v["diagnostic"]["execution_worktree"] => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"diagnostic":v["diagnostic"],"next_command":format!("macc session-store reconcile {id} --expected-sha256 {}",v["current_sha256"].as_str().unwrap_or_default())})),
             Err(e) => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"error":e.to_string()})),
             _ => {},
         }

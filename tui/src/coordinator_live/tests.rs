@@ -20,7 +20,7 @@ fn state_with_worker_and_intervention() -> (tempfile::TempDir, AppState) {
             "running":true,"active":false,"status":"escalated","attempt":2,"incident_id":"incident-42",
             "started_at": (chrono::Utc::now()-chrono::Duration::minutes(24)).to_rfc3339(),
             "phase_started_at": (chrono::Utc::now()-chrono::Duration::minutes(3)).to_rfc3339(),
-            "task_ids":["BOOT-VERIFY"], "tool":"codex","reason":"Windows desktop verification requires an interactive runner.",
+            "task_ids":["BOOT-VERIFY"], "tool":"test-cli","reason":"Windows desktop verification requires an interactive runner.",
             "next_action":"Attach the Windows runner report.", "target_branch":"main","findings":[]
         })).unwrap()),
         prd: "bootstrap.json".into(),
@@ -31,6 +31,7 @@ fn state_with_worker_and_intervention() -> (tempfile::TempDir, AppState) {
         active: 1,
         blocked: 1,
         merged: 0,
+        approved: 0,
         throttled_tools: vec![],
         active_tasks: vec![LiveTaskRow {
             health: TaskHealth::Healthy,
@@ -39,8 +40,8 @@ fn state_with_worker_and_intervention() -> (tempfile::TempDir, AppState) {
             workflow_state: WorkflowState::InProgress,
             runtime_status: RuntimeStatus::Running,
             phase: TaskPhase::Testing,
-            tool: "codex".into(),
-            model: "gpt-6.2-sol".into(),
+            tool: "test-cli".into(),
+            model: "test-model".into(),
             effort: "high".into(),
             age: Duration::from_secs(80),
             heartbeat_age: Some(Duration::from_secs(3)),
@@ -135,4 +136,15 @@ fn supervisor_selection_changes_detail_and_disables_worker_commands() {
     assert!(text(&render(&s, 120, 36)).contains("SUPERVISOR TASK DETAIL"));
     s.observations.latest.as_mut().unwrap().intervention = None;
     assert!(text(&render(&s, 120, 36)).contains("SELECTED TASK DETAIL"));
+}
+
+#[test]
+fn stopped_run_is_visible_until_work_resumes_or_the_queue_is_resolved() {
+    let (_project, mut state) = state_with_worker_and_intervention();
+    state.coordinator_snapshot.as_mut().unwrap().active = 0;
+    let screen = text(&render(&state, 160, 44));
+    assert!(screen.contains("Stopped · blocked"));
+    assert!(next_step_text(&state, 150).contains("BOOT-VERIFY"));
+    state.coordinator_snapshot.as_mut().unwrap().blocked = 0;
+    assert!(state.unresolved_run().is_none());
 }

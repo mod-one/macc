@@ -158,6 +158,12 @@ fn default_true() -> bool {
 }
 
 impl TaskGate {
+    pub fn requires_approval_evidence(&self) -> bool {
+        self.evidence_type
+            .as_deref()
+            .is_some_and(|kind| kind != "manual")
+    }
+
     pub fn is_human_approval(&self) -> bool {
         self.kind == GateKind::HumanApproval
     }
@@ -918,42 +924,6 @@ impl TaskRegistry {
         true
     }
 
-    /// Returns `true` if the worktree should be considered permanently stuck
-    /// (its branch will never merge autonomously).
-    ///
-    /// This is true when:
-    /// - A task assigned to this worktree is in a terminal/stuck state
-    ///   (blocked, failed, abandoned), OR
-    /// - No task references this worktree at all (orphaned — the task was
-    ///   retried on a different worker and its worktree metadata was cleared).
-    ///
-    /// Used by the worktree reuse logic to decide whether to abandon an unmerged
-    /// branch and reset the slot rather than deadlocking.
-    pub fn task_on_worktree_is_permanently_stuck(&self, worktree_path: &str) -> bool {
-        const STUCK: &[&str] = &["blocked", "failed", "abandoned"];
-        let mut any_task_references_worktree = false;
-        for task in &self.tasks {
-            if task.worktree_path().is_some_and(|p| p == worktree_path) {
-                any_task_references_worktree = true;
-                if STUCK.contains(&task.state.as_str()) {
-                    return true;
-                }
-            }
-        }
-        // Orphaned worktree: no task points here anymore (e.g. task was
-        // retried on a different worker). The unmerged branch is abandoned.
-        !any_task_references_worktree
-    }
-
-    pub fn has_in_progress_or_queued_on_worktree(&self, worktree_path: &str) -> bool {
-        self.tasks.iter().any(|task| {
-            matches!(
-                task.workflow_state(),
-                Some(WorkflowState::InProgress | WorkflowState::Queued)
-            ) && task.worktree_path().is_some_and(|p| p == worktree_path)
-        })
-    }
-
     pub fn find_task(&self, task_id: &str) -> Option<&Task> {
         self.tasks.iter().find(|task| task.id == task_id)
     }
@@ -1000,25 +970,6 @@ impl TaskRegistry {
             .filter(|task| task.is_awaiting_approval())
             .count()
     }
-}
-
-/// True when a completed task's failure must pause the coordinator run rather
-/// than be treated as a routine failure.
-///
-/// `E901` means the performer exited without persisting a valid terminal
-/// `phase_result` event -- a protocol/contract failure between the performer
-/// and coordinator (serialization bug, IPC rejection, version mismatch),
-/// never a normal task failure. If the task's worktree still holds commits
-/// that are not yet merged into the base branch, silently continuing
-/// (auto-retry, salvage, or later worktree reuse) risks losing or obscuring
-/// that work. See docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md
-/// §4.3 for the full rationale.
-pub fn requires_integrity_pause(
-    error_code: Option<&str>,
-    has_commits_ahead_of_base: bool,
-    branch_merged_into_base: bool,
-) -> bool {
-    error_code == Some("E901") && has_commits_ahead_of_base && !branch_merged_into_base
 }
 
 impl Task {
@@ -1166,8 +1117,11 @@ impl Task {
         self.gate.as_ref().is_none_or(|gate| {
             // A human gate is decided by its workflow state (`approved`),
             // never by a tool-reported verdict.
-            gate.is_human_approval()
-                || self.task_runtime.gate_verdict == Some(gate.required_verdict)
+            if gate.is_human_approval() {
+                self.workflow_state() == Some(WorkflowState::Approved)
+            } else {
+                self.task_runtime.gate_verdict == Some(gate.required_verdict)
+            }
         })
     }
 
@@ -1421,41 +1375,6 @@ mod tests {
         let r = make_registry_with_task("in_progress", "/wt/worker-02");
         // worker-01 has no task references — orphaned, safe to reuse.
         assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
-    }
-
-    #[test]
-    fn requires_integrity_pause_e901_with_unmerged_commits() {
-        // The exact incident scenario: performer exited 0, no terminal event
-        // was persisted (E901), and the branch has unmerged commits ahead of
-        // base. This must pause the coordinator rather than let the task be
-        // silently classified as a routine failure.
-        assert!(requires_integrity_pause(Some("E901"), true, false));
-    }
-
-    #[test]
-    fn requires_integrity_pause_false_when_no_commits() {
-        // A failed_clean task (no commits produced) is always safe to reuse
-        // automatically, even with E901.
-        assert!(!requires_integrity_pause(Some("E901"), false, false));
-    }
-
-    #[test]
-    fn requires_integrity_pause_false_when_branch_already_merged() {
-        // If the branch is already merged into base, there is nothing at risk.
-        assert!(!requires_integrity_pause(Some("E901"), true, true));
-    }
-
-    #[test]
-    fn requires_integrity_pause_false_for_other_error_codes() {
-        // A routine failure (e.g. E101 runner error) with commits ahead is not
-        // an integrity condition on its own -- only E901 (missing terminal
-        // event) qualifies.
-        assert!(!requires_integrity_pause(Some("E101"), true, false));
-    }
-
-    #[test]
-    fn requires_integrity_pause_false_when_no_error_code() {
-        assert!(!requires_integrity_pause(None, true, false));
     }
 
     #[test]

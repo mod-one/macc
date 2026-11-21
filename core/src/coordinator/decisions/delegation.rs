@@ -37,7 +37,8 @@ fn valid(decision: &Decision, task: &Task, plan: &Plan, policy: &Policy, revisio
     else {
         return false;
     };
-    if task.gate.as_ref() != Some(&gate)
+    if gate.requires_approval_evidence()
+        || task.gate.as_ref() != Some(&gate)
         || decision.subject_digest != digest(&super::graph::contract(node))
     {
         return false;
@@ -104,6 +105,10 @@ pub(super) fn resolve(
         .gate
         .as_ref()
         .ok_or_else(|| error("Missing delegated approval gate"))?;
+    if gate.requires_approval_evidence() {
+        task.task_runtime.extra.remove("delegated_gate_resolution");
+        return Ok(false);
+    }
     let subject = gate.subject_task.as_deref().unwrap_or_default();
     let Some(revision) = crate::coordinator::approval::subject_revision(root, reference, subject)
     else {

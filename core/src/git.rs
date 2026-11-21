@@ -852,7 +852,13 @@ pub fn checkout_new_branch_from_base(
 ) -> Result<bool> {
     Ok(run_git_status(
         repo_or_worktree,
-        &["checkout", "-B", branch, base_branch],
+        &[
+            "checkout",
+            "--no-overwrite-ignore",
+            "-b",
+            branch,
+            base_branch,
+        ],
         "create branch from base",
     )?
     .success())

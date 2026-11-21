@@ -31,6 +31,8 @@ pub struct SupervisorLive {
     /// Diagnosed root tasks, or the incident's candidates before diagnosis.
     pub task_ids: Vec<String>,
     pub tool: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     /// The step in progress, in operator terms.
     pub activity: Option<String>,
     pub started_at: Option<String>,
@@ -134,6 +136,8 @@ fn from_report(report: &Value, running: bool) -> Option<SupervisorLive> {
         incident_id: text("/incident/id").unwrap_or_default(),
         task_ids,
         tool: text("/tool"),
+        model: text("/model"),
+        effort: text("/effort"),
         activity: text("/activity").filter(|_| in_progress && running),
         started_at: text("/started_at"),
         phase_started_at: text("/phase_started_at"),
@@ -164,7 +168,7 @@ mod tests {
 
     fn report(status: &str) -> Value {
         json!({"intervention":{
-            "status":status,"attempt":2,"tool":"claude",
+            "status":status,"attempt":2,"tool":"claude","model":"test-model","effort":"high",
             "incident":{"id":"run-1-3","tasks":[{"id":"A"},{"id":"B"}]},
             "activity":"Validation 3/5: pnpm run test",
             "detail":"Validation failed: pnpm run test",
@@ -177,6 +181,8 @@ mod tests {
     fn active_intervention_reports_its_step_and_diagnosed_roots() {
         let live = from_report(&report("validating"), true).unwrap();
         assert!(live.active);
+        assert_eq!(live.model.as_deref(), Some("test-model"));
+        assert_eq!(live.effort.as_deref(), Some("high"));
         assert_eq!(live.subject(), "repair A");
         assert_eq!(
             live.activity.as_deref(),

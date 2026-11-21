@@ -357,3 +357,24 @@ fn stale_json_recovery_and_restore_cannot_write_after_cutover() {
         0
     );
 }
+
+#[test]
+fn only_the_verified_lease_owner_can_wait_past_authority_lock_contention() {
+    use std::time::Duration;
+    let r = root();
+    let root = r.path();
+    activate(root);
+    let grant = acquire(root, &request(root, "A", "performer", "future-tool")).unwrap();
+    let guard = super::lock(root).unwrap();
+    let mut foreign = grant.key.clone();
+    foreign.generation += 1;
+    assert!(super::leases::lease_lock_after(root, &foreign, Duration::ZERO).is_err());
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            drop(guard);
+        });
+        let _guard = super::leases::lease_lock_after(root, &grant.key, Duration::ZERO).unwrap();
+    });
+    heartbeat(root, &grant.key).unwrap();
+}

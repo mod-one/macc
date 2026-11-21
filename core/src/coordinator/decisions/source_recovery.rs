@@ -19,11 +19,11 @@ pub(super) fn validate_source_path(path: &str) -> crate::Result<()> {
         || path.contains(['*', '?'])
         || path.ends_with(".prd.json")
         || path == "prd.json"
-        || matches!(path, "AGENTS.md" | "GEMINI.md" | "CLAUDE.md")
-        || path.starts_with(".codex/")
+        || matches!(path, "AGENTS.md" | "GEMINI.md" | "CLAUDE.md") // macc:allow-tool-name: protected project control file
+        || path.starts_with(".codex/") // macc:allow-tool-name: protected project control file
+        || path.starts_with(".claude/") // macc:allow-tool-name: protected project control file
+        || path.starts_with(".gemini/") // macc:allow-tool-name: protected project control file
         || path.starts_with(".agents/")
-        || path.starts_with(".claude/")
-        || path.starts_with(".gemini/")
     {
         return Err(error(format!(
             "Source repair path is not an application source path: {path}"

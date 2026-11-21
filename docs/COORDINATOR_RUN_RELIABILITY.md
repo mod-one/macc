@@ -217,6 +217,8 @@ A local retained-work conflict blocks that task instead of aborting decision
 refresh for the whole registry. Dependency diagnostics follow the current root
 cause and unchanged diagnostics are deduplicated.
 
+After a merge, MACC detaches a clean worker at its integrated commit and records that commit in the worker metadata. A later PRD can reuse the slot after checking its ownership, Git state and ancestry against the next task's base. Checkout preserves ignored files and refuses a path collision. Dirty workers, unmerged commits and slots assigned to a retained retry stay available for recovery. `max_parallel` limits concurrent tasks. Retained workers and the integration and supervisor worktrees can raise the directory count above that limit.
+
 Recovery returns to the retained test, correction, review or publication phase.
 A merge resumes directly only if the existing exact-commit/compliance fence
 passes. Otherwise MACC schedules a mandatory independent review, even when
@@ -224,7 +226,7 @@ ordinary optional review is disabled or its correction-cycle budget is spent.
 This freshness refresh does not consume an additional correction cycle.
 Changed content never inherits a rewritten `reviewed_commit`.
 
-Approval gates under explicit `never_ask` policy derive authority from the
+Approval gates that require evidence, such as a pull request review, require the prescribed human quorum on the subject revision under every consultation policy. For gates eligible for delegation, the explicit `never_ask` policy derives authority from the
 resolved durable decision bound to the exact subject revision, gate contract and
 current policy. The ledger evaluator verifies the same authority rather than
 alternating between delegated approval and zero human quorum. Revocation,

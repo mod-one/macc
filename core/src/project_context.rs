@@ -134,7 +134,7 @@ pub fn plan_tools(ctx: &PlanningContext<'_>, registry: &ToolRegistry) -> Result<
     for (target, mut tools) in groups {
         tools.sort();
         tools.dedup();
-        // A single renderer owns shared targets such as Gemini + Antigravity's GEMINI.md.
+        // A single renderer owns each shared context file.
         if plan
             .actions
             .iter()

@@ -50,7 +50,7 @@ impl PhaseEvidence {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let projected = super::result_protocol::projection(&raw);
+        let projected = super::result_protocol::final_projection(&raw);
         let mut artifacts = serde_json::Map::new();
         for (name, bytes) in [
             ("stdout.log", out.stdout.as_slice()),

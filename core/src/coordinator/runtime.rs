@@ -1025,7 +1025,7 @@ pub fn raw_event_to_runtime_event(
 }
 
 pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
-    let output = super::result_protocol::projection(output);
+    let output = super::result_protocol::final_projection(output);
     for line in output.lines().rev() {
         let trimmed = line.trim();
         if let Some(raw) = trimmed.strip_prefix("REVIEW_VERDICT:") {

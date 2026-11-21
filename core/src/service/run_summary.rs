@@ -162,6 +162,22 @@ fn blocked_root_for_run<'a>(
 }
 
 fn task_error_message(task: &Task) -> Option<String> {
+    if crate::coordinator::phase_diagnostics::effective_code(task) == Some("E903")
+        && !task.task_runtime.unmet_preconditions.is_empty()
+        && task
+            .task_runtime
+            .last_error_origin
+            .as_deref()
+            .is_none_or(|origin| origin == "precondition" || origin == "runner")
+    {
+        return Some(
+            crate::coordinator::engine::transitions::describe_unmet_preconditions(
+                &task.id,
+                &task.task_runtime.unmet_preconditions,
+                task.task_runtime.result_explanation.as_deref(),
+            ),
+        );
+    }
     task.task_runtime
         .last_error_message
         .clone()

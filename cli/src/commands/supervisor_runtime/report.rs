@@ -13,6 +13,8 @@ pub(super) struct Intervention {
     pub(super) attempt: u32,
     pub(super) status: String,
     pub(super) tool: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
     pub(super) diagnosis: Option<repair::Diagnosis>,
     pub(super) worktree: Option<PathBuf>,
     pub(super) validation: Vec<String>,

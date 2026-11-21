@@ -60,7 +60,9 @@ pub fn describe_unmet_preconditions(
     unmet: &[String],
     explanation: Option<&str>,
 ) -> String {
-    let explanation = explanation.map(str::trim).filter(|value| !value.is_empty());
+    let explanation = explanation.map(str::trim).filter(|value| {
+        !crate::coordinator::result_protocol::missing_precondition_explanation(Some(value))
+    });
     let items: Vec<&str> = if unmet.is_empty() {
         explanation.into_iter().collect()
     } else {

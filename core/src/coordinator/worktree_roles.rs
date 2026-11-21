@@ -54,6 +54,13 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 pub fn performer(root: &Path, path: &Path) -> bool {
+    performer_metadata(root, path).is_some_and(|metadata| {
+        crate::git::current_branch_name(path).ok().as_deref() == Some(metadata.branch.as_str())
+    })
+}
+
+/// Identity of the physical slot, including when the coordinator has released its branch.
+pub(super) fn performer_metadata(root: &Path, path: &Path) -> Option<crate::WorktreeMetadata> {
     if root
         .join(".macc/worktree")
         .symlink_metadata()
@@ -63,16 +70,16 @@ pub fn performer(root: &Path, path: &Path) -> bool {
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_symlink())
     {
-        return false;
+        return None;
     }
     let (Ok(pool), Ok(path)) = (
         root.join(".macc/worktree").canonicalize(),
         path.canonicalize(),
     ) else {
-        return false;
+        return None;
     };
     if path.parent() != Some(pool.as_path()) {
-        return false;
+        return None;
     }
     if crate::project_ownership::validate_path(
         &ProjectPaths::from_root(root),
@@ -84,15 +91,13 @@ pub fn performer(root: &Path, path: &Path) -> bool {
     )
     .is_err()
     {
-        return false;
+        return None;
     }
     crate::read_worktree_metadata(&path)
         .ok()
         .flatten()
-        .is_some_and(|metadata| {
+        .filter(|metadata| {
             path.file_name().and_then(|n| n.to_str()) == Some(metadata.id.as_str())
-                && crate::git::current_branch_name(&path).ok().as_deref()
-                    == Some(metadata.branch.as_str())
                 && !metadata.tool.is_empty()
                 && metadata
                     .branch

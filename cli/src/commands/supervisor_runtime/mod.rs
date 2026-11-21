@@ -229,6 +229,8 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         attempt,
                         status: "detected".into(),
                         tool: None,
+                        model: None,
+                        effort: None,
                         diagnosis: cached,
                         worktree: None,
                         validation: Vec::new(),

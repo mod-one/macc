@@ -235,7 +235,7 @@ pub trait ControlPlaneBackend {
     async fn on_cycle_start(&mut self, cycle: usize) -> Result<()>;
     /// Returns `Some((task_id, reason))` when a completed job's failure meets
     /// the coordinator integrity-pause condition (see
-    /// `crate::coordinator::model::requires_integrity_pause`) and must halt
+    /// `crate::coordinator::helpers::integrity_pause_reason`) and must halt
     /// the run for operator review rather than proceed to retry/dispatch.
     async fn monitor_active_jobs(&mut self) -> Result<Option<(String, String)>>;
     async fn monitor_merge_jobs(&mut self) -> Result<Option<(String, String)>>;
@@ -1567,8 +1567,7 @@ impl CoordinatorRunController {
                 String::new()
             } else {
                 format!(
-                    "\n\n{} task(s) could not be dispatched:\n{}\n",
-                    stalled.lines.len(),
+                    "\n\nDispatch diagnosis:\n{}\n",
                     stalled
                         .lines
                         .iter()
@@ -1585,12 +1584,12 @@ impl CoordinatorRunController {
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(MaccError::Validation(format!(
-                    "Coordinator cannot continue: a task is blocked and every remaining todo task depends on a blocked task.\n\nBlocking diagnosis:\n{}\nInspect the blocked task, fix its recorded cause, then retry the coordinator.",
+                    "Coordinator cannot continue: all remaining tasks are blocked by a recorded cause or cannot resume in their retained worktree.\n\nBlocking diagnosis:\n{}\nInspect the blocked task, fix its recorded cause, then retry the coordinator.",
                     blocking_diagnosis
                 )));
             }
             return Err(MaccError::Validation(format!(
-                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{}{}\nRun `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
+                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{}{}\nInspect the task causes with `macc coordinator status` and the dispatch log with `macc logs tail --component coordinator`.",
                 self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint, diagnosis
             )));
         }
@@ -3543,6 +3542,34 @@ mod tests {
         assert_eq!(task["worktree"]["branch"], "ai/fake/worker-01");
         assert!(task["task_runtime"]["completion_kind"].is_null());
         assert!(task["task_runtime"]["pid"].is_null());
+    }
+
+    #[test]
+    fn lost_session_lease_keeps_worker_and_does_not_retry_provider_success() {
+        let mut task = json!({"id":"lease","state":"claimed","tool":"fixture",
+            "worktree":{"worktree_path":"/unavailable/worker","branch":"ai/worker"},
+            "task_runtime":{"status":"running","pid":123,"current_phase":"fix"}});
+        let mut input =
+            make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));
+        input.error_code = Some("E901".into());
+        input.error_origin = Some("runner".into());
+        input.error_message = Some("Session lease heartbeat failed".into());
+        let result = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-11-21T12:00:00Z",
+        );
+        assert!(!result.should_retry);
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E901");
+        assert_eq!(
+            task["task_runtime"]["last_error_message"],
+            input.error_message.unwrap()
+        );
+        assert_eq!(task["task_runtime"]["current_phase"], "fix");
+        assert_eq!(task["worktree"]["branch"], "ai/worker");
+        assert!(task["task_runtime"]["completion_kind"].is_null());
     }
 
     #[test]
