@@ -7,6 +7,7 @@ import { CoordinatorLaunchDialog } from './CoordinatorLaunchDialog';
 import { NotificationsDrawer } from './NotificationsDrawer';
 import RouteLoadingSkeleton from './RouteLoadingSkeleton';
 import { StatusBadge } from './StatusBadge';
+import { awaitingApprovals, awaitingDecisions, useInboxStore } from '../stores/inboxStore';
 import { ApprovalCenter } from './ApprovalDialog';
 import { DecisionCenter } from './DecisionCenter';
 import { useNotificationStore } from '../stores/notificationStore';
@@ -63,6 +64,7 @@ const NAV_SECTIONS: NavSection[] = [
   {
     label: 'Runtime',
     items: [
+      { path: '/ops/inbox', label: 'Inbox', icon: Icons.CheckSquare },
       { path: '/ops/console',   label: 'Console',   icon: Icons.Terminal  },
       { path: '/ops/worktrees', label: 'Worktrees', icon: Icons.Folder    },
       { path: '/ops/registry',  label: 'Registry',  icon: Icons.Database  },
@@ -115,6 +117,8 @@ const Layout: React.FC = () => {
   const isOwner     = useIsOwner();
   const fetchOwnershipRecords = useOwnershipStore((s) => s.fetchRecords);
 
+  const pendingDecisions = useInboxStore(s => awaitingDecisions(s.decisions).length);
+  const inboxCount = awaitingApprovals(status).length + pendingDecisions;
   const pendingTakeover = ownership?.takeover_request ?? null;
   const showGitPanel   = !location.pathname.startsWith('/ops/git');
   const contextualHelpSection = getHelpSectionForRoute(location.pathname);
@@ -318,6 +322,7 @@ const Layout: React.FC = () => {
                     ? (location.pathname === '/dashboard' || location.pathname === '/')
                     : location.pathname.startsWith(item.path);
                   const Icon = item.icon;
+                  const badge = item.path === '/ops/inbox' && inboxCount > 0 ? inboxCount : null;
 
                   return (
                     <li key={item.path}>
@@ -325,6 +330,7 @@ const Layout: React.FC = () => {
                         to={item.path}
                         aria-current={active ? 'page' : undefined}
                         title={collapsed ? item.label : undefined}
+                        aria-label={badge !== null ? `Inbox, ${badge} pending requests` : item.label}
                         style={{
                           display: 'flex',
                           alignItems: 'center',
@@ -363,6 +369,7 @@ const Layout: React.FC = () => {
                             {item.label}
                           </span>
                         )}
+                        {badge !== null && <span className="text-xs font-semibold text-[var(--warning)]">▲ {badge}</span>}
                       </Link>
                     </li>
                   );

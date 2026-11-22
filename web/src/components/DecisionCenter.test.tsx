@@ -1,3 +1,5 @@
+import { MemoryRouter } from 'react-router-dom';
+import Inbox from '../pages/ops/Inbox';
 import {act,fireEvent,render,screen,waitFor} from '@testing-library/react';
 import {beforeEach,expect,it,vi} from 'vitest';
 import {DecisionCenter} from './DecisionCenter';
@@ -125,4 +127,17 @@ it('never_ask shows an explicit external block without asking or pretending it w
  fireEvent.click(screen.getByRole('button',{name:'Decisions, 0 pending'}));
  expect(await screen.findByText('Blocked: prerequisite unavailable')).toBeInTheDocument();
  expect(screen.queryByRole('button',{name:'Send answer'})).not.toBeInTheDocument();expect(screen.queryByText('Recorded response')).not.toBeInTheDocument();
+});
+
+it('opens the chosen external decision from the Inbox in never_ask', async () => {
+  const data = snapshot('never_ask');
+  data.decisions = [decision, { ...decision, id: 'external', status: 'blocked_external',
+    request: { ...decision.request, question: 'Which device must be connected?' } }];
+  api.get.mockResolvedValue(data);
+  render(<MemoryRouter initialEntries={['/ops/inbox/decisions']}><DecisionCenter /><Inbox section="decisions" /></MemoryRouter>);
+  expect(await screen.findByRole('link', { name: 'Decisions (2)' })).toBeInTheDocument();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /Which device must be connected/ }));
+  expect(await screen.findByRole('dialog', { name: 'Which device must be connected?' })).toBeInTheDocument();
+  expect(api.mutate).not.toHaveBeenCalled();
 });

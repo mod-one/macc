@@ -18,6 +18,7 @@ const Prd = lazy(() => import('./pages/Prd'));
 const Plan = lazy(() => import('./pages/Plan'));
 const Apply = lazy(() => import('./pages/Apply'));
 const Console = lazy(() => import('./pages/ops/Console'));
+const Inbox = lazy(() => import('./pages/ops/Inbox'));
 const Registry = lazy(() => import('./pages/ops/Registry'));
 const Live = lazy(() => import('./pages/ops/Live'));
 const Locks = lazy(() => import('./pages/ops/Locks'));
@@ -67,6 +68,9 @@ const App: React.FC = () => {
           <Route path="ops">
             <Route path="console" element={<Console />} />
             <Route path="registry" element={<Registry />} />
+            <Route path="inbox" element={<Navigate to="approvals" replace />} />
+            <Route path="inbox/approvals" element={<Inbox key="approvals" section="approvals" />} />
+            <Route path="inbox/decisions" element={<Inbox key="decisions" section="decisions" />} />
             <Route path="worktrees" element={<Worktrees />} />
             <Route path="worktrees/create" element={<div className="p-10 text-center">Worktree Creation Wizard - Coming Soon</div>} />
             <Route path="worktrees/:id" element={<WorktreeTerminal />} />

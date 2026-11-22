@@ -8,12 +8,13 @@ import {getDecisions,mutateDecisions,type ApprovalTicket} from '../api/decisions
 import type { ApiApprovalDecision, ApiPendingApproval } from '../api/models';
 import { useCoordinatorStore } from '../store';
 import { useNotificationStore } from '../stores/notificationStore';
+import { awaitingApprovals, openApproval, useInboxStore } from '../stores/inboxStore';
 import { cn } from './styles';
 
 /*
  * Human approval dialog.
  *
- * Opens by itself when a `human_approval` gate waits for a decision, explains
+ * Opens on request or when the gate policy permits an automatic prompt, explains
  * the request in full, and records the decision through
  * POST /api/v1/coordinator/approvals/:id/decision. Core validates the role,
  * revision, evidence and reason exactly as for `macc coordinator approve`.
@@ -211,7 +212,12 @@ function DecisionForm({ gate, defaultActor, trustMode, onRecorded }: DecisionFor
 
   const [ticket,setTicket]=React.useState<ApprovalTicket|null>(null);
   const pollOrApply=async(apply:boolean)=>{if(!ticket)return;setSubmitting(true);setError(null);try{const result=await mutateDecisions({action:apply?'approval_apply':'approval_poll',id:ticket.id}) as ApprovalTicket;setTicket(result);if(result.status==='applied')onRecorded('Independently approved gate response durably recorded.');}catch(e){setError(String(e));}finally{setSubmitting(false);}};
-  React.useEffect(()=>{try{sessionStorage.setItem(`macc.approvalDraft.${gateKey(gate)}`,JSON.stringify({decision,role,evidence,reason,actor,conditions}));}catch{/* Keep in memory. */}},[gate.task_id,gate.subject_revision,decision,role,evidence,reason,actor,conditions]);
+  const revisionKey = gateKey(gate);
+  React.useEffect(() => {
+    try {
+      sessionStorage.setItem(`macc.approvalDraft.${revisionKey}`, JSON.stringify({ decision, role, evidence, reason, actor, conditions }));
+    } catch { /* Keep the draft in memory when storage is unavailable. */ }
+  }, [revisionKey, decision, role, evidence, reason, actor, conditions]);
 
   const isApproval = decision === 'approved';
   const missing: string[] = [];
@@ -375,34 +381,28 @@ function DecisionForm({ gate, defaultActor, trustMode, onRecorded }: DecisionFor
 export function ApprovalCenter() {
   const status = useCoordinatorStore((s) => s.status);
   const loadStatus = useCoordinatorStore((s) => s.loadStatus);
-  const awaiting = React.useMemo(
-    () => (status?.pending_approvals ?? []).filter((g) => g.awaiting_decision),
-    [status],
-  );
+  const awaiting = React.useMemo(() => awaitingApprovals(status), [status]);
   const [snoozed, setSnoozed] = React.useState<string[]>(() => loadSnoozed());
-  const [openId, setOpenId] = React.useState<string | null>(null);
-  const openedManually = React.useRef(false);
-  const [message, setMessage] = React.useState<string | null>(null);
+  const selection = useInboxStore(s => s.approval);
+  React.useEffect(() => () => useInboxStore.setState({ approval: null }), []);
+  const [message, setMessage] = React.useState<{ revisionKey: string; text: string } | null>(null);
   const [defaultActor, setDefaultActor] = React.useState('');
   const [trustMode,setTrustMode]=React.useState<string>();
 
-  const gate = awaiting.find((g) => g.task_id === openId) ?? null;
+  const gate = awaiting.find(g => g.task_id === selection?.id && (selection.manual || g.auto_prompt)) ?? null;
 
   // Open by itself for the first gate not put off; close once decided elsewhere.
   React.useEffect(() => {
-    if (openId && !awaiting.some((g) => g.task_id === openId && (g.auto_prompt || openedManually.current))) {
-      setOpenId(null);
-    }
-    if (!openId) {
+    if (selection && !gate) useInboxStore.setState({ approval: null });
+    if (!selection) {
       const next = awaiting.find((g) => g.auto_prompt && !snoozed.includes(gateKey(g)));
       const active=document.activeElement;
       const editing=active instanceof HTMLElement&&active.matches('input, textarea, select, [contenteditable="true"]');
       if (next && !editing && !document.querySelector('[role="dialog"]')) {
-        openedManually.current = false;
-        setOpenId(next.task_id);
+        useInboxStore.setState({ approval: { id: next.task_id, manual: false } });
       }
     }
-  }, [awaiting, openId, snoozed]);
+  }, [awaiting, selection, gate, snoozed]);
 
   React.useEffect(() => {
     if (!gate || defaultActor) return;
@@ -417,7 +417,7 @@ export function ApprovalCenter() {
       setSnoozed(next);
       saveSnoozed(next);
     }
-    setOpenId(null);
+    useInboxStore.setState({ approval: null });
     setMessage(null);
   };
 
@@ -428,16 +428,14 @@ export function ApprovalCenter() {
     setSnoozed(next);
     saveSnoozed(next);
     setMessage(null);
-    openedManually.current = true;
-    setOpenId(first.task_id);
+    openApproval(first.task_id);
   };
 
   const showNext = () => {
     if (awaiting.length < 2 || !gate) return;
     const index = awaiting.findIndex((g) => g.task_id === gate.task_id);
     setMessage(null);
-    openedManually.current = true;
-    setOpenId(awaiting[(index + 1) % awaiting.length].task_id);
+    openApproval(awaiting[(index + 1) % awaiting.length].task_id);
   };
 
   const addNotification = useNotificationStore((s) => s.addNotification);
@@ -445,7 +443,7 @@ export function ApprovalCenter() {
   // The dialog closes by itself once the gate no longer awaits a decision, so
   // the outcome is also kept in the notification center.
   const onRecorded = (line: string) => {
-    setMessage(line);
+    if (gate) setMessage({ revisionKey: gateKey(gate), text: line });
     addNotification({ type: 'success', title: 'Approval decision recorded', message: line });
     void loadStatus().catch(() => undefined);
   };
@@ -485,9 +483,9 @@ export function ApprovalCenter() {
                   <ApprovalBrief gate={gate} />
                 </div>
                 <footer className="space-y-3 border-t border-[var(--border)] px-5 py-4">
-                  {message && (
+                  {message?.revisionKey === gateKey(gate) && (
                     <p role="status" className="text-sm text-[var(--success)]">
-                      {message}
+                      {message.text}
                     </p>
                   )}
                   <DecisionForm key={gateKey(gate)} gate={gate} defaultActor={defaultActor} trustMode={trustMode} onRecorded={onRecorded} />

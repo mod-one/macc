@@ -1,3 +1,5 @@
+import { MemoryRouter } from 'react-router-dom';
+import Inbox from '../pages/ops/Inbox';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ApiCoordinatorStatus, ApiPendingApproval } from '../api/models';
@@ -192,4 +194,37 @@ it('keeps an unsent gate draft after deciding later and reopening',async()=>{
 });
 it('records conditional legacy approval through native conditional vote rather than the unconditional endpoint',async()=>{
  setPending([gate()]);api.approvalSnapshot.mockResolvedValue({plan:{id:'p'},approval_broker_available:false});api.approvalMutation.mockResolvedValue({});await act(async()=>{render(<ApprovalCenter/>);});fireEvent.change(screen.getByPlaceholderText(/pull request review/),{target:{value:'https://git/pr/7'}});fireEvent.click(screen.getByRole('button',{name:'Add approval condition'}));fireEvent.change(screen.getByLabelText('Condition description'),{target:{value:'Deliver independent verification'}});fireEvent.change(screen.getByLabelText('Verification task ID (must be delivered)'),{target:{value:'VERIFY-7'}});fireEvent.click(screen.getByRole('button',{name:'Approve…'}));await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Confirm'}));});expect(api.decide).not.toHaveBeenCalled();expect(api.approvalMutation).toHaveBeenCalledWith(expect.objectContaining({action:'operator',intent:expect.objectContaining({action:'conditional_gate_vote',task:'FIN-APP-001',conditions:[expect.objectContaining({description:'Deliver independent verification',task_id:'VERIFY-7'})]})}));
+});
+
+it.each([
+  ['Reject', 'rejected'],
+  ['Request changes', 'changes_requested'],
+])('opens a chosen quiet approval from the filtered Inbox and records %s', async (label, decision) => {
+  const first = gate({ auto_prompt: false });
+  const second = gate({ auto_prompt: false, task_id: 'APP-2', subject_revision: '1122aabbccdd', missing_roles: ['AUDIT'], required_roles: ['AUDIT'] });
+  setPending([first, gate({ task_id: 'CLOSED', awaiting_decision: false }), second]);
+  await act(async () => {
+    render(<MemoryRouter initialEntries={['/ops/inbox/approvals']}><ApprovalCenter /><Inbox section="approvals" /></MemoryRouter>);
+  });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Approvals (2)' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /CLOSED/ })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'AUDIT' } });
+  expect(screen.queryByRole('button', { name: /FIN-APP-001/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Approvals (2)' })).toBeInTheDocument();
+  expect(screen.getByText('1122aabbccdd')).toBeInTheDocument();
+  expect(screen.getByText('Review evidence · pull_request_review')).toBeInTheDocument();
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /APP-2/ })); });
+  fireEvent.click(screen.getByRole('radio', { name: label }));
+  expect(screen.getByRole('button', { name: label + '…' })).toBeDisabled();
+  fireEvent.change(screen.getByRole('textbox', { name: /Reason/ }), { target: { value: 'Recheck the signed build.' } });
+  fireEvent.click(screen.getByRole('button', { name: label + '…' }));
+  expect(api.decide).not.toHaveBeenCalled();
+  api.status.mockResolvedValue({ pending_approvals: [first] });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Confirm' })); });
+  expect(api.decide).toHaveBeenCalledWith('APP-2', expect.objectContaining({
+    decision, role: 'AUDIT', revision: '1122aabbccdd', reason: 'Recheck the signed build.',
+  }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Approvals (1)' })).toBeInTheDocument();
 });

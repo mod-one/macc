@@ -1,3 +1,4 @@
+import { useInboxDecisions, useInboxStore } from '../stores/inboxStore';
 import {DecisionDeliveryStatus} from './DecisionDeliveryStatus';
 import React from 'react';
 import {DecisionGovernance,ReuseDirection} from './DecisionGovernance';
@@ -8,7 +9,7 @@ import {ApprovalTicketDetails} from './ApprovalTicketDetails';
 import {DecisionGateControls} from './DecisionGateControls';
 import {DecisionLifecycleControls} from './DecisionLifecycleControls';
 import * as Dialog from '@radix-ui/react-dialog';
-import { getDecisions, mutateDecisions, getTaskDecisionContexts, type Decision, type DecisionSnapshot, type AutonomyMode } from '../api/decisions';
+import { mutateDecisions, getTaskDecisionContexts, type Decision, type AutonomyMode } from '../api/decisions';
 
 
 function describePatch(value:unknown):string[]{
@@ -26,7 +27,8 @@ function inputBusy() {
   return element instanceof HTMLElement && (element.matches('input, textarea, select, [contenteditable="true"]') || !!document.querySelector('[role="dialog"]'));
 }
 export function DecisionCenter() {
-  const [snapshot, setSnapshot] = React.useState<DecisionSnapshot | null>(null);
+  const { snapshot, loadError, refresh } = useInboxDecisions();
+  const requested = useInboxStore(s => s.decisionToInspect);
   const [open, setOpen] = React.useState(false);
   const [selected, setSelected] = React.useState<string | null>(null);
   const [viewed, setViewed] = React.useState<Decision | null>(null);
@@ -37,7 +39,6 @@ export function DecisionCenter() {
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState('');
   const [error, setError] = React.useState('');
-  const [loadError, setLoadError] = React.useState('');
   const [token, setToken] = React.useState('');
   const [attestation,setAttestation]=React.useState('');
   const [operationEvidence,setOperationEvidence]=React.useState('');
@@ -48,20 +49,28 @@ export function DecisionCenter() {
   const [preview, setPreview] = React.useState('');
   const [reconcileDigest, setReconcileDigest] = React.useState('');
   const [reviewedPatch, setReviewedPatch] = React.useState('');
-  const refresh = React.useCallback(async () => {
-    try { const data = await getDecisions(); setSnapshot(data); setLoadError(''); } catch (e) { setLoadError(String(e)); }
-  }, []);
-  React.useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 3000); return () => window.clearInterval(timer); }, [refresh]);
   React.useEffect(() => { try { sessionStorage.setItem('macc.decisionDrafts', JSON.stringify(drafts)); } catch { /* Keep drafts in memory. */ } }, [drafts]);
-  const pending = snapshot?.decisions.filter(d => d.status === 'pending_human') ?? [];
+  const inspect = React.useCallback((decision?: Decision) => {
+    setSelected(decision?.id ?? null);
+    setViewed(decision ?? null);
+    autoPresented.current = false;
+    setOpen(true);
+  }, []);
+  React.useEffect(() => {
+    if (requested) {
+      inspect(requested);
+      useInboxStore.setState({ decisionToInspect: null });
+    }
+  }, [requested, inspect]);
+  const pending = React.useMemo(() => snapshot?.decisions.filter(d => d.status === 'pending_human') ?? [], [snapshot]);
   const external = snapshot?.decisions.filter(d => d.status === 'blocked_external') ?? [];
   const neverAsk = snapshot?.policy.human_question_min_risk === 'never_ask';
   React.useEffect(() => {
     if (neverAsk) { const authoritative=snapshot?.decisions.find(d=>d.id===viewed?.id); if(autoPresented.current&&authoritative&&authoritative.status!=='pending_human'){setOpen(false);autoPresented.current=false;} return; }
     if (Date.now() < autoAfter.current) return;
     const next = pending.find(d => !deferred.has(keyOf(d)));
-    if (!open && next && !inputBusy()) { setSelected(next.id); setViewed(next); setMessage(''); autoPresented.current = true; setOpen(true); }
-  }, [snapshot, deferred]); // A polling update must not replace an answer being typed.
+    if (!open && !requested && next && !inputBusy()) { setSelected(next.id); setViewed(next); setMessage(''); autoPresented.current = true; setOpen(true); }
+  }, [snapshot, deferred, neverAsk, open, requested, pending, viewed?.id]);
   const fresh = snapshot?.decisions.find(d => d.id === selected);
   const current = open && viewed ? viewed : fresh ?? pending[0] ?? snapshot?.decisions.at(-1);
   const draftKey = current ? keyOf(current) : '';
@@ -80,7 +89,8 @@ export function DecisionCenter() {
           result=await mutateDecisions({action:'approval_begin',intent});setMessage('Independent approval requested. Open its approval page, check the result, then apply the exact reviewed action. Your draft remains unsent.');
         }else{result=await mutateDecisions({action:'operator',intent,attestation:attestation.trim()?parseAttestation(attestation):null});setMessage(success);}
       }else{result=await mutateDecisions(body);setMessage(success);}
-      const data=await getDecisions();setSnapshot(data);
+      const data = await refresh();
+      if (!data) return;
       const object=result&&typeof result==='object'?result as Record<string,unknown>:null;const applied=object?.result&&typeof object.result==='object'?object.result as Record<string,unknown>:object;
       if(typeof object?.message==='string'&&typeof object?.status==='string')setMessage(`${object.message} (${object.status})`);
       const submittedId=body.action==='answer'?body.id:body.action==='approval_apply'?applied?.id:null;
@@ -95,7 +105,7 @@ export function DecisionCenter() {
   const selectedPatch=current?.request.options.find(o=>o.id===draft.option)?.proposed_patch??((draft.option===current?.request.recommended_option_id||!current?.request.recommended_option_id&&!draft.option)?current?.request.proposed_patch:undefined);
   const close = () => { if (current?.status === 'pending_human') setDeferred(old => new Set([...old, keyOf(current)])); setOpen(false); };
   return <Dialog.Root open={open} onOpenChange={value => value ? setOpen(true) : close()}>
-    <button type="button" onClick={() => { const next = pending[0] ?? external[0] ?? snapshot?.decisions.at(-1); setSelected(next?.id ?? null); setViewed(next ?? null); autoPresented.current = false; setOpen(true); }} aria-label={`Decisions, ${pending.length} pending`} className="rounded border px-2 py-1 text-xs">Decisions {pending.length > 0 ? `(${pending.length})` : ''}</button>
+    <button type="button" onClick={() => inspect(pending[0] ?? external[0] ?? snapshot?.decisions.at(-1))} aria-label={`Decisions, ${pending.length} pending`} className="rounded border px-2 py-1 text-xs">Decisions {pending.length > 0 ? `(${pending.length})` : ''}</button>
     {external.length>0 && !open && <span role="status" className="ml-2 text-sm text-[var(--warning)]">Blocked: external intervention or supervisor recovery required ({external.length}). Open Decisions for the recorded cause.</span>}
     {!open && message==='Response sent.' && <span role="status" className="ml-2 text-xs">Response sent.</span>}
     <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" /><Dialog.Content onOpenAutoFocus={event => {

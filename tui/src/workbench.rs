@@ -5,11 +5,7 @@ pub(super) mod changes;
 pub(super) use changes::edit_change;
 
 pub(super) fn pending(s: &AppState) -> usize {
-    s.decision_center.pending()
-        + s.coordinator_pending_approvals
-            .iter()
-            .filter(|g| g.awaiting_decision)
-            .count()
+    s.decision_center.pending() + s.awaiting_approvals().count()
 }
 pub(super) fn rail(f: &mut Frame, s: &AppState, area: Rect, drafts: usize) -> Rect {
     if area.width < 105 || area.height < 14 {

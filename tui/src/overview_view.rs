@@ -66,11 +66,7 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
     let mut overview = format!(
         "{} pending decisions · {} pending approvals\n",
         state.decision_center.pending(),
-        state
-            .coordinator_pending_approvals
-            .iter()
-            .filter(|g| g.awaiting_decision)
-            .count()
+        state.awaiting_approvals().count()
     );
     if let Some(run) = &state.coordinator_run_summary {
         overview.push_str(&format!(

@@ -517,3 +517,52 @@ fn ctrl_c_quits_from_pages_editors_and_overlays() {
         s.should_quit = false;
     }
 }
+
+#[test]
+fn manual_approval_inbox_shows_count_and_review_requirements_without_a_popup() {
+    use macc_core::coordinator::approval::PendingApproval;
+    let (_dir, mut state) = fixture();
+    let gate = |task: &str, awaiting| PendingApproval {
+        task_id: task.into(),
+        awaiting_decision: awaiting,
+        auto_prompt: false,
+        subject_task: "DELIVERY".into(),
+        subject_revision: Some("abc123456789".into()),
+        missing_roles: vec!["AUDITOR".into()],
+        evidence_type: Some("pull_request_review".into()),
+        evidence_required: true,
+        ..Default::default()
+    };
+    state.coordinator_pending_approvals = vec![
+        gate("PAST", false),
+        gate("APP-1", true),
+        gate("APP-2", true),
+    ];
+    state.sync_approval_window();
+    assert!(state.approval_window.is_none());
+    handle_key(&mut state, KeyCode::Char('I'));
+    handle_key(&mut state, KeyCode::Char('2'));
+    let display = text(&render(&state, 140, 36));
+    for phrase in [
+        "Inbox ▲ 2",
+        "Approvals (2)",
+        "Revision: abc123456789",
+        "Missing roles: AUDITOR",
+        "Evidence: pull_request_review",
+    ] {
+        assert!(display.contains(phrase), "Missing {phrase} in {display}");
+    }
+    handle_key(&mut state, KeyCode::Down);
+    handle_key(&mut state, KeyCode::Enter);
+    assert_eq!(
+        state.approval_window.as_ref().unwrap().gate.task_id,
+        "APP-2"
+    );
+    state.sync_approval_window();
+    assert!(state.approval_window.as_ref().unwrap().opened_manually);
+    state.coordinator_pending_approvals.pop();
+    state.sync_approval_window();
+    assert!(state.approval_window.is_none());
+    assert_eq!(state.inspector_index, 0);
+    assert!(text(&render(&state, 140, 36)).contains("Approvals (1)"));
+}

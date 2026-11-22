@@ -31,11 +31,7 @@ pub(super) fn supervisor_decision_index(s: &AppState) -> Option<usize> {
 }
 pub(super) fn count(s: &AppState) -> usize {
     match s.inbox_section {
-        Section::Approvals => s
-            .coordinator_pending_approvals
-            .iter()
-            .filter(|g| g.awaiting_decision)
-            .count(),
+        Section::Approvals => s.awaiting_approvals().count(),
         _ => decisions(s).len(),
     }
 }
@@ -52,32 +48,36 @@ pub(super) fn draw(f: &mut Frame, s: &AppState, area: Rect) {
     let layout = Layout::default()
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
+    let approvals = format!("Approvals ({})", s.awaiting_approvals().count());
     workspace_ui::tab_line(
         f,
         layout[0],
-        &["Decisions", "Approvals", "History"],
+        &["Decisions", &approvals, "History"],
         s.inbox_section as usize,
         theme().accent,
     );
     let (list, inspector) = workspace_ui::columns(layout[1]);
     let index = s.inspector_index;
     let (rows, description) = if s.inbox_section == Section::Approvals {
-        let gates: Vec<_> = s
-            .coordinator_pending_approvals
-            .iter()
-            .filter(|g| g.awaiting_decision)
-            .collect();
+        let gates: Vec<_> = s.awaiting_approvals().collect();
         let detail = gates.get(index).map(|g| {
             if s.inbox_raw {
                 serde_json::to_string_pretty(g).unwrap_or_default()
             } else {
                 format!(
-                    "{}\n\n{}\n\nMissing roles: {}\n{}",
+                    "{}\nRevision: {}\n\n{}\n\nMissing roles: {}\nEvidence: {}\nQuorum: {}\n{}",
                     g.subject_task,
+                    g.subject_revision.as_deref().unwrap_or("Unknown"),
                     g.description
                         .as_deref()
                         .unwrap_or("Review the requested change."),
                     g.missing_roles.join(", "),
+                    if g.evidence_required {
+                        g.evidence_type.as_deref().unwrap_or("Required")
+                    } else {
+                        "Optional"
+                    },
+                    g.quorum,
                     g.note.as_deref().unwrap_or("")
                 )
             }

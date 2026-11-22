@@ -254,14 +254,12 @@ fn never_ask_cannot_supply_required_pull_request_reviews() {
     let mut graph: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&prd).unwrap()).unwrap();
     graph["tasks"][1]["gate"]["evidence_type"] = "pull_request_review".into();
+    graph["tasks"][1]["gate"]["required_approvers"] =
+        serde_json::json!([{"role":"OWNER","count":1},{"role":"AUDITOR","count":1}]);
+    graph["tasks"][1]["gate"]["quorum"] = "all".into();
+    registry.find_task_mut("G").unwrap().gate =
+        Some(serde_json::from_value(graph["tasks"][1]["gate"].clone()).unwrap());
     std::fs::write(&prd, serde_json::to_vec(&graph).unwrap()).unwrap();
-    registry
-        .find_task_mut("G")
-        .unwrap()
-        .gate
-        .as_mut()
-        .unwrap()
-        .evidence_type = Some("pull_request_review".into());
     save(root, &registry);
     for _ in 0..2 {
         sync(root, &prd, &mut registry).unwrap();
@@ -286,7 +284,8 @@ fn never_ask_cannot_supply_required_pull_request_reviews() {
     let gate = &pending[0];
     assert_eq!(gate.task_id, "G");
     assert!(gate.awaiting_decision && !gate.auto_prompt);
-    assert_eq!(gate.missing_roles, ["OWNER"]);
+    assert!(gate.missing_roles.iter().any(|role| role == "AUDITOR"));
+    assert!(gate.missing_roles.iter().any(|role| role == "OWNER"));
     let request = crate::coordinator::approval::DecisionRequest {
         task_id: gate.task_id.clone(),
         decision: crate::coordinator::model::ApprovalDecision::Approved,
@@ -296,12 +295,39 @@ fn never_ask_cannot_supply_required_pull_request_reviews() {
         evidence: Some("Independent pull request review for the delivered revision".into()),
         reason: None,
     };
-    let (_, pending) = crate::service::coordinator_workflow::coordinator_record_gate_decision(
-        &paths,
-        None,
-        &Default::default(),
-        request,
-    )
+    let submit = |request| {
+        crate::service::coordinator_workflow::coordinator_record_gate_decision(
+            &paths,
+            None,
+            &Default::default(),
+            request,
+        )
+    };
+    for invalid in [
+        crate::coordinator::approval::DecisionRequest {
+            role: "OBSERVER".into(),
+            ..request.clone()
+        },
+        crate::coordinator::approval::DecisionRequest {
+            evidence: None,
+            ..request.clone()
+        },
+        crate::coordinator::approval::DecisionRequest {
+            revision: Some("1111111111111111".into()),
+            ..request.clone()
+        },
+    ] {
+        assert!(submit(invalid).is_err());
+    }
+    let (_, pending) = submit(request.clone()).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].missing_roles, ["AUDITOR"]);
+    assert!(pending[0].awaiting_decision && !pending[0].auto_prompt);
+    let (_, pending) = submit(crate::coordinator::approval::DecisionRequest {
+        role: "AUDITOR".into(),
+        actor: "Independent auditor".into(),
+        ..request
+    })
     .unwrap();
     assert!(pending.is_empty());
     assert_eq!(

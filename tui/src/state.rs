@@ -1145,18 +1145,24 @@ impl AppState {
         self.sync_approval_window();
     }
 
-    fn awaiting_approvals(&self) -> Vec<&macc_core::coordinator::approval::PendingApproval> {
+    pub(crate) fn awaiting_approvals(
+        &self,
+    ) -> impl Iterator<Item = &macc_core::coordinator::approval::PendingApproval> {
         self.coordinator_pending_approvals
             .iter()
             .filter(|p| p.awaiting_decision)
-            .collect()
     }
 
     /// Keep the approval window in step with the pending gates: refresh the
     /// displayed gate, close it once decided elsewhere, and open it by itself
     /// for a gate the operator has not put off.
     pub fn sync_approval_window(&mut self) {
-        let waiting = self.awaiting_approvals().len();
+        let waiting = self.awaiting_approvals().count();
+        if self.current_screen() == Screen::Inbox
+            && self.inbox_section == crate::inbox::Section::Approvals
+        {
+            self.inspector_index = self.inspector_index.min(waiting.saturating_sub(1));
+        }
         if let Some(window) = self.approval_window.as_mut() {
             let current = self
                 .coordinator_pending_approvals
@@ -1177,7 +1183,6 @@ impl AppState {
         }
         let next = self
             .awaiting_approvals()
-            .into_iter()
             .find(|p| {
                 p.auto_prompt
                     && !self
@@ -1201,8 +1206,9 @@ impl AppState {
     }
 
     pub(crate) fn open_approval_at(&mut self, index: usize) {
-        let waiting = self.awaiting_approvals().len();
-        match self.awaiting_approvals().get(index).map(|p| (*p).clone()) {
+        let waiting = self.awaiting_approvals().count();
+        let selected = self.awaiting_approvals().nth(index).cloned();
+        match selected {
             Some(gate) => {
                 self.approval_snoozed
                     .remove(&crate::approval::Window::key_of(&gate));
@@ -1237,16 +1243,13 @@ impl AppState {
         let Some(window) = self.approval_window.as_ref() else {
             return;
         };
-        let waiting = self.awaiting_approvals();
-        let index = waiting
-            .iter()
+        let waiting = self.awaiting_approvals().count();
+        let index = self
+            .awaiting_approvals()
             .position(|p| p.task_id == window.gate.task_id)
-            .map(|i| (i + 1) % waiting.len().max(1))
+            .map(|i| (i + 1) % waiting.max(1))
             .unwrap_or(0);
-        let total = waiting.len();
-        if let Some(gate) = waiting.get(index).map(|p| (*p).clone()) {
-            self.approval_window = Some(crate::approval::Window::manual(gate, total));
-        }
+        self.open_approval_at(index);
     }
 
     /// Record a decision collected by the approval window.
@@ -1308,7 +1311,7 @@ impl AppState {
                     .iter()
                     .find(|p| p.task_id == decision.task_id && p.awaiting_decision)
                     .cloned();
-                let waiting = self.awaiting_approvals().len();
+                let waiting = self.awaiting_approvals().count();
                 match (still_waiting, self.approval_window.as_mut()) {
                     (Some(gate), Some(window)) => {
                         let needed = gate.missing_roles.join(", ");

@@ -73,8 +73,7 @@ enum Mode {
 
 pub enum Outcome {
     Continue,
-    /// Close the window; it re-opens when the gate or its revision changes,
-    /// or on demand with `A`.
+    /// Snooze automatic prompts for this revision. The gate remains in the Inbox.
     Later,
     /// Show the next gate waiting for a decision.
     Next,
@@ -396,7 +395,7 @@ impl Window {
                     spans.push(Span::raw(" Next gate  "));
                 }
                 spans.push(Span::styled("Esc", key));
-                spans.push(Span::raw(" Later (A re-opens)"));
+                spans.push(Span::raw(" Later (reopen in Inbox)"));
                 lines.push(Line::from(spans));
             }
             Mode::Role { decision, selected } => {
