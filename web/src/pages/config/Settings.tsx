@@ -290,7 +290,7 @@ function MaxParallelPerToolField({
 }: { value: Record<string, number>; enabledTools: string[]; onChange: (v: Record<string, number>) => void; help?: string }) {
   const adjust = (tool: string, delta: number) => {
     const current = value[tool] ?? 1;
-    onChange({ ...value, [tool]: Math.max(1, current + delta) });
+    onChange({ ...value, [tool]: Math.max(0, current + delta) });
   };
 
   if (enabledTools.length === 0)
@@ -318,7 +318,7 @@ function MaxParallelPerToolField({
             >
               <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{tool}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <ArrowBtn onClick={() => adjust(tool, -1)} disabled={count <= 1} label="Decrease">−</ArrowBtn>
+                <ArrowBtn onClick={() => adjust(tool, -1)} disabled={count === 0} label="Decrease">−</ArrowBtn>
                 <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', width: 20, textAlign: 'center', fontWeight: 500 }}>{count}</span>
                 <ArrowBtn onClick={() => adjust(tool, 1)} label="Increase">+</ArrowBtn>
               </div>
@@ -604,7 +604,7 @@ function AdvancedTab({ draft, update }: { draft: ApiConfigResponse; update: (p: 
           <ToolPriorityField value={draft.toolPriority} enabledTools={draft.enabledTools} onChange={(v) => update({ toolPriority: v })} help="↑↓ buttons reorder priority. Tools not listed use default order." />
         </FullWidth>
         <FullWidth>
-          <MaxParallelPerToolField value={draft.maxParallelPerTool as Record<string, number>} enabledTools={draft.enabledTools} onChange={(v) => update({ maxParallelPerTool: v })} help="Per-tool concurrency cap. Default is 1." />
+          <MaxParallelPerToolField value={draft.maxParallelPerTool as Record<string, number>} enabledTools={draft.enabledTools} onChange={(v) => update({ maxParallelPerTool: v })} help="Set the cap to 0 to stop new task assignments for a tool." />
         </FullWidth>
         <FullWidth>
           <ToolSpecializationsField value={draft.toolSpecializations as Record<string, string[]>} enabledTools={draft.enabledTools} onChange={(v) => update({ toolSpecializations: v })} help="Route task categories to specific tools. Empty = all tools handle all categories." />

@@ -3929,7 +3929,7 @@ impl AppState {
             1 => "Default git branch used when task.base_branch is not set (default: main).",
             2 => "Enter: edit ordered PRD queue; add files/directories, Space + arrows to reorder. Accept then s to save config. Empty queue uses legacy prd_file.",
             3 => "Tool priority order as comma-separated values, e.g. tool-a,tool-b,tool-c.",
-            4 => "Per-tool concurrency caps as JSON object, e.g. {\"tool-a\":3,\"tool-b\":2}.",
+            4 => "Use 0 to stop new task assignments for a tool, e.g. {\"tool-a\":3,\"tool-b\":0}.",
             5 => "Category routing as JSON object, e.g. {\"frontend\":[\"tool-b\",\"tool-c\"]}.",
             6 => "Total tasks to dispatch per run, 0 means no cap, unset uses default 10.",
             7 => "Maximum concurrent performer runs.",
@@ -4592,7 +4592,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     }
 
     /// Field 4 – adjust the parallel count for the currently selected tool by `delta`.
-    pub fn tool_parallel_editor_adjust(&mut self, delta: i32) {
+    pub fn tool_parallel_editor_adjust(&mut self, delta: isize) {
         let tool = {
             let enabled = self
                 .working_copy
@@ -4608,8 +4608,8 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 .max_parallel_per_tool
                 .get(&tool)
                 .copied()
-                .unwrap_or(1) as i32;
-            let next = (current + delta).max(1) as usize;
+                .unwrap_or(1);
+            let next = current.saturating_add_signed(delta);
             coordinator.max_parallel_per_tool.insert(tool, next);
         }
     }

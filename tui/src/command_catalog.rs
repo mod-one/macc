@@ -147,6 +147,11 @@ fn contextual(state: &AppState) -> Vec<Command> {
         Layer::Parallel => rows(vec![
             (k::VERTICAL, "Select tool"),
             (k::HORIZONTAL, "Adjust limit"),
+            (k::ch('-'), "Decrease limit"),
+            (k::ch('+'), "Increase limit"),
+            (k::ch('k'), "Previous tool"),
+            (k::ch('j'), "Next tool"),
+            (k::ch('s'), "Finish"),
             (k::ENTER, "Finish"),
             (k::ESC, "Close"),
         ]),

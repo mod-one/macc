@@ -3,6 +3,32 @@ use super::*;
 use crate::workspace_tests::{fixture, render, text};
 
 #[test]
+fn tool_parallel_editor_allows_zero_and_reenabling_a_tool() {
+    let (_dir, mut state) = fixture();
+    state.working_copy.as_mut().unwrap().tools.enabled = vec!["tool-a".into(), "tool-b".into()];
+    state.goto_screen(Screen::Automation);
+    state.start_tool_parallel_editor();
+    for key in [
+        KeyCode::Left,
+        KeyCode::Char('-'),
+        KeyCode::Down,
+        KeyCode::Right,
+    ] {
+        handle_key(&mut state, key);
+    }
+    assert_eq!(
+        state.automation_field_display_value(4),
+        r#"{"tool-a":0,"tool-b":2}"#
+    );
+    handle_key(&mut state, KeyCode::Up);
+    handle_key(&mut state, KeyCode::Char('+'));
+    assert_eq!(
+        state.automation_field_display_value(4),
+        r#"{"tool-a":1,"tool-b":2}"#
+    );
+}
+
+#[test]
 fn o2_settings_footer_shows_preview_save_and_discard_at_terminal_widths() {
     let (_t, mut state) = fixture();
     navigation::Destination::Memory.open(&mut state);

@@ -249,6 +249,25 @@ describe('Settings page', () => {
     expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
   });
 
+  it('saves a zero concurrency cap for the selected tool', async () => {
+    const config = buildConfig({ enabledTools: ['tool-a', 'tool-b'], maxParallelPerTool: { 'tool-b': 3 } });
+    const caps = { 'tool-a': 0, 'tool-b': 3 };
+    getConfigMock.mockResolvedValue(config);
+    updateConfigMock.mockResolvedValue({ ...config, maxParallelPerTool: caps });
+    renderPage();
+
+    await screen.findByText('Settings');
+    fireEvent.click(screen.getByRole('button', { name: /Advanced/i }));
+    const decrease = screen.getAllByRole('button', { name: 'Decrease' })[0];
+    fireEvent.click(decrease);
+    expect(decrease).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(updateConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({ maxParallelPerTool: caps }),
+    ));
+  });
+
   it('Advanced tab Apply JSON updates draft', async () => {
     getConfigMock.mockResolvedValue(buildConfig({ webPort: 3450 }));
     renderPage();

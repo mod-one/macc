@@ -213,7 +213,7 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect, draft: &[(S
             String::new(),
             "↑/k  Previous tool".to_string(),
             "↓/j  Next tool".to_string(),
-            "←/−  Decrease (min 1)".to_string(),
+            "←/−  Decrease (0 stops new task assignments)".to_string(),
             "→/+  Increase".to_string(),
             "Enter/s  Exit editor".to_string(),
             String::new(),
