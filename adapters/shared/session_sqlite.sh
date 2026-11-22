@@ -107,9 +107,10 @@ MACC_TASK_RESULT: precondition_unmet
   else
     run_default_call || rc=$?
   fi
-  project_usage_output || { runner_failure E103 "Structured output projection failed"; return 1; }
-  # No hidden resume fallback: an invocation may already have changed the worktree.
-  new_sid="$(extract_session_id_from_output "$output_capture" "$session_extract_regex")"
+  if [[ -z "$final_message_file" ]]; then
+    project_usage_output || { runner_failure E103 "Structured output projection failed"; return 1; }
+  fi
+  new_sid="$(extract_session_id_from_output "$output_capture" "$session_extract_regex")" || return 1
   if [[ -n "$new_sid" ]]; then
     if ! jq -nc --argjson key "$sqlite_lease_key" --arg sid "$new_sid" '$key+{provider_session_id:$sid}' |
         session_service bind >/dev/null; then
@@ -128,16 +129,19 @@ MACC_TASK_RESULT: precondition_unmet
     fi
   fi
   if [[ "$rc" != 0 ]]; then result=failure; fi
-  local provider_inspection
-  provider_inspection="$(runner_output_inspection "$output_capture" "$rc")" || return 1
-  if [[ "$(jq -r '.error.error_code // empty' <<<"$provider_inspection")" == E602 ]]; then result=quota; fi
-  if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$output_capture"; then result=precondition_unmet; fi
+  if [[ "$rc" != 0 || -z "$final_message_file" ]]; then
+    local provider_inspection
+    provider_inspection="$(runner_output_inspection "$output_capture" "$rc")" || return 1
+    if [[ "$(jq -r '.error.error_code // empty' <<<"$provider_inspection")" == E602 ]]; then result=quota; fi
+  fi
+  local answer_file="${final_protocol_file:-$output_capture}"
+  if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$answer_file"; then result=precondition_unmet; fi
   finish_usage "$result"
   # The shared review protocol is provider-neutral. This records an observation,
   # not a review postcheck, task transition or permission to deliver.
   if [[ "$result" == success && "${MACC_SESSION_ROLE:-}" == reviewer ]]; then
     local review_verdict
-    review_verdict="$(sed -n 's/^[[:space:]]*REVIEW_VERDICT:[[:space:]]*//p' "$output_capture" | tail -1 | tr '[:lower:]' '[:upper:]' | sed 's/[[:space:]]*$//')"
+    review_verdict="$(sed -n 's/^[[:space:]]*REVIEW_VERDICT:[[:space:]]*//p' "$answer_file" | tail -1 | tr '[:lower:]' '[:upper:]' | sed 's/[[:space:]]*$//')"
     if [[ "$review_verdict" == CHANGES_REQUESTED ]]; then result=changes_requested; fi
   fi
   checkpoint_rc=0

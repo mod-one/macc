@@ -8,6 +8,9 @@ use crate::{MaccError, Result};
 use std::path::Path;
 
 pub(super) struct NativePhaseExecutor<'a> {
+    // The outer review owns the read-only Git postcheck and the terminal verdict.
+    pub(super) pending_review:
+        std::cell::RefCell<Option<crate::coordinator::phase_evidence::PhaseEvidence>>,
     pub(super) attempts_started: std::cell::Cell<usize>,
     pub(super) repo_root: &'a Path,
     pub(super) logger: Option<&'a dyn CoordinatorLog>,
@@ -602,6 +605,16 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .and_then(|(_, v)| v)
                 .map(|v| v.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let evidence_dir = crate::coordinator::phase_evidence::PhaseEvidence::directory(
+                self.repo_root,
+                task_id,
+                mode,
+                &event_source,
+            )?;
+            command.env(
+                "MACC_PROVIDER_TRACE_FILE",
+                evidence_dir.join("provider.log"),
+            );
             self.attempts_started.set(attempt);
             let output = phase_output(&mut command, self.cancelled);
             let Ok(out) = output else {
@@ -632,17 +645,18 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     out.status,
                 ),
             );
-            let mut evidence = crate::coordinator::phase_evidence::PhaseEvidence::capture(
-                self.repo_root,
-                task_id,
-                mode,
-                &decision_attempt,
-                &event_source,
-                &out,
-                decision_context
-                    .as_ref()
-                    .map(|(c, _)| c.context_digest.as_str()),
-            )?;
+            let (mut evidence, response) =
+                crate::coordinator::phase_evidence::PhaseEvidence::capture(
+                    self.repo_root,
+                    task_id,
+                    mode,
+                    &decision_attempt,
+                    &event_source,
+                    &out,
+                    decision_context
+                        .as_ref()
+                        .map(|(c, _)| c.context_digest.as_str()),
+                )?;
             if self
                 .cancelled
                 .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
@@ -668,9 +682,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 evidence.settle("waiting_decision", Some(&wait.reason))?;
                 return Ok(Err(format!("E903: {}", wait.reason)));
             }
-            if let Some(reason) =
-                crate::coordinator::precondition_scope::phase_reason(&combined_output)
-            {
+            if let Some(reason) = crate::coordinator::precondition_scope::phase_reason(&response) {
                 evidence.settle("precondition_unmet", Some(&reason))?;
                 return Ok(Err(reason));
             }
@@ -682,7 +694,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         &context.plan_id,
                         &decision_attempt,
                         mode,
-                        &combined_output,
+                        &response,
                         &policy,
                     ) {
                         // Freshness is computed by the native store, not from
@@ -709,7 +721,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                                     .map_err(|e| crate::MaccError::Validation(e.to_string()))?,
                                 &worktree,
                                 review_head_before.as_deref().unwrap_or_default(),
-                                &combined_output,
+                                &response,
                             );
                             let diagnostic = match diagnostic {
                                 Ok(value) => value,
@@ -726,22 +738,17 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         return Ok(Err(error.to_string()));
                     }
                 }
-                evidence.settle(
-                    if mode == "review"
-                        && coordinator_runtime::parse_review_verdict(&combined_output)
-                            == Some(coordinator_engine::ReviewVerdict::ChangesRequested)
-                    {
-                        "changes_requested"
-                    } else {
-                        "validated"
-                    },
-                    None,
-                )?;
+                if mode == "review" {
+                    *self.pending_review.borrow_mut() = Some(evidence);
+                    let _ = std::fs::remove_file(&prompt_path);
+                    return Ok(Ok(response));
+                }
+                evidence.settle("validated", None)?;
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits
                 // are managed by performer.sh. Fix phases may leave
                 // uncommitted file changes that must be committed before merging.
-                if mode != "review" && crate::git::is_dirty(&worktree).unwrap_or(false) {
+                if crate::git::is_dirty(&worktree).unwrap_or(false) {
                     let _ = crate::git::run_git_output_mapped(
                         &worktree,
                         &["add", "-A"],
@@ -822,7 +829,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     ),
                     "info",
                 );
-                return Ok(Ok(combined_output));
+                return Ok(Ok(response));
+            }
+            if let Some(reason) = evidence.runner_protocol_error(&out) {
+                evidence.settle("validation_failed", Some(&reason))?;
+                return Ok(Err(reason));
             }
             evidence.settle("process_failed", Some(&out.status.to_string()))?;
             last_reason = format!(
@@ -897,6 +908,7 @@ pub fn run_phase_for_task_native(
         ));
     }
     let executor = NativePhaseExecutor {
+        pending_review: Default::default(),
         attempts_started: Default::default(),
         repo_root,
         logger,
@@ -920,6 +932,7 @@ pub fn run_review_phase_for_task_native(
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<ReviewExecution> {
     let executor = NativePhaseExecutor {
+        pending_review: Default::default(),
         attempts_started: Default::default(),
         repo_root,
         logger,
@@ -940,8 +953,43 @@ pub fn run_review_phase_for_task_native(
 
 impl NativePhaseExecutor<'_> {
     pub(super) fn run_reserved_review(&self, task: &Task, tool: Option<&str>) -> ReviewExecution {
-        let outcome = coordinator_runtime::run_review_phase(self, task, tool)
+        let mut outcome = coordinator_runtime::run_review_phase(self, task, tool)
             .unwrap_or_else(|error| Err(error.to_string()));
+        if let Some(mut evidence) = self.pending_review.take() {
+            let (status, severity, error) = match &outcome {
+                Ok(coordinator_engine::ReviewVerdict::Ok) => ("validated", "info", None),
+                Ok(coordinator_engine::ReviewVerdict::ChangesRequested) => {
+                    ("changes_requested", "info", None)
+                }
+                Err(reason) => ("validation_failed", "error", Some(reason.as_str())),
+            };
+            if let Err(error) = evidence.settle(status, error) {
+                outcome = Err(error.to_string());
+            } else {
+                let message = format!(
+                    "Review {status}{}",
+                    error
+                        .map(|reason| format!(": {reason}"))
+                        .unwrap_or_default()
+                );
+                append_performer_log(
+                    Path::new(task.worktree_path().unwrap_or_default()),
+                    &task.id,
+                    &format!("- Result: {message}\n"),
+                );
+                if let Some(log) = self.logger {
+                    let _ = log.note(format!("- {message} task={}", task.id));
+                }
+                let _ = crate::coordinator::helpers::write_structured_event_jsonl(
+                    self.repo_root,
+                    "phase_completed",
+                    &task.id,
+                    "review",
+                    &message,
+                    severity,
+                );
+            }
+        }
         ReviewExecution {
             attempts: self.attempts_started.get(),
             outcome,

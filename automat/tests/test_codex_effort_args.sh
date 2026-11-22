@@ -33,6 +33,8 @@ def sub(o):
     if isinstance(o, str): return o.replace("{model}", "gpt-5.4").replace("{effort}", "medium")
     return o
 spec["performer"] = sub(spec["performer"])
+# Existing projects may have generated their tool config before usage capture.
+spec["performer"].pop("usage", None)
 json.dump(spec, open(sys.argv[2], "w"))
 PY
 echo "do the thing" > "$WORK/prompt.txt"
@@ -41,8 +43,15 @@ mkdir -p "$WORK/bin"
 cat > "$WORK/bin/codex" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "${ARGV_LOG:?}"
-echo "session id: 01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1"
-echo "MACC_TASK_RESULT: success_with_changes"
+echo '{"type":"thread.started","thread_id":"01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1"}'
+while (($#)); do
+  if [[ "$1" == --output-last-message ]]; then
+    printf '%s\n' 'MACC_TASK_RESULT: success_with_changes' > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 1
 STUB
 chmod +x "$WORK/bin/codex"; export PATH="$WORK/bin:$PATH"
 

@@ -44,6 +44,10 @@ finish_checkpoint() {
 }
 
 checkpoint_acknowledged() {
+  if [[ -n "${final_message_file:-}" ]]; then
+    grep -Fxq -- "$checkpoint_ack" "$final_protocol_file"
+    return
+  fi
   grep -Fxq -- "$checkpoint_ack" "$output_capture" && return 0
   # Structured output has already projected only adapter-declared assistant text.
   # Never accept an ACK merely echoed by a tool/thinking block in raw JSON.

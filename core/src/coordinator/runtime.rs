@@ -1024,6 +1024,8 @@ pub fn raw_event_to_runtime_event(
     })
 }
 
+pub(super) const MISSING_REVIEW_VERDICT: &str = "E103: missing final REVIEW_VERDICT line";
+
 pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
     let output = super::result_protocol::final_projection(output);
     for line in output.lines().rev() {
@@ -1135,10 +1137,7 @@ pub fn run_review_phase<E: PhaseExecutor>(
         )));
     }
     let Some(verdict) = parse_review_verdict(&output) else {
-        return Ok(Err(format!(
-            "review verdict parse failed for task {}: missing final REVIEW_VERDICT line",
-            task_id
-        )));
+        return Ok(Err(format!("{MISSING_REVIEW_VERDICT} for task {task_id}")));
     };
     Ok(Ok(verdict))
 }
@@ -1156,6 +1155,9 @@ pub fn resolve_phase_runner(
         .join(tool)
         .join(format!("{}.performer.sh", tool));
     if explicit.exists() {
+        // Retained reviews can resume in a slot created by an older MACC.
+        // Refresh the bundled runner together with the shared scripts it sources.
+        crate::ensure_embedded_automation_scripts(&crate::ProjectPaths::from_root(worktree_path))?;
         return Ok(Some(explicit));
     }
     let tool_json_path = worktree_path.join(".macc").join("tool.json");

@@ -1,7 +1,17 @@
 //! Read-only provider boundary inspection; no project initialization or AI call.
 use macc_core::{MaccError, Result};
 use std::path::Path;
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum View {
+    Inspection,
+    /// Read a JSONL provider event stream and print only its error records
+    ProviderErrors,
+    /// Read an isolated final assistant response and print eligible protocol fields
+    FinalProtocol,
+}
+
 pub fn run(
+    view: View,
     file: &Path,
     tool: &str,
     exit_code: i32,
@@ -9,11 +19,30 @@ pub fn run(
     task: Option<&str>,
     source: Option<&str>,
 ) -> Result<()> {
-    let raw = std::fs::read_to_string(file).map_err(|source| MaccError::Io {
+    let read_error = |source| MaccError::Io {
         path: file.display().to_string(),
         action: "read current runner output".into(),
         source,
-    })?;
+    };
+    if matches!(view, View::ProviderErrors) {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(std::fs::File::open(file).map_err(read_error)?);
+        for line in reader.lines() {
+            let line = line.map_err(read_error)?;
+            if macc_core::coordinator::result_protocol::is_provider_error_record(&line) {
+                println!("{line}");
+            }
+        }
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(file).map_err(read_error)?;
+    if matches!(view, View::FinalProtocol) {
+        print!(
+            "{}",
+            macc_core::coordinator::result_protocol::isolated_protocol(&raw)
+        );
+        return Ok(());
+    }
     let mut result = macc_core::coordinator::runner_output::inspect(tool, exit_code, &raw);
     let native_wait = match (root, task, source) {
         (Some(root), Some(task), Some(source)) => {

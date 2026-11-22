@@ -106,6 +106,9 @@ enum Commands {
     },
     /// Inspect current runner output through the native protocol and adapter layer
     RunnerOutput {
+        /// Select the protocol boundary and output to read
+        #[arg(long, value_enum, default_value = "inspection")]
+        view: commands::runner_output::View,
         #[arg(long)]
         file: std::path::PathBuf,
         #[arg(long)]
@@ -1562,6 +1565,7 @@ fn run_with_engine_provider(
             command,
         }) => commands::runner_process::run(command, completion_file, *owner_pid),
         Some(Commands::RunnerOutput {
+            view,
             file,
             tool,
             exit_code,
@@ -1569,6 +1573,7 @@ fn run_with_engine_provider(
             task_id,
             source,
         }) => commands::runner_output::run(
+            *view,
             file,
             tool,
             *exit_code,

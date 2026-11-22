@@ -1,6 +1,6 @@
 //! Provider-neutral projection of assistant protocol and native runner summaries.
 mod provider;
-pub use provider::provider_output;
+pub use provider::{is_provider_error_record, provider_output};
 
 pub fn valid_explanation(value: &str) -> bool {
     let value = value.trim();
@@ -79,6 +79,10 @@ impl State {
         if matches!(self.channel, Channel::Transcript | Channel::User) {
             return false;
         }
+        self.markdown_line(line)
+    }
+
+    fn markdown_line(&mut self, line: &str) -> bool {
         let trimmed = line.trim_start();
         if let Some(ch) = trimmed.chars().next().filter(|c| matches!(c, '`' | '~')) {
             let len = trimmed.chars().take_while(|c| *c == ch).count();
@@ -140,6 +144,32 @@ pub fn projection(raw: &str) -> String {
 /// Decision validation uses the final assistant response in this invocation.
 pub(super) fn final_projection(raw: &str) -> String {
     project(raw, true)
+}
+
+/// Machine fields from a provider-owned final message. The raw answer is kept
+/// separately for humans. Prose separates result blocks, but cannot change
+/// roles, start a prompt, or otherwise become transcript framing.
+pub fn isolated_protocol(raw: &str) -> String {
+    let mut state = State::default();
+    let mut fields = String::new();
+    for line in raw.lines() {
+        if !state.markdown_line(line) {
+            continue;
+        }
+        if (line.starts_with("MACC_") && !line.starts_with("MACC_PROMPT_")
+            || line.starts_with("REVIEW_VERDICT:")
+            || line.starts_with("- Result kind:")
+            || line.starts_with("- Explanation:")
+            || line.starts_with("- Unmet precondition:"))
+            && valid_explanation(line)
+        {
+            fields.push_str(line);
+            fields.push('\n');
+        } else if !fields.is_empty() && !fields.ends_with("\n\n") {
+            fields.push('\n');
+        }
+    }
+    fields
 }
 
 fn project(raw: &str, final_only: bool) -> String {

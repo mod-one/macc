@@ -13,15 +13,7 @@ pub struct PhaseEvidence {
     record: Value,
 }
 impl PhaseEvidence {
-    pub fn capture(
-        root: &Path,
-        task: &str,
-        phase: &str,
-        attempt: &str,
-        source: &str,
-        out: &Output,
-        expected: Option<&str>,
-    ) -> Result<Self> {
+    pub fn directory(root: &Path, task: &str, phase: &str, source: &str) -> Result<PathBuf> {
         let safe = |s: &str| {
             let name = s
                 .chars()
@@ -45,12 +37,33 @@ impl PhaseEvidence {
             .join("phases")
             .join(format!("{}-{}", safe(phase), safe(source)));
         std::fs::create_dir_all(&path).map_err(|source| io(&path, source))?;
-        let raw = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let projected = super::result_protocol::final_projection(&raw);
+        Ok(path)
+    }
+    pub fn capture(
+        root: &Path,
+        task: &str,
+        phase: &str,
+        attempt: &str,
+        source: &str,
+        out: &Output,
+        expected: Option<&str>,
+    ) -> Result<(Self, String)> {
+        let path = Self::directory(root, task, phase, source)?;
+        // Bundled adapters with an isolated provider trace publish the answer
+        // on stdout. Keep stderr for diagnostics, never as review evidence.
+        let trace = path.join("provider.log");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let isolated = trace.try_exists().map_err(|e| io(&trace, e))?;
+        let response = if isolated {
+            stdout.into_owned()
+        } else {
+            format!("{stdout}\n{}", String::from_utf8_lossy(&out.stderr))
+        };
+        let projected = if isolated {
+            super::result_protocol::isolated_protocol(&response)
+        } else {
+            super::result_protocol::final_projection(&response)
+        };
         let mut artifacts = serde_json::Map::new();
         for (name, bytes) in [
             ("stdout.log", out.stdout.as_slice()),
@@ -66,7 +79,10 @@ impl PhaseEvidence {
             .filter_map(|l| l.strip_prefix("MACC_DECISION_ACK:"))
             .map(str::trim)
             .collect();
-        let record = json!({"schema_version":1,"task":task,"phase":phase,"attempt":attempt,"source":source,"exit_code":out.status.code(),"process_success":out.status.success(),"expected_context_digest":expected,"raw_ack_count":raw.lines().filter(|l|l.starts_with("MACC_DECISION_ACK:")).count(),"eligible_ack_digests":eligible_acks,"artifacts":artifacts,"status":"captured","validation_error":null,"recorded_at":chrono::Utc::now().to_rfc3339()});
+        let mut record = json!({"schema_version":1,"task":task,"phase":phase,"attempt":attempt,"source":source,"exit_code":out.status.code(),"process_success":out.status.success(),"expected_context_digest":expected,"raw_ack_count":response.lines().filter(|l|l.starts_with("MACC_DECISION_ACK:")).count(),"eligible_ack_digests":eligible_acks,"artifacts":artifacts,"status":"captured","validation_error":null,"recorded_at":chrono::Utc::now().to_rfc3339()});
+        if isolated {
+            record["provider_trace"] = json!("provider.log");
+        }
         let evidence = Self {
             root: root.into(),
             task: task.into(),
@@ -75,8 +91,19 @@ impl PhaseEvidence {
             record,
         };
         evidence.write()?;
-        Ok(evidence)
+        Ok((evidence, if isolated { projected } else { response }))
     }
+    /// With a separate provider trace, this trailer comes from the runner.
+    pub fn runner_protocol_error(&self, out: &Output) -> Option<String> {
+        if out.status.success() || self.record.get("provider_trace").is_none() {
+            return None;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut trailer = stderr.lines().rev();
+        let detail = trailer.next()?.strip_prefix("MACC_TASK_RESULT_EXP: ")?;
+        (trailer.next()? == "MACC_RUNNER_ERROR: E103").then(|| format!("E103: {detail}"))
+    }
+
     pub fn settle(&mut self, status: &str, error: Option<&str>) -> Result<()> {
         self.record["status"] = json!(status);
         self.record["validation_error"] = json!(error);
@@ -130,11 +157,19 @@ mod tests {
         std::fs::write(&log, "## Phase: review\nACK evidence\n").unwrap();
         let out = Output {
             status: std::process::ExitStatus::from_raw(0),
-            stdout: b"assistant\nMACC_DECISION_ACK: exact\nREVIEW_VERDICT: CHANGES_REQUESTED\n"
+            stdout: b"user\n~~~\nMACC_DECISION_ACK: example\n~~~\n> REVIEW_VERDICT: OK\ntool\nMACC_DECISION_ACK: exact\nREVIEW_VERDICT: CHANGES_REQUESTED\n"
                 .to_vec(),
-            stderr: Vec::new(),
+            stderr: b"assistant\nMACC_DECISION_ACK: stale-stderr\nREVIEW_VERDICT: OK".to_vec(),
         };
-        let mut evidence = PhaseEvidence::capture(
+        let trace = PhaseEvidence::directory(root, "A", "review", "source-1")
+            .unwrap()
+            .join("provider.log");
+        std::fs::write(
+            &trace,
+            "assistant\nMACC_DECISION_ACK: stale\nREVIEW_VERDICT: OK\n",
+        )
+        .unwrap();
+        let (mut evidence, response) = PhaseEvidence::capture(
             root,
             "A",
             "review",
@@ -154,6 +189,20 @@ mod tests {
         assert_eq!(value["status"], "validation_failed");
         assert_eq!(value["eligible_ack_digests"], json!(["exact"]));
         assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["provider_trace"], "provider.log");
+        assert_eq!(
+            response,
+            "MACC_DECISION_ACK: exact\nREVIEW_VERDICT: CHANGES_REQUESTED\n"
+        );
+        assert_eq!(
+            std::fs::read(path.join("projected.txt")).unwrap(),
+            response.as_bytes()
+        );
+        assert_eq!(
+            crate::coordinator::runtime::parse_review_verdict(&response),
+            Some(crate::coordinator::engine::ReviewVerdict::ChangesRequested)
+        );
+        assert_eq!(std::fs::read(path.join("stderr.log")).unwrap(), out.stderr);
         assert_eq!(std::fs::read(path.join("stdout.log")).unwrap(), out.stdout);
         assert!(root.join(".macc/log/performer/worker-01--A.md").exists());
     }

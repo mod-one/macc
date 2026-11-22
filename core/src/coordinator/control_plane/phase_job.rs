@@ -111,6 +111,7 @@ impl PhaseJob {
             };
             let logger = WorkerLog(tx);
             let executor = NativePhaseExecutor {
+                pending_review: Default::default(),
                 attempts_started: Default::default(),
                 repo_root: &repo,
                 logger: Some(&logger),

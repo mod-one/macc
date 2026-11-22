@@ -907,7 +907,7 @@ run_tool() {
   if [[ -n "$performer_session_id" ]]; then
     session_args=("--session-id" "$performer_session_id")
   fi
-  MACC_SESSION_PHASE="${CURRENT_PHASE:-dev}" MACC_SESSION_ROLE=performer "$script" \
+  MACC_PERFORMER_PROTOCOL_ONLY=1 MACC_SESSION_PHASE="${CURRENT_PHASE:-dev}" MACC_SESSION_ROLE=performer "$script" \
     --prompt-file "$prompt_file" \
     --tool-json "$tool_json" \
     --repo "$repo" \

@@ -12,6 +12,7 @@ fn structured_error(line: &str) -> bool {
         return false;
     };
     v["type"] == "error"
+        || v["type"] == "turn.failed"
         || v["is_error"] == true
         || v["type"] == "result"
             && v["subtype"]
@@ -49,6 +50,11 @@ fn plain_error(line: &str) -> bool {
     .iter()
     .any(|p| text.starts_with(p))
 }
+/// Inspect a single provider-owned record. Values nested inside JSON events,
+/// including arbitrary multiline command output, are opaque.
+pub fn is_provider_error_record(line: &str) -> bool {
+    structured_error(line) || plain_error(line)
+}
 pub fn provider_output(raw: &str) -> String {
     let mut state = State::default();
     let mut out = String::new();
@@ -58,7 +64,7 @@ pub fn provider_output(raw: &str) -> String {
         }
         // Structured provider errors are explicit records; ordinary assistant
         // prose, command snippets and echoed limit strings are never evidence.
-        if state.channel == Channel::Provider && (structured_error(line) || plain_error(line)) {
+        if state.channel == Channel::Provider && is_provider_error_record(line) {
             out.push_str(line);
             out.push('\n');
         }

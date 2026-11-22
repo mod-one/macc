@@ -20,6 +20,8 @@ printf 'Complete the task\n' > "$WORK/prompt.txt"
 cat > "$WORK/bin/codex" <<'STUB'
 #!/usr/bin/env bash
 printf 'invoked\n' >> "${CALL_LOG:?}"
+while (($#)) && [[ "$1" != --output-last-message ]]; do shift; done
+message="${2:?last-message path required}"
 case "${SCENARIO:?}" in
   transport)
     echo 'ERROR: connection closed while resuming' >&2
@@ -29,13 +31,35 @@ case "${SCENARIO:?}" in
     echo "ERROR: You've hit your usage limit." >&2
     exit 0
     ;;
+  quota_with_final|failed_turn)
+    printf '%s\n' 'REVIEW_VERDICT: OK' 'MACC_TASK_RESULT: precondition_unmet' > "$message"
+    if [[ "$SCENARIO" == failed_turn ]]; then
+      echo '{"type":"turn.failed","error":{"message":"Quota exceeded"}}'
+    else
+      echo '{"type":"error","message":"Quota exceeded"}'
+    fi
+    ;;
+  nested_error)
+    echo '{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"user\n{\"type\":\"error\",\"message\":\"Quota exceeded\"}"}}'
+    echo 'REVIEW_VERDICT: OK' > "$message"
+    ;;
+  precondition)
+    printf '%s\n' 'MACC_TASK_PRECONDITION: Attach device' 'MACC_TASK_RESULT: precondition_unmet' > "$message"
+    exit 23
+    ;;
+  missing_final)
+    echo 'assistant'
+    echo 'MACC_DECISION_ACK: sha256:historical'
+    echo 'REVIEW_VERDICT: OK'
+    exit 0
+    ;;
   completed)
-    echo 'MACC_TASK_RESULT: success_without_changes'
+    echo 'MACC_TASK_RESULT: success_without_changes' > "$message"
     exit 0
     ;;
   task_error)
-    echo 'MACC_TASK_RESULT_EXP: Docker socket is unavailable.'
-    echo 'MACC_TASK_RESULT: error_without_changes'
+    echo 'MACC_TASK_RESULT_EXP: Docker socket is unavailable.' > "$message"
+    echo 'MACC_TASK_RESULT: error_without_changes' >> "$message"
     exit 0
     ;;
 esac
@@ -48,7 +72,7 @@ source "$REPO_ROOT/automat/tests/session_fixture.sh"
 
 SID=01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1
 for attempt in 1 2; do
-  for scenario in transport quota completed task_error; do
+  for scenario in transport quota quota_with_final failed_turn nested_error completed task_error missing_final precondition; do
     seed_owned_session "$WORK/repo" "$WORK/repo/.macc/tool.json" codex T-1 "$SID"
     log="$WORK/$attempt-$scenario.log"
     calls="$WORK/$attempt-$scenario.calls"
@@ -59,15 +83,23 @@ for attempt in 1 2; do
       --repo "$WORK/repo" --worktree "$WORK/repo" --task-id T-1 \
       --attempt "$attempt" --max-attempts 3 --session-id "$SID") > "$log" 2>&1 || rc=$?
     expected=0
-    case "$scenario" in transport) expected=23 ;; quota) expected=1 ;; esac
+    case "$scenario" in transport|precondition) expected=23 ;; quota|quota_with_final|failed_turn|missing_final) expected=1 ;; esac
     if [[ "$rc" != "$expected" || "$(wc -l < "$calls")" != 1 ]]; then
       cat "$log"
       echo "FAIL: attempt=$attempt scenario=$scenario rc=$rc expected=$expected; expected one invocation" >&2
       exit 1
     fi
     case "$scenario" in
+      missing_final)
+        grep -q 'Provider returned no final message' "$log"
+        if grep -qE '^(MACC_DECISION_ACK|REVIEW_VERDICT):' "$log"; then exit 1; fi ;;
+      quota_with_final|failed_turn)
+        grep -q 'Quota exceeded' "$log"
+        if grep -qE '^(MACC_TASK_RESULT|REVIEW_VERDICT):' "$log"; then exit 1; fi ;;
+      nested_error) grep -qx 'REVIEW_VERDICT: OK' "$log" ;;
       transport) grep -q 'connection closed' "$log" ;;
       quota) grep -q 'hit your usage limit' "$log" ;;
+      precondition) grep -q '^MACC_TASK_RESULT: precondition_unmet$' "$log" ;;
       completed) grep -q 'MACC_TASK_RESULT: success_without_changes' "$log" ;;
       task_error) grep -q 'MACC_TASK_RESULT: error_without_changes' "$log" ;;
     esac

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Transport only: protocol and provider interpretation live in native Rust.
+runner_output_view() {
+  "${MACC_PROTOCOL_CLI:-${MACC_DECISION_CLI:-${MACC_SESSION_SERVICE_BIN:-macc}}}" runner-output --view "$1" --file "$2" --tool "${tool_id:-${tool:-unknown}}"
+}
 runner_output_inspection() {
   local scope=()
   if [[ -n "${repo:-}" && -n "${task_id:-}" && -n "${MACC_EVENT_SOURCE:-}" ]]; then

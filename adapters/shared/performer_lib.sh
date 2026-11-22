@@ -123,6 +123,10 @@ fi
 extract_session_id_from_output() {
   local output_file="$1"
   local regex="$2"
+  if [[ -n "$final_message_file" ]]; then
+    provider_stream_session_id "$output_file"
+    return
+  fi
   local found=""
   shopt -s nocasematch
   while IFS= read -r line; do
@@ -143,23 +147,43 @@ run_and_capture() {
   local output_file="$1"
   shift
   local rc=0
-  [[ "${MACC_DEBUG:-0}" == "1" ]] && printf '[MACC] invoke (%s 1): %s\n' "${TOOL_LOG_PREFIX}" "$*" >&2
+  if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+    printf '[MACC] invoke (%s):' "$TOOL_LOG_PREFIX" >&2
+    printf ' %q' "$@" >&2
+    printf '\n' >&2
+  fi
   local capture_dir fifo owner_pid="$BASHPID"
   capture_dir="$(mktemp -d "${output_file}.pipe.XXXXXX")"
   provider_capture_dir="$capture_dir"
   provider_quiesced=false
+  provider_capture_ok=true
   fifo="$capture_dir/output"
   mkfifo "$fifo" || { rmdir "$capture_dir"; return 1; }
-  tee "$output_file" <"$fifo" &
+  if [[ -n "$final_message_file" ]]; then
+    # Tool results, echoed prompts and nested transcripts are diagnostic data.
+    # Only the provider-owned last-message file goes to the protocol consumer.
+    tee "$output_file" <"$fifo" >>"$provider_trace" &
+  else
+    tee "$output_file" <"$fifo" &
+  fi
   provider_tee_pid=$!
   # The native lifetime boundary reaps detached tools before returning. Never
   # finalize a checkpoint based solely on the provider's own exit or its PGID.
-  "${MACC_SESSION_SERVICE_BIN:-macc}" runner-process --completion-file "$capture_dir/completion" --owner-pid "$owner_pid" -- "$@" <&0 >"$fifo" 2>&1 &
+  local supervisor=("${MACC_SESSION_SERVICE_BIN:-macc}" runner-process --completion-file "$capture_dir/completion" --owner-pid "$owner_pid" -- "$@")
+  if [[ -n "$final_message_file" ]]; then
+    "${supervisor[@]}" <&0 >"$fifo" 2>"$capture_dir/stderr" &
+  else
+    "${supervisor[@]}" <&0 >"$fifo" 2>&1 &
+  fi
   provider_pid=$!
   wait "$provider_pid" || rc=$?
   provider_pid=""
   drain_provider_output
-  return "$rc"
+  if [[ -n "$final_message_file" ]]; then
+    publish_final_message "$output_file" "$rc"
+  else
+    return "$rc"
+  fi
 }
 
 expand_config_args() {
@@ -267,6 +291,7 @@ run_resume_and_capture() {
 
   prepare_usage "$invoke_command" "${final_args[@]}"
   apply_usage_args final_args
+  add_final_message_arg final_args || return 1
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
     run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt_arg" "$prompt"
   elif [[ "$prompt_mode" == arg ]]; then
@@ -464,7 +489,8 @@ cleanup_runner() {
       release_session_lock
     fi
   fi
-  rm -f "$output_capture"
+  rm -f -- "$output_capture"
+  if [[ -n "$final_message_file" ]]; then rm -f -- "$final_message_file" "$final_protocol_file"; fi
   if [[ "${sqlite_lease_lost:-false}" == true ]]; then
     runner_failure E901 "Session lease heartbeat failed; verify lease ownership before resuming this worktree"
   fi
@@ -482,6 +508,7 @@ run_default_call() {
   expand_config_args "$sid" final_call_args
   prepare_usage "$command" "${final_call_args[@]}"
   apply_usage_args final_call_args
+  add_final_message_arg final_call_args || return 1
 
   if [[ "$prompt_mode" == "arg" ]]; then
     if [[ -n "$prompt_arg" ]]; then
@@ -513,6 +540,7 @@ provider_unavailable() {
 }
 provider_exit_code() {
   local rc="$1" inspection
+  if [[ -n "$final_message_file" ]]; then echo "$rc"; return; fi
   inspection="$(runner_output_inspection "$output_capture" "$rc")" || { echo 1; return; }
   if [[ "$rc" == 0 ]] && jq -e '.provider_failure' <<<"$inspection" >/dev/null; then echo 1; else echo "$rc"; fi
 }
