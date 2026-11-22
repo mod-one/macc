@@ -7834,12 +7834,14 @@ mod tests {
     fn automatic_approval_refresh_uses_json_in_never_ask() {
         let dir = tempdir().unwrap();
         let paths = ProjectPaths::from_root(dir.path());
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&paths.root)
-            .status()
-            .unwrap()
-            .success());
+        assert!(macc_core::git::run_git_output_mapped(
+            &paths.root,
+            &["init", "-q"],
+            "initialize test repository"
+        )
+        .unwrap()
+        .status
+        .success());
         let storage = CoordinatorStoragePaths::from_project_paths(&paths);
         fs::create_dir_all(storage.registry_json_path.parent().unwrap()).unwrap();
         let mut config = CanonicalConfig::default();

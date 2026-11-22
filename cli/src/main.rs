@@ -13,6 +13,9 @@ use macc_core::{MaccError, Result};
 use std::process::exit;
 use tracing::{debug, error, info};
 
+mod args;
+use args::{CoordinatorArgs, RestoreArgs, RunArgs, SaveArgs, StatusArgs};
+
 mod commands;
 mod coordinator;
 mod services;
@@ -306,76 +309,9 @@ enum Commands {
         backups_command: BackupsCommands,
     },
     /// Save MACC setup as a bundle
-    Save {
-        /// Name of the save bundle to create
-        name: Option<String>,
-        /// Overwrite if save already exists
-        #[arg(long)]
-        overwrite: bool,
-        /// Optional description of the save
-        #[arg(long)]
-        description: Option<String>,
-        /// Comma-separated list of sections to save
-        #[arg(long)]
-        only: Option<String>,
-        /// Do not save coordinator sessions
-        #[arg(long)]
-        no_sessions: bool,
-        /// Include redacted logs in the save
-        #[arg(long)]
-        include_logs: bool,
-        /// Maximum size of log files to include
-        #[arg(long, default_value = "50MB")]
-        log_max_size: String,
-        /// Duration of log files to include
-        #[arg(long, default_value = "7d")]
-        log_since: String,
-        /// Redact secret-like patterns from logs
-        #[arg(long, default_value = "true")]
-        redact_logs: bool,
-        /// Show what would be saved without writing
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Save bundle management subcommand
-        #[command(subcommand)]
-        cmd: Option<SaveSubcommands>,
-    },
+    Save(SaveArgs),
     /// Restore MACC setup from a save bundle or safety backup
-    Restore {
-        /// Name of the save bundle to restore
-        name: Option<String>,
-        /// Restore the most recent backup set or save bundle
-        #[arg(long)]
-        latest: bool,
-        /// Use user-level backup root (~/.macc/backups) instead of project backup root
-        #[arg(long)]
-        user: bool,
-        /// Restore from an explicit backup set name (timestamp folder)
-        #[arg(long)]
-        backup: Option<String>,
-        /// Show what would be restored without writing files
-        #[arg(long)]
-        dry_run: bool,
-        /// Skip confirmation prompt
-        #[arg(short = 'y', long)]
-        yes: bool,
-        /// Run macc apply after restoring (incompatible with --dry-run)
-        #[arg(long, conflicts_with = "dry_run")]
-        apply: bool,
-        /// Restore only the config file
-        #[arg(long)]
-        config_only: bool,
-        /// Force session restore
-        #[arg(long)]
-        sessions: bool,
-        /// Skip session restore
-        #[arg(long)]
-        no_sessions: bool,
-        /// Restore archived logs to .macc/restored-logs/<name>/
-        #[arg(long)]
-        include_logs: bool,
-    },
+    Restore(RestoreArgs),
     /// Remove MACC-managed project files and optionally save state
     Clear {
         /// Save name to backup before clearing
@@ -416,181 +352,7 @@ enum Commands {
     },
     /// Run the project coordinator automation script
     #[command(trailing_var_arg = true)]
-    Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, block-task, unblock-task, approvals, approve, reject, request-changes, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
-        /// Use `prds help` to manage the ordered PRD file queue and visual editor.
-        #[arg(default_value = "run")]
-        command_name: String,
-        /// Start the coordinator after a relative delay, for example 30m or 2h
-        #[arg(long = "in", value_name = "DURATION", conflicts_with = "at")]
-        run_in: Option<String>,
-        /// Start the coordinator at an absolute date-time
-        #[arg(long, value_name = "DATETIME", conflicts_with = "run_in")]
-        at: Option<String>,
-        /// Execute coordinator mutations as this client identity
-        #[arg(long)]
-        as_client: Option<String>,
-        /// Client to open after the coordinator starts: tui (default), web, none
-        #[arg(long, value_name = "CLIENT")]
-        client: Option<String>,
-        /// Run headless without any client (alias for --client none)
-        #[arg(long, alias = "no-tui")]
-        no_client: bool,
-        /// Start supervisor in daemon+attach mode before running coordinator
-        #[arg(long)]
-        supervisor: bool,
-        /// Explicitly disable autonomous supervision (also skips the startup question)
-        #[arg(long, conflicts_with = "supervisor")]
-        no_supervisor: bool,
-        /// Drain stop (disable new dispatch, let active tasks finish)
-        #[arg(long)]
-        drain: bool,
-        /// Graceful stop (SIGTERM only, no SIGKILL escalation)
-        #[arg(long)]
-        graceful: bool,
-        /// Force stop (SIGTERM then SIGKILL process groups)
-        #[arg(long)]
-        force: bool,
-        /// When action=stop, remove all project worktrees after coordinator shutdown
-        #[arg(long)]
-        remove_worktrees: bool,
-        /// Force stop and cleanup worktrees
-        #[arg(long)]
-        cleanup_worktrees: bool,
-        /// When action=stop and --remove-worktrees is set, also delete associated branches
-        #[arg(long)]
-        remove_branches: bool,
-        /// Override PRD file path
-        #[arg(long)]
-        prd: Option<String>,
-        /// Fixed tool for coordinator phase hooks (review/fix)
-        #[arg(long)]
-        coordinator_tool: Option<String>,
-        /// Default reference/base branch when task.base_branch is not provided
-        #[arg(long)]
-        reference_branch: Option<String>,
-        /// Run preflight checks and exit without starting the coordinator
-        #[arg(long)]
-        preflight_only: bool,
-        /// Allow coordinator run even when reference branch worktree is dirty
-        #[arg(long)]
-        allow_dirty_reference: bool,
-        /// Create the reference branch if it is missing
-        #[arg(long)]
-        create_reference_branch: bool,
-        /// Base branch or revision used when creating a missing reference branch
-        #[arg(long)]
-        reference_branch_base: Option<String>,
-        /// Tool priority order (comma-separated, e.g. tool-a,tool-b,tool-c)
-        #[arg(long)]
-        tool_priority: Option<String>,
-        /// Per-tool concurrency cap JSON (e.g. {"tool-a":3,"tool-b":2})
-        #[arg(long)]
-        max_parallel_per_tool_json: Option<String>,
-        /// Preset configurations (conservative, balanced, throughput)
-        #[arg(long)]
-        preset: Option<String>,
-        /// Category->tools routing JSON (e.g. {"frontend":["tool-b","tool-c"]})
-        #[arg(long)]
-        tool_specializations_json: Option<String>,
-        /// Override MAX_DISPATCH
-        #[arg(long)]
-        max_dispatch: Option<usize>,
-        /// Override MAX_PARALLEL
-        #[arg(long)]
-        max_parallel: Option<usize>,
-        /// Override TIMEOUT_SECONDS
-        #[arg(long)]
-        timeout_seconds: Option<usize>,
-        /// Override PHASE_RUNNER_MAX_ATTEMPTS
-        #[arg(long)]
-        phase_runner_max_attempts: Option<usize>,
-        /// Flush coordinator log buffer every N lines (default: 32)
-        #[arg(long)]
-        log_flush_lines: Option<usize>,
-        /// Flush coordinator log buffer every N milliseconds (default: 1000)
-        #[arg(long)]
-        log_flush_ms: Option<u64>,
-        /// Debounce SQLite -> JSON compatibility export in milliseconds (0 disables debounce)
-        #[arg(long)]
-        mirror_json_debounce_ms: Option<u64>,
-        /// Override STALE_CLAIMED_SECONDS
-        #[arg(long)]
-        stale_claimed_seconds: Option<usize>,
-        /// Override STALE_IN_PROGRESS_SECONDS
-        #[arg(long)]
-        stale_in_progress_seconds: Option<usize>,
-        /// Override STALE_CHANGES_REQUESTED_SECONDS
-        #[arg(long)]
-        stale_changes_requested_seconds: Option<usize>,
-        /// Override STALE_ACTION (abandon, todo, blocked)
-        #[arg(long)]
-        stale_action: Option<String>,
-        /// Coordinator storage mode (json, dual-write, sqlite)
-        #[arg(long)]
-        storage_mode: Option<String>,
-        /// Enable AI-driven merge conflict resolution
-        #[arg(long)]
-        merge_ai_fix: Option<bool>,
-        /// Timeout for merge operations in seconds
-        #[arg(long)]
-        merge_job_timeout_seconds: Option<usize>,
-        /// Timeout for merge-fix hook in seconds
-        #[arg(long)]
-        merge_hook_timeout_seconds: Option<u64>,
-        /// Grace period for ghost heartbeat in seconds
-        #[arg(long)]
-        ghost_heartbeat_grace_seconds: Option<i64>,
-        /// Cooldown between task dispatch in seconds
-        #[arg(long)]
-        dispatch_cooldown_seconds: Option<u64>,
-        /// Enable JSON compatibility mode for storage
-        #[arg(long)]
-        json_compat: Option<bool>,
-        /// Allow falling back to JSON task registry if SQLite is corrupted or missing
-        #[arg(long)]
-        legacy_json_fallback: Option<bool>,
-        /// Number of recent events to evaluate for cutover gate
-        #[arg(long)]
-        cutover_gate_window_events: Option<usize>,
-        /// Maximum allowed ratio of blocked events for cutover gate
-        #[arg(long)]
-        cutover_gate_max_blocked_ratio: Option<f64>,
-        /// Maximum allowed ratio of stale events for cutover gate
-        #[arg(long)]
-        cutover_gate_max_stale_ratio: Option<f64>,
-        /// Comma-separated list of error codes that trigger auto-retry
-        #[arg(long)]
-        error_code_retry_list: Option<String>,
-        /// Maximum number of auto-retries for a task
-        #[arg(long)]
-        error_code_retry_max: Option<usize>,
-        /// Grace period (seconds) before force-killing a performer that signaled failure via IPC but did not exit
-        #[arg(long)]
-        force_kill_grace_seconds: Option<u64>,
-        /// Maximum reviewer attempts per task, including retries. Zero disables new reviews. Default: unlimited.
-        #[arg(long)]
-        max_review_cycles: Option<usize>,
-        /// Disable the testing phase entirely
-        #[arg(long)]
-        disable_testing: bool,
-        /// Disable the review phase entirely
-        #[arg(long)]
-        disable_review: bool,
-        /// Override the testing phase mode (disabled, required, risk_based, manual)
-        #[arg(long)]
-        testing: Option<String>,
-        /// Override the review phase mode (disabled, required, risk_based, manual)
-        #[arg(long)]
-        review: Option<String>,
-        /// Force a global model tier for all tasks in this run: mini, standard, heavy.
-        /// Overrides per-task routing_hints. Only effective when model-routing mode is auto.
-        #[arg(long)]
-        model_tier: Option<String>,
-        /// Extra args passed to coordinator subcommands (positional or after --)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra_args: Vec<String>,
-    },
+    Coordinator(CoordinatorArgs),
     /// Guided onboarding and task startup entry point
     Start {
         /// Select the startup intent
@@ -680,75 +442,11 @@ enum Commands {
         open: bool,
     },
     /// Show MACC runtime status (queue, workers, throttles, events)
-    Status {
-        /// Output JSON snapshot
-        #[arg(long)]
-        json: bool,
-        /// Open live TUI observer (read-only)
-        #[arg(short, long)]
-        watch: bool,
-        /// Enable operator actions in watch mode
-        #[arg(long)]
-        control: bool,
-        /// Focus on a specific task ID
-        #[arg(long)]
-        task: Option<String>,
-        /// Filter by tool
-        #[arg(long)]
-        tool: Option<String>,
-        /// Show only failed tasks
-        #[arg(long)]
-        failed: bool,
-        /// Show only rate-limited tools
-        #[arg(long)]
-        rate_limited: bool,
-        /// Show log pane only
-        #[arg(long)]
-        logs_only: bool,
-        /// Show events pane only
-        #[arg(long)]
-        events_only: bool,
-        /// Number of recent events to show (default: 5)
-        #[arg(long, default_value = "5")]
-        events: usize,
-        /// Show verbose output including per-worker details
-        #[arg(long)]
-        verbose: bool,
-    },
+    Status(StatusArgs),
     /// Open the live TUI observer (alias for `status --watch`)
     Watch,
     /// Execute a MACC skill
-    Run {
-        /// Skill ID (e.g. validate, implement, security-check)
-        skill: String,
-        /// Tool to route through (overrides skill default)
-        #[arg(long)]
-        tool: Option<String>,
-        /// Agent persona to use
-        #[arg(long)]
-        agent: Option<String>,
-        /// Task ID context for the skill run
-        #[arg(long)]
-        task_id: Option<String>,
-        /// Glob scope for the skill
-        #[arg(long)]
-        scope: Option<String>,
-        /// Feature label for the skill
-        #[arg(long)]
-        feature: Option<String>,
-        /// Show what would run without executing
-        #[arg(long)]
-        dry_run: bool,
-        /// Watch the run output
-        #[arg(long)]
-        watch: bool,
-        /// Output JSON result
-        #[arg(long)]
-        json: bool,
-        /// Skip confirmation prompts
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
+    Run(RunArgs),
     /// Manage MACC skills
     Skills {
         #[command(subcommand)]
@@ -1772,7 +1470,7 @@ fn run_with_engine_provider(
         Some(Commands::Backups { backups_command }) => {
             commands::backups::BackupsCommand::new(app.clone(), backups_command).run()
         }
-        Some(Commands::Save {
+        Some(Commands::Save(SaveArgs {
             name,
             overwrite,
             description,
@@ -1784,7 +1482,7 @@ fn run_with_engine_provider(
             redact_logs,
             dry_run,
             cmd,
-        }) => {
+        })) => {
             let action = match cmd {
                 Some(SaveSubcommands::List { matching }) => commands::save::SaveAction::List {
                     matching: *matching,
@@ -1818,7 +1516,7 @@ fn run_with_engine_provider(
             };
             commands::save::SaveCommand::new(app.clone(), action).run()
         }
-        Some(Commands::Restore {
+        Some(Commands::Restore(RestoreArgs {
             name,
             latest,
             user,
@@ -1830,7 +1528,7 @@ fn run_with_engine_provider(
             sessions,
             no_sessions,
             include_logs,
-        }) => commands::restore::RestoreCommand::new(
+        })) => commands::restore::RestoreCommand::new(
             app.clone(),
             name.clone(),
             *latest,
@@ -1945,7 +1643,7 @@ fn run_with_engine_provider(
         )
         .run(),
 
-        Some(Commands::Status {
+        Some(Commands::Status(StatusArgs {
             json,
             watch,
             control,
@@ -1957,7 +1655,7 @@ fn run_with_engine_provider(
             events_only,
             events,
             verbose,
-        }) => commands::status::StatusCommand {
+        })) => commands::status::StatusCommand {
             app: app.clone(),
             json: *json,
             watch: *watch,
@@ -1981,7 +1679,7 @@ fn run_with_engine_provider(
         }
         .run(),
 
-        Some(Commands::Run {
+        Some(Commands::Run(RunArgs {
             skill,
             tool: skill_tool,
             agent: _,
@@ -1992,7 +1690,7 @@ fn run_with_engine_provider(
             watch: run_watch,
             json: run_json,
             yes,
-        }) => commands::run::RunCommand {
+        })) => commands::run::RunCommand {
             app: app.clone(),
             skill: skill.clone(),
             tool: skill_tool.clone(),
@@ -2190,7 +1888,7 @@ fn run_with_engine_provider(
             PrdCommand::new(app.clone(), sub).run()
         }
 
-        Some(Commands::Coordinator {
+        Some(Commands::Coordinator(CoordinatorArgs {
             command_name,
             run_in,
             at,
@@ -2248,7 +1946,7 @@ fn run_with_engine_provider(
             review,
             model_tier,
             extra_args,
-        }) => {
+        })) => {
             // --model-tier propagates to all performer processes as MACC_MODEL_TIER.
             // This acts as a global override for the routing engine's per-task decision.
             if let Some(tier) = model_tier {
@@ -3021,11 +2719,11 @@ mod tests {
         let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--supervisor"])
             .expect("parse coordinator run --supervisor");
         match cli.command {
-            Some(Commands::Coordinator {
+            Some(Commands::Coordinator(CoordinatorArgs {
                 command_name,
                 supervisor,
                 ..
-            }) => {
+            })) => {
                 assert_eq!(command_name, "run");
                 assert!(supervisor);
             }
@@ -3039,12 +2737,12 @@ mod tests {
         let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--in", "30m"])
             .expect("parse coordinator run --in 30m");
         match cli.command {
-            Some(Commands::Coordinator {
+            Some(Commands::Coordinator(CoordinatorArgs {
                 command_name,
                 run_in,
                 at,
                 ..
-            }) => {
+            })) => {
                 assert_eq!(command_name, "run");
                 assert_eq!(run_in, Some("30m".to_string()));
                 assert_eq!(at, None);
@@ -3056,12 +2754,12 @@ mod tests {
         let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--at", "2026-06-28T02:00"])
             .expect("parse coordinator run --at 2026-06-28T02:00");
         match cli.command {
-            Some(Commands::Coordinator {
+            Some(Commands::Coordinator(CoordinatorArgs {
                 command_name,
                 run_in,
                 at,
                 ..
-            }) => {
+            })) => {
                 assert_eq!(command_name, "run");
                 assert_eq!(run_in, None);
                 assert_eq!(at, Some("2026-06-28T02:00".to_string()));
@@ -3136,7 +2834,7 @@ mod tests {
         let cli3 = Cli::try_parse_from(["macc", "coordinator", "run", "--preset", "throughput"])
             .expect("parse coordinator run --preset");
         match cli3.command {
-            Some(Commands::Coordinator { preset, .. }) => {
+            Some(Commands::Coordinator(CoordinatorArgs { preset, .. })) => {
                 assert_eq!(preset, Some("throughput".to_string()));
             }
             _ => panic!("unexpected command"),
@@ -4008,7 +3706,7 @@ fi
                 quiet: false,
                 offline: false,
                 web_port: None,
-                command: Some(Commands::Coordinator {
+                command: Some(Commands::Coordinator(CoordinatorArgs {
                     command_name: "stop".to_string(),
                     run_in: None,
                     at: None,
@@ -4066,7 +3764,7 @@ fi
                     review: None,
                     model_tier: None,
                     extra_args: Vec::new(),
-                }),
+                })),
             },
             fixture_engine(&ids),
         )?;
@@ -5792,7 +5490,7 @@ fi
                 quiet: false,
                 offline: false,
                 web_port: None,
-                command: Some(Commands::Save {
+                command: Some(Commands::Save(SaveArgs {
                     name: Some("test-save-1".to_string()),
                     overwrite: true,
                     description: Some("Test Description".to_string()),
@@ -5804,7 +5502,7 @@ fi
                     redact_logs: true,
                     dry_run: false,
                     cmd: None,
-                }),
+                })),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -5840,7 +5538,7 @@ fi
                     quiet: false,
                     offline: false,
                     web_port: None,
-                    command: Some(Commands::Restore {
+                    command: Some(Commands::Restore(RestoreArgs {
                         name: Some("test-save-1".to_string()),
                         latest: false,
                         user: false,
@@ -5852,7 +5550,7 @@ fi
                         sessions: false,
                         no_sessions: false,
                         include_logs: false,
-                    }),
+                    })),
                 },
                 TestEngine::with_fixtures(),
             );
@@ -5949,7 +5647,7 @@ fi
                 quiet: false,
                 offline: false,
                 web_port: None,
-                command: Some(Commands::Save {
+                command: Some(Commands::Save(SaveArgs {
                     name: None,
                     overwrite: false,
                     description: None,
@@ -5961,7 +5659,7 @@ fi
                     redact_logs: true,
                     dry_run: false,
                     cmd: Some(SaveSubcommands::List { matching: false }),
-                }),
+                })),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -5974,7 +5672,7 @@ fi
                 quiet: false,
                 offline: false,
                 web_port: None,
-                command: Some(Commands::Save {
+                command: Some(Commands::Save(SaveArgs {
                     name: None,
                     overwrite: false,
                     description: None,
@@ -5988,7 +5686,7 @@ fi
                     cmd: Some(SaveSubcommands::Show {
                         name: "test-save-1".to_string(),
                     }),
-                }),
+                })),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -6001,7 +5699,7 @@ fi
                 quiet: false,
                 offline: false,
                 web_port: None,
-                command: Some(Commands::Save {
+                command: Some(Commands::Save(SaveArgs {
                     name: None,
                     overwrite: false,
                     description: None,
@@ -6016,7 +5714,7 @@ fi
                         name: "test-save-1".to_string(),
                         yes: true,
                     }),
-                }),
+                })),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -6134,7 +5832,7 @@ fi
                     quiet: false,
                     offline: false,
                     web_port: None,
-                    command: Some(Commands::Save {
+                    command: Some(Commands::Save(SaveArgs {
                         name: Some("test-save-redact".to_string()),
                         overwrite: true,
                         description: Some("Test Redaction".to_string()),
@@ -6146,7 +5844,7 @@ fi
                         redact_logs: true,
                         dry_run: false,
                         cmd: None,
-                    }),
+                    })),
                 },
                 TestEngine::with_fixtures(),
             )?;
@@ -6170,7 +5868,7 @@ fi
                     quiet: false,
                     offline: false,
                     web_port: None,
-                    command: Some(Commands::Save {
+                    command: Some(Commands::Save(SaveArgs {
                         name: Some("test-save-exclude".to_string()),
                         overwrite: true,
                         description: Some("Test Exclusion".to_string()),
@@ -6182,7 +5880,7 @@ fi
                         redact_logs: true,
                         dry_run: false,
                         cmd: None,
-                    }),
+                    })),
                 },
                 TestEngine::with_fixtures(),
             )?;
@@ -6206,7 +5904,7 @@ fi
                     quiet: false,
                     offline: false,
                     web_port: None,
-                    command: Some(Commands::Save {
+                    command: Some(Commands::Save(SaveArgs {
                         name: Some("test-save-abort".to_string()),
                         overwrite: true,
                         description: Some("Test Abort".to_string()),
@@ -6218,7 +5916,7 @@ fi
                         redact_logs: true,
                         dry_run: false,
                         cmd: None,
-                    }),
+                    })),
                 },
                 TestEngine::with_fixtures(),
             );

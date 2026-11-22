@@ -1655,6 +1655,7 @@ async fn status_endpoint_maps_engine_errors() {
         .join("task")
         .join("task_registry.json");
     fs::create_dir_all(registry_path.parent().expect("parent")).expect("mkdir");
+    fs::write(root.join(".macc/macc.yaml"), "tools:\n  enabled: []\nautomation:\n  coordinator:\n    storage_mode: json\n").unwrap();
     fs::write(&registry_path, "{not-json").expect("write");
     let state = test_web_state(
         &root,
@@ -4484,6 +4485,7 @@ async fn worktrees_list_endpoint_returns_managed_worktree_metadata() {
     let root = temp_root("worktrees-list");
     init_worktree_repo(&root);
     let created = create_test_worktree(&root, "list-worktree");
+    fs::write(created.path.join("README.md"), "unfinished work").unwrap();
     let state = test_web_state(
         &root,
         Arc::new(TestEngine::with_fixtures()),

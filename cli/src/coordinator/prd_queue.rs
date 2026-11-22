@@ -197,11 +197,11 @@ mod tests {
         let cli = crate::Cli::try_parse_from(["macc", "coordinator", "prds", "reset", "--confirm"])
             .unwrap();
         match cli.command {
-            Some(crate::Commands::Coordinator {
+            Some(crate::Commands::Coordinator(crate::CoordinatorArgs {
                 command_name,
                 extra_args,
                 ..
-            }) => {
+            })) => {
                 assert_eq!(command_name, "prds");
                 assert_eq!(extra_args, vec!["reset", "--confirm"]);
             }

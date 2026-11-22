@@ -8,7 +8,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 for tool_id in codex claude agy; do
   case "$tool_id" in
-    codex) message="ERROR: You've hit your usage limit. Try again at 10:30 PM." ;;
+    codex) message="ERROR: You've hit your usage limit. Try again at December 31st, 9999 10:30 PM." ;;
     claude) message="You've hit your session limit · resets 10:10pm (UTC)" ;;
     agy) message='error: Individual quota reached. Resets in 64h18m47s.' ;;
   esac

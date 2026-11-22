@@ -22,7 +22,7 @@ fn real_provider_limits_still_use_adapter_classes_and_reset_hints() {
     for (tool, message) in [
         (
             "codex",
-            "ERROR: You've hit your usage limit. Try again at 10:30 PM.",
+            "ERROR: You've hit your usage limit. Try again at December 31st, 9999 10:30 PM.",
         ),
         (
             "claude",

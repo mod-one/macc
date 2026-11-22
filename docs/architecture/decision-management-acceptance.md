@@ -179,7 +179,11 @@ passes 174 tests, the decision-center web suite passes 28 tests, and the web
 production build passes. Local Git coordinator and plan/apply integration tests
 also pass without a provider call.
 
-The CLI unit suite passes 272 tests with `RUST_MIN_STACK=8388608`. Its root-parser
-test overflows the default debug test-thread stack; this run does not establish
-that default-stack parser issue is fixed. No production stack setting was changed.
+The original CLI acceptance run used an 8 MiB test-thread stack. A subsequent
+Linux x86-64 debug run reproduced the root-parser overflow with the default
+stack. Extracting the coordinator, save, restore, status and run argument
+builders reduced the root constructor's stack reservation from about 1.53 MiB
+to 856 KiB, measured from its machine-code prologue. The same O2 parser
+regression passed both with the default stack and with a 1.625 MiB stack.
+With the default stack, `cargo test --workspace --locked` completed with 2,318 tests passed and 2 ignored.
 No running user coordinator or installed binary was replaced by these checks.
