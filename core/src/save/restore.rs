@@ -1,10 +1,11 @@
 use super::bundle::{compute_file_sha256, compute_manifest_payload_hash};
-use super::classifier::copy_dir_all;
+mod files;
 use super::manifest::{MatchStrength, SaveBundleManifest};
 use super::repository_identity::{compute_match_strength, get_repository_identity};
 use crate::{MaccError, ProjectPaths, Result};
-use chrono::Utc;
+
 use std::fs;
+use std::path::Path;
 
 pub fn restore_save_bundle(
     paths: &ProjectPaths,
@@ -139,30 +140,30 @@ pub(super) fn restore_from(
         return Err(MaccError::Validation("MACC-RESTORE-2002: Repository mismatch. Choose config-only restore or confirm with yes.".to_string()));
     }
 
-    // Verify config file checksum if present
-    if let Some(config_rel) = &manifest.paths.config {
-        let config_src = super::sessions::payload(&target_save_dir, config_rel)?;
-        if config_src.exists() {
-            let actual_sha = compute_file_sha256(&config_src).unwrap();
-            if let Some(expected_sha) = &manifest.hashes.config {
-                if &actual_sha != expected_sha {
-                    return Err(MaccError::Validation("MACC-RESTORE-2003: Checksum mismatch. Save configuration file is corrupted.".to_string()));
-                }
-            }
-        }
-    }
-
-    // Verify session file checksum if present
-    if let Some(sessions_rel) = &manifest.paths.coordinator_sessions {
-        let sessions_src = super::sessions::payload(&target_save_dir, sessions_rel)?;
-        if sessions_src.exists() {
-            let actual_sha = compute_file_sha256(&sessions_src).unwrap();
-            if let Some(expected_sha) = &manifest.hashes.coordinator_sessions {
-                if &actual_sha != expected_sha {
-                    return Err(MaccError::Validation(
-                        "MACC-RESTORE-2003: Checksum mismatch. Save sessions file is corrupted."
-                            .to_string(),
-                    ));
+    for (section, relative, expected) in [
+        (
+            "configuration",
+            &manifest.paths.config,
+            &manifest.hashes.config,
+        ),
+        (
+            "sessions",
+            &manifest.paths.coordinator_sessions,
+            &manifest.hashes.coordinator_sessions,
+        ),
+    ] {
+        if let Some(relative) = relative {
+            let source = super::sessions::payload(&target_save_dir, relative)?;
+            if let Some(expected) = expected {
+                let actual = compute_file_sha256(&source).map_err(|err| MaccError::Io {
+                    path: source.display().to_string(),
+                    action: format!("hash {section} payload"),
+                    source: err,
+                })?;
+                if actual != *expected {
+                    return Err(MaccError::Validation(format!(
+                        "MACC-RESTORE-2003: Checksum mismatch. Save {section} file is corrupted."
+                    )));
                 }
             }
         }
@@ -172,8 +173,30 @@ pub(super) fn restore_from(
     let restore_sessions = !config_only
         && !opts.no_sessions
         && (opts.sessions || manifest.includes.coordinator_sessions);
-    let skill_lock = if manifest.includes.config {
-        super::skill_locks::load(&target_save_dir)?
+    let sections = files::plan(
+        paths,
+        &target_save_dir,
+        name,
+        &manifest,
+        config_only,
+        restore_sessions,
+        opts.include_logs,
+    )?;
+    let session_db = paths.macc_dir.join("memory.db");
+    if restore_sessions && manifest.session_store.is_some() {
+        files::destination("session database", &paths.root, &session_db, false)?;
+        files::destination(
+            "session authority",
+            &paths.root,
+            &crate::session_store::marker_path(&paths.root),
+            false,
+        )?;
+    }
+    let decision_db = if !config_only && !opts.no_sessions && manifest.decision_store.is_some() {
+        let primary = crate::persistent::primary_root(&paths.root)?;
+        let file = primary.join(".macc/persistent/control.sqlite");
+        files::destination("decision database", &primary, &file, false)?;
+        Some(file)
     } else {
         None
     };
@@ -218,93 +241,69 @@ pub(super) fn restore_from(
     if opts.dry_run {
         return Ok(());
     }
-    if let (Some(source), Some(meta)) = (&decision_source, &manifest.decision_store) {
-        crate::coordinator::decisions::restore_backup(&paths.root, source, meta)?;
+    let mut progress = Progress::default();
+    if let (Some(source), Some(meta), Some(target)) =
+        (&decision_source, &manifest.decision_store, decision_db)
+    {
+        progress.run("decision database", &target, || {
+            crate::coordinator::decisions::restore_backup(&paths.root, source, meta)
+        })?;
     }
-    // 1. Restore config
-    // SQLite preflight above runs before any configuration is overwritten.
     if let (Some(source), Some(meta)) = (&sqlite_source, &manifest.session_store) {
-        crate::session_store::bundle::restore_locked(&paths.root, source, meta)?;
+        progress.run("session database", &session_db, || {
+            crate::session_store::bundle::restore_locked(&paths.root, source, meta)
+        })?;
     }
-    if manifest.includes.config {
-        if let Some(config_rel) = &manifest.paths.config {
-            let config_src = target_save_dir.join(config_rel);
-            if config_src.exists() {
-                fs::create_dir_all(paths.config_path.parent().unwrap()).ok();
-
-                // Back up overwritten file first
-                if paths.config_path.exists() {
-                    let backup_name = format!("macc.yaml.backup.{}", Utc::now().timestamp());
-                    let backup_path = paths.config_path.parent().unwrap().join(backup_name);
-                    fs::copy(&paths.config_path, &backup_path).ok();
-                }
-
-                fs::copy(&config_src, &paths.config_path).map_err(|e| MaccError::Io {
-                    path: paths.config_path.to_string_lossy().into(),
-                    action: "restore config file".into(),
-                    source: e,
-                })?;
-            }
-        }
-    }
-
-    if let Some(lock) = skill_lock {
-        lock.save(&paths.skills_lock_path())?;
-    }
-
-    if config_only {
-        // Skip sessions, catalogs, logs, state
-        return Ok(());
-    }
-
-    // 2. Restore sessions
-    if restore_sessions && manifest.session_store.is_none() {
-        if let Some(sessions_rel) = &manifest.paths.coordinator_sessions {
-            let sessions_src = target_save_dir.join(sessions_rel);
-            if sessions_src.exists() {
-                let sessions_dest = paths.macc_dir.join("state").join("tool-sessions.json");
-                fs::create_dir_all(sessions_dest.parent().unwrap()).ok();
-
-                // Session normalization: drop PIDs / stale leases
-                if let Ok(content) = fs::read_to_string(&sessions_src) {
-                    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        normalize_session_json(&mut val, &paths.root);
-                        let normalized_bytes = serde_json::to_vec_pretty(&val).unwrap();
-                        fs::write(&sessions_dest, normalized_bytes).ok();
-                    } else {
-                        fs::copy(&sessions_src, &sessions_dest).ok();
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Restore catalogs
-    if manifest.includes.catalogs {
-        let catalogs_src = target_save_dir.join("catalogs");
-        if catalogs_src.exists() {
-            let _ = copy_dir_all(&catalogs_src, paths.project_catalog_dir(), paths);
-        }
-    }
-
-    // 4. Restore logs to restored-logs directory
-    if opts.include_logs && manifest.includes.logs {
-        let logs_src = target_save_dir.join("logs");
-        if logs_src.exists() {
-            let restored_logs_dest = paths.macc_dir.join("restored-logs").join(name);
-            let _ = copy_dir_all(&logs_src, &restored_logs_dest, paths);
-        }
-    }
-
-    // 5. Restore task registry / state
-    if manifest.includes.prd || manifest.includes.automation_state {
-        let registry_src = target_save_dir.join("automation").join("task");
-        if registry_src.exists() {
-            let registry_dest = paths.macc_dir.join("automation").join("task");
-            let _ = copy_dir_all(&registry_src, &registry_dest, paths);
-        }
+    for section in sections {
+        progress.run(section.name, &section.target, || section.restore(paths))?;
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct Progress {
+    completed: Vec<&'static str>,
+}
+impl Progress {
+    fn run(
+        &mut self,
+        section: &'static str,
+        target: &Path,
+        operation: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        if let Err(error) = operation() {
+            let completed = if self.completed.is_empty() {
+                "none".into()
+            } else {
+                self.completed.join(", ")
+            };
+            let retry = if self.completed.contains(&"session database")
+                || self.completed.contains(&"legacy sessions")
+            {
+                "Correct the cause and retry with --no-sessions to retain restored session data."
+            } else {
+                "Correct the cause and retry the same bundle and options."
+            };
+            let context = format!(
+                "Restore stopped in {section} at {}. Completed sections: {completed}. Retry point: {section}. {retry}",
+                target.display()
+            );
+            return Err(match error {
+                MaccError::Io {
+                    path,
+                    action,
+                    source,
+                } => MaccError::Io {
+                    path,
+                    action: format!("{action}. {context}"),
+                    source,
+                },
+                other => MaccError::Validation(format!("{context} Cause: {other}")),
+            });
+        }
+        self.completed.push(section);
+        Ok(())
+    }
 }
 
 fn recompute_worktree_path(old_path_str: &str, current_project_root: &std::path::Path) -> String {

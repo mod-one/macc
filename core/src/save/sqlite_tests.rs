@@ -397,3 +397,32 @@ fn attached_coordinator_prevents_restore_before_any_config_write() {
         "preserve live configuration\n"
     );
 }
+
+#[test]
+fn malformed_catalog_destination_prevents_restoring_sessions_and_configuration() {
+    let (_tmp, paths, saves) = setup();
+    let catalog = paths.project_catalog_dir().join("items");
+    fs::create_dir_all(&catalog).unwrap();
+    fs::write(catalog.join("entry"), "saved").unwrap();
+    let manifest = save(&paths, &saves);
+    let lease = claim(&paths.root);
+    store::release(&paths.root, &lease.key, true).unwrap();
+    let current = store::fingerprint::current(&paths.root).unwrap();
+    assert_ne!(manifest.session_store.unwrap().state_sha256, current);
+    fs::remove_dir_all(&catalog).unwrap();
+    fs::write(&catalog, "occupied").unwrap();
+    fs::write(&paths.config_path, "tools:\n  enabled: []\n").unwrap();
+
+    let err = restore::restore_from(&paths, "full", &restore_options(), &saves)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("catalogs") && err.contains(catalog.to_str().unwrap()),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&paths.config_path).unwrap(),
+        "tools:\n  enabled: []\n"
+    );
+    assert_eq!(store::fingerprint::current(&paths.root).unwrap(), current);
+}
