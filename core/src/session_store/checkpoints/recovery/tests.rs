@@ -264,8 +264,9 @@ fn decision_refresh_recovers_dirty_fix_without_rebinding_historical_review() {
             &value,
             &Default::default(),
             "2026-11-15T01:48:00Z",
-            Some(0),
+            Some(1),
             &phases,
+            false,
         )
         .unwrap();
         let [engine::AdvanceTaskAction::RunPhase {

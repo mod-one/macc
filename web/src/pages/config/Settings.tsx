@@ -697,7 +697,7 @@ function AdvancedTab({ draft, update }: { draft: ApiConfigResponse; update: (p: 
         <Field label="Ghost heartbeat grace (s)" help="Grace before treating a dead process as a ghost.">
           <NumberInput value={draft.ghostHeartbeatGraceSeconds} onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })} placeholder="30" />
         </Field>
-        <Field label="Max review cycles" help="Max review loops per task. 0 = skip review.">
+        <Field label="Max reviews per task" help="Includes retries and required reviews. Each review can request a correction. Zero disables new reviews. Unset means unlimited.">
           <NumberInput value={draft.maxReviewCycles ?? null} onChange={(v) => update({ maxReviewCycles: v })} />
         </Field>
       </FieldGrid>

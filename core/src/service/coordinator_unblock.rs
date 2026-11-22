@@ -121,8 +121,10 @@ pub(crate) fn apply(
                 tracking_id: block.tracking_id.clone(),
             });
     }
-    let next_state = if task.task_runtime.last_error_origin.as_deref() == Some("worktree_ownership")
-        || task.task_runtime.last_error_code.as_deref() == Some("DM_CONTEXT")
+    let next_state = if matches!(
+        task.task_runtime.last_error_origin.as_deref(),
+        Some("worktree_ownership" | "review_budget")
+    ) || task.task_runtime.last_error_code.as_deref() == Some("DM_CONTEXT")
         || crate::coordinator::phase_diagnostics::retained_phase_precondition(task)
     {
         crate::coordinator::retained_reconciliation::resume_state(&paths.root, task)

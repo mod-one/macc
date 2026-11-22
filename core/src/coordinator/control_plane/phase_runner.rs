@@ -1,12 +1,14 @@
 use super::base::CoordinatorLog;
 use crate::coordinator::helpers::now_iso_coordinator;
 use crate::coordinator::ipc::read_performer_ipc_addr;
-use crate::coordinator::model::TaskRegistry;
+use crate::coordinator::model::{Task, TaskRegistry};
+use crate::coordinator::review_budget::ReviewExecution;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
 use crate::{MaccError, Result};
 use std::path::Path;
 
 pub(super) struct NativePhaseExecutor<'a> {
+    pub(super) attempts_started: std::cell::Cell<usize>,
     pub(super) repo_root: &'a Path,
     pub(super) logger: Option<&'a dyn CoordinatorLog>,
     pub(super) cancelled: Option<&'a std::sync::atomic::AtomicBool>,
@@ -600,6 +602,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .and_then(|(_, v)| v)
                 .map(|v| v.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            self.attempts_started.set(attempt);
             let output = phase_output(&mut command, self.cancelled);
             let Ok(out) = output else {
                 last_reason = format!(
@@ -887,7 +890,14 @@ pub fn run_phase_for_task_native(
     max_attempts: usize,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<std::result::Result<String, String>> {
+    if mode == "review" {
+        // Generic phase dispatch would bypass the read-only checks and verdict parser.
+        return Err(MaccError::Validation(
+            "Use the reserved review phase to run a reviewer".into(),
+        ));
+    }
     let executor = NativePhaseExecutor {
+        attempts_started: Default::default(),
         repo_root,
         logger,
         cancelled: None,
@@ -907,17 +917,51 @@ pub fn run_review_phase_for_task_native(
     repo_root: &Path,
     task: &crate::coordinator::model::Task,
     coordinator_tool_override: Option<&str>,
-    max_attempts: usize,
     logger: Option<&dyn CoordinatorLog>,
-) -> Result<std::result::Result<coordinator_engine::ReviewVerdict, String>> {
+) -> Result<ReviewExecution> {
     let executor = NativePhaseExecutor {
+        attempts_started: Default::default(),
         repo_root,
         logger,
         cancelled: None,
         prepared_context: None,
         context_refresh: None,
     };
-    coordinator_runtime::run_review_phase(&executor, task, coordinator_tool_override, max_attempts)
+    let worktree = Path::new(task.worktree_path().unwrap_or_default());
+    let head = crate::git::head_commit(worktree).ok();
+    let mut execution = executor.run_reserved_review(task, coordinator_tool_override);
+    if execution.outcome.is_ok() && crate::coordinator::decisions::policy(repo_root)?.enabled {
+        if let Err(error) = attest_review(repo_root, task, head.as_deref().unwrap_or_default()) {
+            execution.outcome = Err(error.to_string());
+        }
+    }
+    Ok(execution)
+}
+
+impl NativePhaseExecutor<'_> {
+    pub(super) fn run_reserved_review(&self, task: &Task, tool: Option<&str>) -> ReviewExecution {
+        let outcome = coordinator_runtime::run_review_phase(self, task, tool)
+            .unwrap_or_else(|error| Err(error.to_string()));
+        ReviewExecution {
+            attempts: self.attempts_started.get(),
+            outcome,
+        }
+    }
+}
+
+pub(super) fn attest_review(root: &Path, task: &Task, head: &str) -> Result<()> {
+    use crate::coordinator::decisions;
+    let registry = decisions::registry(root)?;
+    let context = registry
+        .find_task(&task.id)
+        .and_then(|t| t.task_runtime.extra.get("decision_context"))
+        .ok_or_else(|| decisions::error("Missing review context"))?;
+    decisions::Store::open(root)?.attest_review_artifact(
+        context["plan_id"].as_str().unwrap_or_default(),
+        context["attempt_id"].as_str().unwrap_or_default(),
+        Path::new(task.worktree_path().unwrap_or_default()),
+        head,
+    )
 }
 
 #[cfg(all(test, unix))]

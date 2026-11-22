@@ -565,7 +565,7 @@ enum Commands {
         /// Grace period (seconds) before force-killing a performer that signaled failure via IPC but did not exit
         #[arg(long)]
         force_kill_grace_seconds: Option<u64>,
-        /// Max review cycles per task (0=skip review, 1=one review+fix, N=N loops). Default: unlimited.
+        /// Maximum reviewer attempts per task, including retries. Zero disables new reviews. Default: unlimited.
         #[arg(long)]
         max_review_cycles: Option<usize>,
         /// Disable the testing phase entirely

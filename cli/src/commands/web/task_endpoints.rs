@@ -568,10 +568,20 @@ pub(super) async fn task_run_review_handler(
     headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiRegistryTask>, ApiError> {
     crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+    let _phase_guard =
+        macc_core::coordinator::control_plane::acquire_phase_driver(&state.paths.root)
+            .map_err(|error| ApiError::conflict(error.to_string(), None))?;
     let mut snapshot = state
         .engine
         .coordinator_state_snapshot(&state.paths.root, &BTreeMap::new())
         .map_err(ApiError::from)?;
+    let limit = state
+        .engine
+        .load_canonical_config(&state.paths)
+        .map_err(ApiError::from)?
+        .automation
+        .coordinator
+        .and_then(|cfg| cfg.max_review_cycles);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let updated_task = {
@@ -580,9 +590,15 @@ pub(super) async fn task_run_review_handler(
             .find_task_mut(&task_id)
             .ok_or_else(|| not_found_task(&task_id))?;
 
+        macc_core::coordinator::review_budget::ensure_review_available(task, limit)
+            .map_err(|error| ApiError::conflict(error.to_string(), None))?;
         // Transition task workflow state to Reviewing, set phase to review and status to Idle
         task.state = "reviewing".to_string();
         let runtime = task.ensure_runtime();
+        runtime.extra.insert(
+            "review_refresh_required".into(),
+            serde_json::json!("Operator requested review"),
+        );
         runtime.set_status(RuntimeStatus::Idle);
         runtime.current_phase = Some("review".to_string());
         runtime.pid = None;

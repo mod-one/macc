@@ -661,6 +661,49 @@ pub async fn advance_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<coordinator_engine::AdvanceResult> {
+    // A manual retry and a second driver share the same task budgets. Acquire
+    // ownership before reading the registry and keep it through result collection.
+    let guard = match state
+        .phase_job
+        .as_mut()
+        .and_then(|job| job.driver_guard.take())
+    {
+        Some(guard) => guard,
+        None => match super::try_phase_driver(repo_root)? {
+            Some(guard) => guard,
+            None => {
+                return Ok(coordinator_engine::AdvanceResult {
+                    progressed: true,
+                    blocked_merge: None,
+                })
+            }
+        },
+    };
+    let result = advance_owned(
+        repo_root,
+        env_cfg,
+        coordinator,
+        coordinator_tool_override,
+        phase_runner_max_attempts,
+        state,
+        logger,
+    )
+    .await;
+    if let Some(job) = &mut state.phase_job {
+        job.driver_guard = Some(guard);
+    }
+    result
+}
+
+async fn advance_owned(
+    repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+    coordinator_tool_override: Option<&str>,
+    phase_runner_max_attempts: usize,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<coordinator_engine::AdvanceResult> {
     let mut cfg = CoordinatorConfigResolved::resolve(coordinator);
     if let Some(disable) = env_cfg.disable_testing {
         if disable {
@@ -694,7 +737,7 @@ pub async fn advance_tasks_native(
             let mut job = state.phase_job.take().expect("active phase exists");
             let waiting = if let Some(task) = current
                 .find_task(&job.task.id)
-                .filter(|t| job.same_assignment(t) && t.state == "blocked")
+                .filter(|t| job.task.same_phase_assignment(t) && t.state == "blocked")
             {
                 crate::coordinator::decisions::pending_for_task(repo_root, &task.id)?.filter(|p| {
                     task.task_runtime
@@ -716,7 +759,7 @@ pub async fn advance_tasks_native(
             if let Some(pending) = waiting {
                 let mut retained = TaskRegistry::from_value(&registry)?;
                 if let Some(task) = retained.find_task_mut(&job.task.id).filter(|t| {
-                    job.same_assignment(t)
+                    job.task.same_phase_assignment(t)
                         && t.state == "blocked"
                         && t.task_runtime
                             .extra
@@ -724,6 +767,11 @@ pub async fn advance_tasks_native(
                             .and_then(serde_json::Value::as_str)
                             == Some(pending.id.as_str())
                 }) {
+                    if let Ok(super::phase_job::PhaseOutcome::Review(execution)) =
+                        job.finish().await
+                    {
+                        task.task_runtime.settle_review_attempts(execution.attempts);
+                    }
                     super::phase_job::suspend(task, job.mode, &pending);
                     crate::coordinator::state::coordinator_state_registry_save(
                         repo_root,
@@ -793,6 +841,7 @@ pub async fn advance_tasks_native(
         &now,
         max_review_cycles,
         &cfg.phases,
+        crate::coordinator::decisions::policy(repo_root)?.enabled,
     )?;
     if let Some(job) = state.phase_job.as_mut() {
         job.drain_logs(logger);
@@ -813,35 +862,6 @@ pub async fn advance_tasks_native(
                     transition: job.transition,
                 },
             );
-        }
-    }
-    if crate::coordinator::decisions::policy(repo_root)?.enabled {
-        for action in &mut actions {
-            if let coordinator_engine::AdvanceTaskAction::QueueMerge { task_id, .. } = action {
-                if registry_snapshot.find_task(task_id).is_some_and(|task| {
-                    (task.task_runtime.extra.get("decision_has_bindings")
-                        == Some(&serde_json::json!(true))
-                        || task.task_runtime.extra.get("decision_merge_repair")
-                            == Some(&serde_json::json!(true)))
-                        && task
-                            .task_runtime
-                            .extra
-                            .get("decision_context")
-                            .and_then(|v| v.get("phase"))
-                            .and_then(serde_json::Value::as_str)
-                            != Some("review")
-                }) {
-                    *action = coordinator_engine::AdvanceTaskAction::RunPhase {
-                        task_id: task_id.clone(),
-                        mode: "review",
-                        transition: coordinator_engine::PhaseTransition {
-                            mode: "review",
-                            next_state: crate::coordinator::WorkflowState::Reviewing,
-                            runtime_phase: "review",
-                        },
-                    };
-                }
-            }
         }
     }
     if !actions.is_empty() {
@@ -903,7 +923,14 @@ pub async fn advance_tasks_native(
                 if mode == "review" {
                     let reviewed_commit = job.reviewed_commit.clone();
                     let mut review_result = match outcome? {
-                        super::phase_job::PhaseOutcome::Review(result) => result,
+                        super::phase_job::PhaseOutcome::Review(execution) => {
+                            let mut current = TaskRegistry::from_value(&registry)?;
+                            if let Some(task) = current.find_task_mut(&task_id) {
+                                task.task_runtime.settle_review_attempts(execution.attempts);
+                            }
+                            registry = current.to_value()?;
+                            execution.outcome
+                        }
                         _ => {
                             return Err(MaccError::Validation(
                                 "Unexpected phase worker outcome".into(),
@@ -913,22 +940,11 @@ pub async fn advance_tasks_native(
                     if review_result.is_ok()
                         && crate::coordinator::decisions::policy(repo_root)?.enabled
                     {
-                        let current = crate::coordinator::decisions::registry(repo_root)?;
-                        let attestation = (|| -> Result<()> {
-                            let info = current
-                                .find_task(&task_id)
-                                .and_then(|t| t.task_runtime.extra.get("decision_context"))
-                                .ok_or_else(|| {
-                                    crate::coordinator::decisions::error("Missing review context")
-                                })?;
-                            let mut store = crate::coordinator::decisions::Store::open(repo_root)?;
-                            store.attest_review_artifact(
-                                info["plan_id"].as_str().unwrap_or_default(),
-                                info["attempt_id"].as_str().unwrap_or_default(),
-                                Path::new(task_snapshot.worktree_path().unwrap_or_default()),
-                                reviewed_commit.as_deref().unwrap_or_default(),
-                            )
-                        })();
+                        let attestation = super::phase_runner::attest_review(
+                            repo_root,
+                            &task_snapshot,
+                            reviewed_commit.as_deref().unwrap_or_default(),
+                        );
                         if let Err(error) = attestation {
                             review_result = Err(error.to_string());
                         }
@@ -1168,18 +1184,21 @@ pub async fn advance_tasks_native(
                 progressed = true;
             }
             coordinator_engine::AdvanceTaskAction::BlockReviewBudget { task_id } => {
-                coordinator_engine::apply_phase_outcome_in_registry(
-                    &mut registry, &task_id, "fix",
-                    coordinator_engine::PhaseTransition { mode: "fix", next_state: crate::coordinator::WorkflowState::InProgress, runtime_phase: "fix" },
-                    None, Some("review budget exhausted with unresolved changes requested; work preserved and merge refused"), &now,
-                )?;
+                let mut typed = TaskRegistry::from_value(&registry)?;
+                let task = typed.find_task_mut(&task_id).expect("planned task exists");
+                let reason = crate::coordinator::review_budget::block(
+                    task,
+                    max_review_cycles.expect("only a bounded review budget can be exhausted"),
+                    &now,
+                );
+                registry = typed.to_value()?;
                 append_coordinator_event(
                     repo_root,
                     "task_blocked",
                     &task_id,
                     "review",
                     "blocked",
-                    "Review budget exhausted with unresolved changes requested; merge refused",
+                    &reason,
                 )?;
                 progressed = true;
             }
@@ -1212,11 +1231,19 @@ pub async fn advance_tasks_native(
     }
     if let Some((task, mode, _)) = pending_phase.as_mut() {
         // Publish the running phase in the same snapshot as the launch intent.
-        task.task_runtime.current_phase = Some((*mode).into());
         let mut current = TaskRegistry::from_value(&registry)?;
-        if let Some(stored) = current.find_task_mut(&task.id) {
-            stored.task_runtime.current_phase = Some((*mode).into());
+        let stored = current
+            .find_task_mut(&task.id)
+            .expect("planned task exists");
+        if *mode == "review" {
+            crate::coordinator::review_budget::reserve(
+                stored,
+                max_review_cycles,
+                phase_runner_max_attempts,
+            )?;
         }
+        stored.task_runtime.current_phase = Some((*mode).into());
+        *task = stored.clone();
         registry = current.to_value()?;
     }
     recompute_resource_locks_from_tasks(&mut registry);

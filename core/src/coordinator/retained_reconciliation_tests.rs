@@ -22,17 +22,13 @@ fn source_prerequisite_resumes_fix_and_validation_without_restarting_development
                 task.task_runtime.extra["suspended_fix_review_required"],
                 json!(true)
             );
-            assert_eq!(
-                task.task_runtime.extra["review_refresh_correction"],
-                json!(true)
-            );
         }
         task.task_runtime.current_phase = Some("dev".into());
         assert!(!crate::coordinator::phase_diagnostics::retained_phase_precondition(&task));
     }
 }
 #[test]
-fn failed_compliance_requires_fresh_review_after_fix_even_at_the_limit_without_looping() {
+fn required_compliance_review_shares_the_two_review_limit() {
     for testing in [false, true] {
         for verdict in [ReviewVerdict::Ok, ReviewVerdict::ChangesRequested] {
             let mut registry = json!({"tasks":[{"id":"A","state":"reviewing","worktree":{"branch":"A","worktree_path":"/tmp/retained"},"task_runtime":{"decision_has_bindings":true,"review_cycles":0}}]});
@@ -58,9 +54,15 @@ fn failed_compliance_requires_fresh_review_after_fix_even_at_the_limit_without_l
             } else {
                 vec!["fix", "review"]
             } {
-                let actions =
-                    build_advance_actions(&registry, &Default::default(), now, Some(1), &phases)
-                        .unwrap();
+                let actions = build_advance_actions(
+                    &registry,
+                    &Default::default(),
+                    now,
+                    Some(2),
+                    &phases,
+                    true,
+                )
+                .unwrap();
                 let [AdvanceTaskAction::RunPhase {
                     mode, transition, ..
                 }] = actions.as_slice()
@@ -84,9 +86,71 @@ fn failed_compliance_requires_fresh_review_after_fix_even_at_the_limit_without_l
                 .unwrap();
             }
             let actions =
-                build_advance_actions(&registry, &Default::default(), now, Some(1), &phases)
+                build_advance_actions(&registry, &Default::default(), now, Some(2), &phases, true)
                     .unwrap();
             if verdict == ReviewVerdict::ChangesRequested {
+                let [AdvanceTaskAction::RunPhase {
+                    mode: "fix",
+                    transition,
+                    ..
+                }] = actions.as_slice()
+                else {
+                    panic!("{actions:?}")
+                };
+                apply_phase_outcome_in_registry(
+                    &mut registry,
+                    "A",
+                    "fix",
+                    *transition,
+                    None,
+                    None,
+                    now,
+                )
+                .unwrap();
+                if testing {
+                    let actions = build_advance_actions(
+                        &registry,
+                        &Default::default(),
+                        now,
+                        Some(2),
+                        &phases,
+                        true,
+                    )
+                    .unwrap();
+                    let [AdvanceTaskAction::RunPhase {
+                        mode: "test",
+                        transition,
+                        ..
+                    }] = actions.as_slice()
+                    else {
+                        panic!("{actions:?}")
+                    };
+                    apply_phase_outcome_in_registry(
+                        &mut registry,
+                        "A",
+                        "test",
+                        *transition,
+                        None,
+                        None,
+                        now,
+                    )
+                    .unwrap();
+                }
+                let actions = build_advance_actions(
+                    &registry,
+                    &Default::default(),
+                    now,
+                    Some(2),
+                    &phases,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(registry["tasks"][0]["task_runtime"]["review_cycles"], 2);
+                assert_eq!(
+                    registry["tasks"][0]["task_runtime"]["review_usage"]["corrections"]
+                        ["completed"],
+                    2
+                );
                 assert!(
                     matches!(
                         actions.as_slice(),
@@ -133,8 +197,9 @@ fn interrupted_fix_uses_native_phase_pin_then_requires_fresh_tests_and_review() 
                 &registry,
                 &Default::default(),
                 "2026-11-14T21:10:00Z",
-                Some(0),
+                Some(1),
                 &phases,
+                false,
             )
             .unwrap();
             let [AdvanceTaskAction::RunPhase {
@@ -163,8 +228,8 @@ fn interrupted_fix_uses_native_phase_pin_then_requires_fresh_tests_and_review() 
     }
 }
 #[test]
-fn refreshed_review_is_mandatory_and_does_not_consume_an_extra_correction_cycle() {
-    for limit in [0, 1] {
+fn retained_review_uses_the_same_slots_as_an_ordinary_review() {
+    for limit in [0, 1, 2] {
         let mut registry = json!({"tasks":[{"id":"A","state":"testing","worktree":{"branch":"ai/future/A","worktree_path":"/tmp/retained"},"task_runtime":{"current_phase":"merge","review_cycles":1,"review_refresh_required":"DM_STALE: reviewed source changed"}}]});
         registry["tasks"][0]["task_runtime"]["review_cycles"] = json!(limit);
         let mut phases = crate::config::PhasesConfig::default();
@@ -175,6 +240,20 @@ fn refreshed_review_is_mandatory_and_does_not_consume_an_extra_correction_cycle(
             "2026-11-09T12:00:00Z",
             Some(limit),
             &phases,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [AdvanceTaskAction::BlockReviewBudget { .. }]
+        ));
+        let actions = build_advance_actions(
+            &registry,
+            &Default::default(),
+            "",
+            Some(limit + 1),
+            &phases,
+            false,
         )
         .unwrap();
         let [AdvanceTaskAction::RunPhase {
@@ -195,7 +274,10 @@ fn refreshed_review_is_mandatory_and_does_not_consume_an_extra_correction_cycle(
         )
         .unwrap();
         assert_eq!(registry["tasks"][0]["state"], "changes_requested");
-        assert_eq!(registry["tasks"][0]["task_runtime"]["review_cycles"], limit);
+        assert_eq!(
+            registry["tasks"][0]["task_runtime"]["review_cycles"],
+            limit + 1
+        );
         assert!(registry["tasks"][0]["task_runtime"]
             .get("review_refresh_required")
             .is_none());
@@ -203,8 +285,9 @@ fn refreshed_review_is_mandatory_and_does_not_consume_an_extra_correction_cycle(
             &registry,
             &Default::default(),
             "2026-11-09T12:02:00Z",
-            Some(limit),
+            Some(limit + 1),
             &phases,
+            false,
         )
         .unwrap();
         assert!(matches!(

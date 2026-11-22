@@ -41,8 +41,9 @@ fn review_postcheck_preserves_unexpected_files_instead_of_cleaning_them() {
             Ok(Ok("REVIEW_VERDICT: CHANGES_REQUESTED".into()))
         }
     }
-    let task=serde_json::from_value(json!({"id":"A","state":"reviewing","worktree":{"worktree_path":p,"branch":"main","base_branch":base}})).unwrap();
-    assert!(run_review_phase(&Review, &task, None, 1)
+    let mut task=serde_json::from_value(json!({"id":"A","state":"reviewing","worktree":{"worktree_path":p,"branch":"main","base_branch":base}})).unwrap();
+    crate::coordinator::review_budget::reserve(&mut task, Some(1), 1).unwrap();
+    assert!(run_review_phase(&Review, &task, None)
         .unwrap()
         .unwrap_err()
         .contains("postcheck"));

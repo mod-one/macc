@@ -2,24 +2,61 @@
 use super::fsm::{AdvancePlan, PhaseTransition};
 use crate::coordinator::WorkflowState;
 
+/// Resolve every source of a review request before testing the shared limit.
+pub(super) fn plan_task(
+    task: &crate::coordinator::model::Task,
+    limit: Option<usize>,
+    phases: &crate::config::PhasesConfig,
+    decisions_enabled: bool,
+) -> AdvancePlan {
+    let Some(state) = task.workflow_state() else {
+        return AdvancePlan::Noop;
+    };
+    let runtime = &task.task_runtime;
+    let used = runtime.reviews_used();
+    let ordinary = plan_advance(state, limit, used, phases);
+    let needs_review = runtime.review_needs_verdict()
+        || runtime.extra.contains_key("review_refresh_required")
+        || runtime.extra.contains_key("compliance_review_required")
+        || (decisions_enabled
+            && ["decision_has_bindings", "decision_merge_repair"]
+                .iter()
+                .any(|k| runtime.extra.get(*k).and_then(serde_json::Value::as_bool) == Some(true))
+            && runtime
+                .extra
+                .get("decision_context")
+                .and_then(|v| v["phase"].as_str())
+                != Some("review"));
+    if matches!(ordinary, AdvancePlan::Merge) && needs_review {
+        if limit.is_some_and(|max| used >= max) {
+            return AdvancePlan::ReviewBudgetExhausted;
+        }
+        return AdvancePlan::RunPhase(PhaseTransition {
+            mode: "review",
+            next_state: WorkflowState::Reviewing,
+            runtime_phase: "review",
+        });
+    }
+    ordinary
+}
+
 /// Plan the next advance action for a task.
 ///
 /// `max_review_cycles` controls the review→fix loop budget:
 ///   - `None`  → unlimited loops (default)
-///   - `Some(0)` → skip review entirely; go straight to merge
+///   - `Some(0)` → skip optional review; required checks are handled by `plan_task`
 ///   - `Some(1)` → one review + one fix if changes requested, no loopback
 ///   - `Some(n)` → up to n reviews, each including its requested correction
 ///
-/// `review_cycles` counts completed reviews. The last review still owns its fix for
-/// this task (stored in `task_runtime.review_cycles`).
+/// `reviews_used` counts review slots used, including interrupted attempts.
 pub fn plan_advance(
     state: WorkflowState,
     max_review_cycles: Option<usize>,
-    review_cycles: usize,
+    reviews_used: usize,
     phases: &crate::config::PhasesConfig,
 ) -> AdvancePlan {
     let review_available =
-        phases.review.enabled && max_review_cycles.is_none_or(|max| review_cycles < max);
+        phases.review.enabled && max_review_cycles.is_none_or(|max| reviews_used < max);
     match state {
         WorkflowState::InProgress => {
             if phases.testing.enabled {
@@ -54,7 +91,7 @@ pub fn plan_advance(
         WorkflowState::ChangesRequested => {
             // A completed review owns its requested correction, including at the limit.
             // Inconsistent/existing rejected states must never bypass correction by merging.
-            if max_review_cycles.is_some_and(|max| max == 0 || review_cycles > max) {
+            if max_review_cycles.is_some_and(|max| max == 0 || reviews_used > max) {
                 return AdvancePlan::ReviewBudgetExhausted;
             }
             AdvancePlan::RunPhase(PhaseTransition {
@@ -85,7 +122,8 @@ mod tests {
         mode: &str,
         verdict: Option<ReviewVerdict>,
     ) {
-        let actions = build_advance_actions(registry, &HashSet::new(), NOW, limit, phases).unwrap();
+        let actions =
+            build_advance_actions(registry, &HashSet::new(), NOW, limit, phases, false).unwrap();
         let [AdvanceTaskAction::RunPhase {
             transition,
             mode: actual,
@@ -134,7 +172,8 @@ mod tests {
                 run_phase(&mut registry, &phases, Some(1), "test", None);
             }
             let actions =
-                build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases).unwrap();
+                build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases, false)
+                    .unwrap();
             assert!(
                 matches!(actions.as_slice(), [AdvanceTaskAction::QueueMerge { .. }]),
                 "{actions:?}"
@@ -150,7 +189,8 @@ mod tests {
         phases.testing.enabled = false;
         let mut registry = json!({"tasks":[{"id":"TASK-001","state":"changes_requested","worktree":{"branch":"retained"},"task_runtime":{"review_cycles":1}}]});
         let actions =
-            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases).unwrap();
+            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases, false)
+                .unwrap();
         let [AdvanceTaskAction::RunPhase { transition, .. }] = actions.as_slice() else {
             panic!("{actions:?}")
         };
@@ -167,7 +207,7 @@ mod tests {
         assert_eq!(registry["tasks"][0]["state"], "blocked");
         assert_eq!(registry["tasks"][0]["worktree"]["branch"], "retained");
         assert!(
-            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases)
+            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases, false)
                 .unwrap()
                 .is_empty()
         );
@@ -190,7 +230,7 @@ mod tests {
             run_phase(&mut registry, &phases, Some(2), "fix", None);
         }
         assert!(matches!(
-            build_advance_actions(&registry, &HashSet::new(), NOW, Some(2), &phases)
+            build_advance_actions(&registry, &HashSet::new(), NOW, Some(2), &phases, false)
                 .unwrap()
                 .as_slice(),
             [AdvanceTaskAction::QueueMerge { .. }]
@@ -211,7 +251,7 @@ mod tests {
         );
         assert_eq!(registry["tasks"][0]["state"], "pr_open");
         assert!(matches!(
-            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases)
+            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases, false)
                 .unwrap()
                 .as_slice(),
             [AdvanceTaskAction::QueueMerge { .. }]
@@ -219,7 +259,7 @@ mod tests {
         registry["tasks"][0]["state"] = json!("changes_requested");
         registry["tasks"][0]["task_runtime"]["review_cycles"] = json!(2);
         assert!(matches!(
-            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases)
+            build_advance_actions(&registry, &HashSet::new(), NOW, Some(1), &phases, false)
                 .unwrap()
                 .as_slice(),
             [AdvanceTaskAction::BlockReviewBudget { .. }]

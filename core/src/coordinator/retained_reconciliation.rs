@@ -51,59 +51,6 @@ pub(crate) fn reconcile(
     }
 }
 
-/// Governance freshness is independent of the optional review-cycle budget.
-pub(crate) fn advance_override(
-    task: &Task,
-    phases: &crate::config::PhasesConfig,
-) -> Option<super::engine::AdvancePlan> {
-    use super::engine::{AdvancePlan, PhaseTransition};
-    let (mode, next_state) = if (task.workflow_state() == Some(WorkflowState::Testing)
-        || (task.workflow_state() == Some(WorkflowState::InProgress) && !phases.testing.enabled))
-        && (task
-            .task_runtime
-            .extra
-            .contains_key("review_refresh_required")
-            || task
-                .task_runtime
-                .extra
-                .contains_key("compliance_review_required"))
-    {
-        ("review", WorkflowState::Reviewing)
-    } else if task.workflow_state() == Some(WorkflowState::ChangesRequested)
-        && task
-            .task_runtime
-            .extra
-            .contains_key("review_refresh_correction")
-    {
-        ("fix", WorkflowState::InProgress)
-    } else {
-        return None;
-    };
-    Some(AdvancePlan::RunPhase(PhaseTransition {
-        mode,
-        next_state,
-        runtime_phase: mode,
-    }))
-}
-
-pub(crate) fn review_completed(
-    runtime: &mut super::model::TaskRuntime,
-    changes_requested: bool,
-) -> bool {
-    let refresh = runtime.extra.remove("review_refresh_required").is_some();
-    let compliance = runtime.extra.remove("compliance_review_required").is_some();
-    if compliance {
-        runtime.extra.remove("review_refresh_correction");
-    } else if refresh && changes_requested {
-        runtime
-            .extra
-            .insert("review_refresh_correction".into(), serde_json::json!(true));
-    }
-    // Compliance remediation is real review work and must remain bounded by
-    // the configured correction budget, including a final required review.
-    refresh && !compliance
-}
-
 /// A repaired validation/publication failure must not restart implementation.
 pub fn resume_state(root: &std::path::Path, task: &mut Task) -> WorkflowState {
     // Older interrupted phases left current_phase at the previous completed
@@ -134,9 +81,6 @@ pub fn resume_state(root: &std::path::Path, task: &mut Task) -> WorkflowState {
                 "suspended_fix_review_required".into(),
                 serde_json::json!(true),
             );
-            task.task_runtime
-                .extra
-                .insert("review_refresh_correction".into(), serde_json::json!(true));
             WorkflowState::ChangesRequested
         }
         Some("test") => WorkflowState::InProgress,

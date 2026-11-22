@@ -127,6 +127,7 @@ pub(super) fn make(
             });
             c.review_objections = json!({
                 "review_cycles": task.task_runtime.review_cycles,
+                "review_usage": task.task_runtime.review_usage,
                 "review_feedback": task.review,
                 "last_error": sanitized_error,
                 "workflow_state": task.state

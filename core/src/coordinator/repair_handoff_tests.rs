@@ -142,7 +142,7 @@ fn decision_unblock_recovers_the_interrupted_fix_phase_and_preserves_dirty_work(
     assert!(task
         .task_runtime
         .extra
-        .contains_key("review_refresh_correction"));
+        .contains_key("suspended_fix_review_required"));
     assert!(task
         .task_runtime
         .extra

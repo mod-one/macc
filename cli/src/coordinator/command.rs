@@ -1512,7 +1512,7 @@ fn print_launch_review(
         .unwrap_or_else(|| "default".into());
     println!("Merge / Retry:");
     println!("  Merge AI fix:      {}", merge_ai_fix);
-    println!("  Max review cycles: {}", max_review_cycles);
+    println!("  Maximum reviews per task: {}", max_review_cycles);
     println!("  Retry error codes: {}", retry_codes);
     println!("  Retry max:         {}", retry_max);
     println!("  RL backoff:        {}", rl_backoff);

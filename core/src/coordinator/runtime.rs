@@ -1078,8 +1078,10 @@ pub fn run_review_phase<E: PhaseExecutor>(
     executor: &E,
     task: &Task,
     coordinator_tool_override: Option<&str>,
-    max_attempts: usize,
 ) -> Result<std::result::Result<ReviewVerdict, String>> {
+    if task.task_runtime.reserved_review_attempts() == 0 {
+        return Ok(Err("Review dispatch has no reserved slot".into()));
+    }
     let task_id = task.id.as_str();
     let worktree_path = task.worktree_path().unwrap_or_default();
     let base_branch = task.base_branch("master");
@@ -1104,12 +1106,13 @@ pub fn run_review_phase<E: PhaseExecutor>(
         )));
     }
     let head_before = git_head_commit(&worktree)?;
+    // Each possible runner invocation already holds a durable slot.
     let phase = run_phase(
         executor,
         task,
         "review",
         coordinator_tool_override,
-        max_attempts,
+        task.task_runtime.reserved_review_attempts(),
     )?;
     let output = match phase {
         Ok(out) => out,

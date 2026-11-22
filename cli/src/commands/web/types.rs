@@ -145,7 +145,7 @@ pub(crate) struct ApiConfigResponse {
     pub rate_limit_throttle_parallel: Option<bool>,
     /// Grace period before force-killing a performer that signaled failure via IPC.
     pub force_kill_grace_seconds: Option<u64>,
-    /// Max review cycles per task (0=skip, 1=one review+fix, N=N loops, None=unlimited).
+    /// Maximum reviewer attempts per task, including retries. Zero disables new reviews.
     pub max_review_cycles: Option<usize>,
     /// safety policy
     pub safety_policy: Option<String>,
@@ -777,6 +777,7 @@ pub(crate) struct ApiRegistryTask {
     /// Resolved model and reasoning effort for live execution.
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub review_summary: Option<String>,
     /// Current attempt count.
     pub attempts: Option<i64>,
     /// Most recent heartbeat timestamp.

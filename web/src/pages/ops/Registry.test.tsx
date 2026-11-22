@@ -73,6 +73,7 @@ describe('Registry page', () => {
         worktree: null,
         events: [],
         updatedAt: null,
+        reviewSummary: '2/2 reviews used · 2/2 corrections completed · no review verdict for the corrected revision',
         gateVerdict: 'rejected',
         gateRequiredVerdict: 'accepted',
         externalBlockReason: 'Observation window has not run',
@@ -99,6 +100,7 @@ describe('Registry page', () => {
     await waitFor(() => {
       expect(screen.getByText('Current Phase')).toBeInTheDocument();
       expect(screen.getByText('dev')).toBeInTheDocument();
+      expect(screen.getByText(/2\/2 corrections completed/)).toHaveTextContent('no review verdict for the corrected revision');
       expect(screen.getByText(/Gate verdict:/)).toHaveTextContent(
         'Gate verdict: rejected · required: accepted',
       );

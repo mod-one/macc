@@ -416,24 +416,20 @@ pub fn build_advance_actions(
     now: &str,
     max_review_cycles: Option<usize>,
     phases: &crate::config::PhasesConfig,
+    decisions_enabled: bool,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
     for task in &typed.tasks {
         // Skip tasks that are delayed (e.g. waiting for a throttled tool to
         // recover while preserving committed work on their worktree).
-        if crate::coordinator::rate_limit::is_task_delayed(task, now) {
+        if active_merge_jobs.contains(&task.id)
+            || crate::coordinator::rate_limit::is_task_delayed(task, now)
+        {
             continue;
         }
         let task_id = task.id.clone();
-        let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
-        let workflow_state = task.workflow_state();
-        match crate::coordinator::retained_reconciliation::advance_override(task, phases)
-            .unwrap_or_else(|| {
-                workflow_state
-                    .map(|s| plan_advance(s, max_review_cycles, review_cycles, phases))
-                    .unwrap_or(AdvancePlan::Noop)
-            }) {
+        match super::advance_plan::plan_task(task, max_review_cycles, phases, decisions_enabled) {
             AdvancePlan::RunPhase(transition) => {
                 actions.push(AdvanceTaskAction::RunPhase {
                     task_id,
@@ -442,9 +438,6 @@ pub fn build_advance_actions(
                 });
             }
             AdvancePlan::Merge => {
-                if active_merge_jobs.contains(&task_id) {
-                    continue;
-                }
                 let branch = task.branch().unwrap_or_default().to_string();
                 if branch.is_empty() {
                     // Worktree/branch was cleared (e.g. by ghost cleanup) while
@@ -832,7 +825,7 @@ pub(crate) fn apply_phase_success_typed(
                 .extra
                 .insert("compliance_review_required".into(), serde_json::json!(true));
         }
-        runtime.extra.remove("review_refresh_correction");
+        runtime.record_review_correction();
         if runtime
             .extra
             .remove("suspended_fix_review_required")
@@ -875,19 +868,17 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
     runtime.delayed_until = None;
-    // Count completed reviews; a rejection at the limit still owns one correction.
-    let refresh = crate::coordinator::retained_reconciliation::review_completed(
-        runtime,
-        verdict == ReviewVerdict::ChangesRequested,
-    );
-    let cycles = runtime.review_cycles.unwrap_or(0) + usize::from(!refresh);
-    runtime.review_cycles = Some(cycles);
+    let refresh = runtime.extra.remove("review_refresh_required").is_some();
+    let compliance = runtime.extra.remove("compliance_review_required").is_some();
+    runtime.record_review_verdict(verdict == ReviewVerdict::Ok);
     if verdict == ReviewVerdict::ChangesRequested
-        && runtime
-            .extra
-            .get("decision_has_bindings")
-            .and_then(Value::as_bool)
-            == Some(true)
+        && (refresh
+            || compliance
+            || runtime
+                .extra
+                .get("decision_has_bindings")
+                .and_then(Value::as_bool)
+                == Some(true))
     {
         runtime.extra.insert(
             "compliance_correction_pending".into(),
@@ -2525,10 +2516,10 @@ pub(crate) async fn run_single_prd_control_plane(
     if let Some(log) = logger {
         match max_review_cycles {
             Some(n) => {
-                let _ = log.note(format!("- Max review cycles: {}", n));
+                let _ = log.note(format!("- Maximum reviews per task: {}", n));
             }
             None => {
-                let _ = log.note("- Max review cycles: unlimited".to_string());
+                let _ = log.note("- Maximum reviews per task: unlimited".to_string());
             }
         }
     }
@@ -3932,6 +3923,7 @@ mod tests {
             "",
             None,
             &crate::config::PhasesConfig::default(),
+            false,
         )
         .expect("advance actions");
         assert!(!actions.iter().any(|action| {
@@ -4006,6 +3998,7 @@ mod tests {
             "",
             None,
             &crate::config::PhasesConfig::default(),
+            false,
         )
         .expect("advance actions");
         assert!(!actions.iter().any(|action| {

@@ -1498,14 +1498,12 @@ pub trait Engine {
         repo_root: &Path,
         task: &crate::coordinator::model::Task,
         coordinator_tool_override: Option<&str>,
-        max_attempts: usize,
         logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
-    ) -> Result<std::result::Result<crate::coordinator::engine::ReviewVerdict, String>> {
+    ) -> Result<crate::coordinator::review_budget::ReviewExecution> {
         crate::coordinator::control_plane::run_review_phase_for_task_native(
             repo_root,
             task,
             coordinator_tool_override,
-            max_attempts,
             logger,
         )
     }

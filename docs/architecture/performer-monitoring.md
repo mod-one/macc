@@ -44,8 +44,7 @@ pipes holding the loop indefinitely.
 Resolution resumes the retained phase with fresh native context. Older records
 whose `current_phase` still names the preceding phase recover the interrupted
 phase from the native decision-context pin. Resumed corrections run configured
-tests and require a new independent review, including at the optional review
-cycle limit. External evidence and normal publication gates remain mandatory.
+tests and require a new independent review within the configured task limit. External evidence and normal publication gates remain mandatory.
 
 Checkpoint previews distinguish blocking leases from dead owners whose leases
 have expired. Recovery and checkpoint preparation quarantine only the latter;
@@ -144,9 +143,8 @@ Missing evidence, missing/incorrect acknowledgements, stale context and
 `needs_human_review` remain blocking, with distinct diagnostics.
 
 The correction runs in the retained worker, followed by configured tests and
-a new independent compliance review even at the ordinary review-cycle limit.
-That final review still counts toward the bound: a further rejection preserves
-the objection and stops at the correction budget instead of looping or merging.
+a new independent compliance review if a review slot remains. At the limit,
+the task retains its correction and blocks publication until another review is authorized.
 After a runtime update or explicit retry, legacy native `compliance_failed`
 receipts with exact task/attempt/digest and explicit failure evidence may request
 a fresh review; neither the old verdict nor passing compliance is synthesized.

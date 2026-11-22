@@ -456,6 +456,10 @@ const Registry: React.FC = () => {
               </div>
             )}
 
+            {selectedTask.reviewSummary && (
+              <p className="text-sm text-[var(--text-secondary)]">Review: {selectedTask.reviewSummary}</p>
+            )}
+
             {selectedTask.gateRequiredVerdict && (
               <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 text-sm text-[var(--text-muted)]">
                 Gate verdict: <strong>{selectedTask.gateVerdict ?? 'pending'}</strong>

@@ -611,6 +611,8 @@ pub struct TaskRuntime {
     /// Number of completed reviews; each rejected review still owns its correction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cycles: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_usage: Option<super::review_budget::ReviewUsage>,
     /// Active AI tool session ID currently associated with this task lifecycle.
     /// Set from worktree-scoped `tool-sessions.json` during dispatch/completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1186,6 +1188,15 @@ impl Task {
 
     pub fn ensure_worktree(&mut self) -> &mut TaskWorktree {
         self.worktree.get_or_insert_with(TaskWorktree::default)
+    }
+
+    pub(crate) fn same_phase_assignment(&self, task: &Task) -> bool {
+        self.id == task.id
+            && self.task_runtime.claim_id == task.task_runtime.claim_id
+            && self.tool == task.tool
+            && self.worktree_path() == task.worktree_path()
+            && self.branch() == task.branch()
+            && self.base_branch("master") == task.base_branch("master")
     }
 
     pub fn clear_assignment(&mut self) {

@@ -235,6 +235,11 @@ pub(super) fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegist
         model: None,
         effort: None,
         attempts: task.task_runtime.attempt,
+        review_summary: task
+            .task_runtime
+            .review_usage
+            .as_ref()
+            .map(|usage| usage.summary()),
         heartbeat: task.task_runtime.last_heartbeat.clone(),
         delayed_until: task.task_runtime.delayed_until.clone(),
         current_phase: task.task_runtime.current_phase.clone(),

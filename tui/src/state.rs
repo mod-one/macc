@@ -3917,7 +3917,7 @@ impl AppState {
             28 => "[Advanced] RL Fallback Enabled",
             29 => "[Advanced] RL Throttle Parallel",
             30 => "[Advanced] Force-Kill Grace",
-            31 => "[Advanced] Max Review Cycles",
+            31 => "[Advanced] Max Reviews per Task",
             32 => "[Basic] Safety Policy",
             33 => "[Basic] Destructive Actions",
             // §19: Phase pipeline toggles — saved config only; runtime CLI overrides take precedence
@@ -3964,7 +3964,7 @@ impl AppState {
             28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
-            31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
+            31 => "Counts every reviewer attempt, including retries and required checks. The last review can request a correction. 0 disables new reviews. Unset means unlimited.",
             32 => "Permitted tool write scopes and validations (strict, standard).",
             33 => "Risk policy for destructive actions (single_confirm, double_confirm).",
             // §19: phase controls — CLI flags (--disable-testing etc.) override these saved settings

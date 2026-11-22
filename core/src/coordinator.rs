@@ -30,6 +30,7 @@ pub mod rate_limit;
 pub mod repair_handoff;
 pub mod result_protocol;
 pub mod retained_reconciliation;
+pub mod review_budget;
 pub mod runner_output;
 pub mod runtime;
 pub mod session_identity;

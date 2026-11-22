@@ -3,11 +3,8 @@ use super::{
     base::CoordinatorLog,
     phase_runner::{NativePhaseExecutor, PreparedPhaseContext},
 };
-use crate::coordinator::{
-    engine::{PhaseTransition, ReviewVerdict},
-    model::Task,
-    runtime,
-};
+use crate::coordinator::review_budget::ReviewExecution;
+use crate::coordinator::{engine::PhaseTransition, model::Task, runtime};
 use crate::{MaccError, Result};
 use std::{
     path::PathBuf,
@@ -18,11 +15,12 @@ use std::{
 };
 
 pub(crate) enum PhaseOutcome {
-    Review(std::result::Result<ReviewVerdict, String>),
+    Review(ReviewExecution),
     Other(std::result::Result<String, String>),
 }
 
 pub(crate) struct PhaseJob {
+    pub(super) driver_guard: Option<crate::fs_lock::AdvisoryLock>,
     pub task: Task,
     pub mode: &'static str,
     pub transition: PhaseTransition,
@@ -95,15 +93,25 @@ impl PhaseJob {
                 {
                     let reason = format!("E903: {error}");
                     return Ok(if mode == "review" {
-                        PhaseOutcome::Review(Err(reason))
+                        PhaseOutcome::Review(ReviewExecution {
+                            attempts: 0,
+                            outcome: Err(reason),
+                        })
                     } else {
                         PhaseOutcome::Other(Err(reason))
                     });
+                }
+                Err(error) if mode == "review" => {
+                    return Ok(PhaseOutcome::Review(ReviewExecution {
+                        attempts: 0,
+                        outcome: Err(error.to_string()),
+                    }))
                 }
                 Err(error) => return Err(error),
             };
             let logger = WorkerLog(tx);
             let executor = NativePhaseExecutor {
+                attempts_started: Default::default(),
                 repo_root: &repo,
                 logger: Some(&logger),
                 cancelled: Some(&cancel),
@@ -111,14 +119,16 @@ impl PhaseJob {
                 context_refresh: Some(&refresh),
             };
             if mode == "review" {
-                runtime::run_review_phase(&executor, &snapshot, tool.as_deref(), attempts)
-                    .map(PhaseOutcome::Review)
+                Ok(PhaseOutcome::Review(
+                    executor.run_reserved_review(&snapshot, tool.as_deref()),
+                ))
             } else {
                 runtime::run_phase(&executor, &snapshot, mode, tool.as_deref(), attempts)
                     .map(PhaseOutcome::Other)
             }
         });
         Self {
+            driver_guard: None,
             task,
             mode,
             transition,
@@ -132,20 +142,11 @@ impl PhaseJob {
     }
 
     pub fn matches_task(&self, task: &Task) -> bool {
-        self.task.state == task.state && self.same_assignment(task)
+        self.task.state == task.state && self.task.same_phase_assignment(task)
     }
 
     pub fn needs_context_refresh(&self) -> bool {
         self.context_refresh.load(Ordering::Acquire)
-    }
-
-    pub fn same_assignment(&self, task: &Task) -> bool {
-        self.task.id == task.id
-            && self.task.task_runtime.claim_id == task.task_runtime.claim_id
-            && self.task.tool == task.tool
-            && self.task.worktree_path() == task.worktree_path()
-            && self.task.branch() == task.branch()
-            && self.task.base_branch("master") == task.base_branch("master")
     }
 
     pub fn drain_logs(&mut self, logger: Option<&dyn CoordinatorLog>) {
@@ -199,9 +200,6 @@ pub(super) fn suspend(
             "suspended_fix_review_required".into(),
             serde_json::json!(true),
         );
-        task.task_runtime
-            .extra
-            .insert("review_refresh_correction".into(), serde_json::json!(true));
     }
 }
 
@@ -217,6 +215,7 @@ impl Drop for PhaseJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinator::engine::ReviewVerdict;
     use crate::coordinator::{
         control_plane::{advance_tasks_native, monitor_active_jobs_native},
         runtime::{
@@ -432,10 +431,14 @@ mod tests {
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 }
             }
-            Ok(PhaseOutcome::Review(Ok(ReviewVerdict::Ok)))
+            Ok(PhaseOutcome::Review(ReviewExecution {
+                attempts: 1,
+                outcome: Ok(ReviewVerdict::Ok),
+            }))
         });
         (
             PhaseJob {
+                driver_guard: None,
                 task,
                 mode: "review",
                 transition: PhaseTransition {
@@ -714,7 +717,10 @@ mod tests {
         assert!(state.phase_job.as_ref().unwrap().is_finished());
         assert!(matches!(
             state.phase_job.as_mut().unwrap().finish().await.unwrap(),
-            PhaseOutcome::Review(Ok(ReviewVerdict::Ok))
+            PhaseOutcome::Review(ReviewExecution {
+                attempts: 1,
+                outcome: Ok(ReviewVerdict::Ok)
+            })
         ));
         let (mut job, _release) = slow_job(task());
         tokio::time::timeout(Duration::from_secs(1), job.cancel_and_wait())

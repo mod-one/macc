@@ -738,6 +738,7 @@ export interface ApiRegistryTask {
   priority: string | null;
   state: string;
   tool: string | null;
+  reviewSummary?: string | null;
   attempts: number | null;
   heartbeat: string | null;
   delayedUntil: string | null;

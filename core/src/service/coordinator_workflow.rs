@@ -1803,17 +1803,24 @@ pub fn coordinator_advance<E: crate::engine::Engine + ?Sized>(
         .map_err(|e| MaccError::Validation(format!("Failed to initialize tokio runtime: {}", e)))?;
     let advance = runtime.block_on(async {
         let mut state = coordinator_runtime::CoordinatorRunState::new();
-        engine
-            .coordinator_advance_tasks_native(
-                &paths.root,
-                env_cfg,
-                coordinator_cfg,
-                coordinator_tool_override.as_deref(),
-                phase_runner_max_attempts,
-                &mut state,
-                logger,
-            )
-            .await
+        loop {
+            let result = engine
+                .coordinator_advance_tasks_native(
+                    &paths.root,
+                    env_cfg,
+                    coordinator_cfg,
+                    coordinator_tool_override.as_deref(),
+                    phase_runner_max_attempts,
+                    &mut state,
+                    logger,
+                )
+                .await?;
+            let Some(job) = state.phase_job.as_mut() else {
+                break Ok::<_, MaccError>(result);
+            };
+            // A one-shot advance owns the phase it launched through result collection.
+            job.wait().await;
+        }
     })?;
     if let Some((task_id, reason)) = advance.blocked_merge {
         state_runtime::set_task_paused_for_merge(&paths.root, &task_id, &reason)?;
@@ -2468,76 +2475,9 @@ pub fn coordinator_cutover_gate(
     Ok(())
 }
 
-pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
-    engine: &E,
-    paths: &ProjectPaths,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator_cfg: Option<&CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    args: &[String],
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<()> {
-    let (task_id, phase, skip) = parse_retry_phase_args(args)?;
-    let mut state_args = BTreeMap::new();
-    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
-    let mut snapshot = engine.coordinator_state_snapshot(&paths.root, &state_args)?;
-    let Some(task) = snapshot.registry.find_task_mut(&task_id) else {
-        return Err(MaccError::Validation(format!(
-            "Task not found in registry: {}",
-            task_id
-        )));
-    };
-
-    if skip {
-        task.state = "todo".to_string();
-        task.task_runtime.status = Some(RuntimeStatus::Idle.as_str().to_string());
-        task.task_runtime.pid = None;
-        task.task_runtime.started_at = None;
-        task.task_runtime.current_phase = None;
-        task.task_runtime.merge_result_pending = Some(false);
-        task.task_runtime.merge_result_file = None;
-        snapshot.registry.updated_at = Some(crate::coordinator::helpers::now_iso_coordinator());
-        engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
-        return Ok(());
-    }
-
-    let mut retry_args = BTreeMap::new();
-    apply_storage_mode_args(&mut retry_args, env_cfg, coordinator_cfg);
-    retry_args.insert("task-id".to_string(), task_id.clone());
-    engine.coordinator_state_increment_retries(&paths.root, &retry_args)?;
-
-    match phase.as_str() {
-        "dev" => retry_dev_phase(
-            engine,
-            paths,
-            canonical,
-            coordinator_cfg,
-            env_cfg,
-            task_id.as_str(),
-            logger,
-        )?,
-        "review" | "fix" => retry_tool_phase(
-            engine,
-            paths,
-            canonical,
-            coordinator_cfg,
-            env_cfg,
-            &mut snapshot,
-            task_id.as_str(),
-            &phase,
-            logger,
-        )?,
-        other => {
-            return Err(MaccError::Validation(format!(
-                "unsupported retry phase '{}'",
-                other
-            )));
-        }
-    }
-
-    engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
-    Ok(())
-}
+#[path = "coordinator_phase_retry.rs"]
+mod phase_retry;
+pub use phase_retry::coordinator_retry_phase;
 
 fn parse_retry_phase_args(args: &[String]) -> Result<(String, String, bool)> {
     let mut task_id = None;
@@ -2681,117 +2621,6 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
     })?;
     let _ = canonical;
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn retry_tool_phase<E: crate::engine::Engine + ?Sized>(
-    engine: &E,
-    paths: &ProjectPaths,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator_cfg: Option<&CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    snapshot: &mut crate::coordinator_storage::CoordinatorSnapshot,
-    task_id: &str,
-    phase: &str,
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<()> {
-    let task = snapshot
-        .registry
-        .find_task(task_id)
-        .cloned()
-        .ok_or_else(|| MaccError::Validation("Task missing for retry".into()))?;
-    let coordinator_tool_override = env_cfg
-        .coordinator_tool
-        .clone()
-        .or_else(|| coordinator_cfg.and_then(|c| c.coordinator_tool.clone()));
-    let attempts = env_cfg
-        .phase_runner_max_attempts
-        .or_else(|| coordinator_cfg.and_then(|c| c.phase_runner_max_attempts))
-        .unwrap_or(1)
-        .max(1);
-    if phase == "review" {
-        let verdict = engine.coordinator_run_review_phase_for_task_native(
-            &paths.root,
-            &task,
-            coordinator_tool_override.as_deref(),
-            attempts,
-            logger,
-        )?;
-        match verdict {
-            Ok(v) => {
-                coordinator_engine::apply_review_phase_success_typed(
-                    find_task_mut(&mut snapshot.registry, task_id)?,
-                    v,
-                    &crate::coordinator::helpers::now_iso_coordinator(),
-                )?;
-            }
-            Err(reason) => {
-                coordinator_engine::apply_phase_failure_typed(
-                    find_task_mut(&mut snapshot.registry, task_id)?,
-                    "review",
-                    &reason,
-                    &crate::coordinator::helpers::now_iso_coordinator(),
-                )?;
-                return Err(MaccError::Validation(reason));
-            }
-        }
-        return Ok(());
-    }
-    let result = engine.coordinator_run_phase_for_task_native(
-        &paths.root,
-        &task,
-        phase,
-        coordinator_tool_override.as_deref(),
-        attempts,
-        logger,
-    )?;
-    match result {
-        Ok(_) => {
-            let transition = match phase {
-                "fix" => coordinator_engine::PhaseTransition {
-                    mode: "fix",
-                    next_state: WorkflowState::PrOpen,
-                    runtime_phase: "fix",
-                },
-                _ => return Ok(()),
-            };
-            coordinator_engine::apply_phase_success_typed(
-                find_task_mut(&mut snapshot.registry, task_id)?,
-                transition,
-                &crate::coordinator::helpers::now_iso_coordinator(),
-            )?;
-        }
-        Err(reason) => {
-            let phase_static = match phase {
-                "review" => "review",
-                "fix" => "fix",
-                _ => {
-                    return Err(MaccError::Validation(format!(
-                        "unsupported retry phase '{}'",
-                        phase
-                    )));
-                }
-            };
-            coordinator_engine::apply_phase_failure_typed(
-                find_task_mut(&mut snapshot.registry, task_id)?,
-                phase_static,
-                &reason,
-                &crate::coordinator::helpers::now_iso_coordinator(),
-            )?;
-            return Err(MaccError::Validation(reason));
-        }
-    }
-    let _ = canonical;
-    Ok(())
-}
-
-fn find_task_mut<'a>(
-    registry: &'a mut crate::coordinator::model::TaskRegistry,
-    task_id: &str,
-) -> Result<&'a mut crate::coordinator::model::Task> {
-    registry
-        .find_task_mut(task_id)
-        .ok_or_else(|| MaccError::Validation(format!("Task not found in registry: {}", task_id)))
 }
 
 fn apply_storage_mode_args(

@@ -191,6 +191,15 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
             Span::styled("   Tool: ", Style::default().fg(theme.muted)),
             Span::styled(&t.tool, Style::default()),
         ]));
+        if let Some(usage) = full_task
+            .as_ref()
+            .and_then(|task| task.task_runtime.review_usage.as_ref())
+        {
+            detail_lines.push(Line::from(vec![
+                Span::styled("Review:     ", Style::default().fg(theme.muted)),
+                Span::raw(usage.summary()),
+            ]));
+        }
         if let Some(gate) = full_task.as_ref().and_then(|task| task.gate.as_ref()) {
             let verdict = full_task
                 .as_ref()
