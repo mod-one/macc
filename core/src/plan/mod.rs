@@ -21,6 +21,9 @@ pub enum Scope {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct ActionPlan {
+    /// Runtime correlation only, excluded from reviewed plans and fingerprints.
+    #[serde(skip)]
+    pub progress_token: Option<crate::service::preparation::ProgressToken>,
     /// Whole skill roots, used to preserve preexisting user installations.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub skill_roots: std::collections::BTreeSet<String>,

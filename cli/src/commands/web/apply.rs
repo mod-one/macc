@@ -75,6 +75,7 @@ pub(super) async fn run_apply_handler(
         }
     }
 
+    plan.progress_token = request.progress_token;
     let engine = state.engine.clone();
     let paths = state.paths.clone();
     let report = tokio::task::spawn_blocking(move || engine.apply(&paths, &mut plan, false))
@@ -152,6 +153,7 @@ fn build_apply_response(ops: &[PlannedOp], report: &macc_core::ApplyReport) -> A
         .collect();
 
     ApiApplyResponse {
+        preparation: report.preparation.clone(),
         dry_run: false,
         applied_actions: report.outcomes.len(),
         changed_files,

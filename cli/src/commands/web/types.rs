@@ -652,6 +652,7 @@ pub(crate) struct ApiPlanConsent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiApplyRequest {
+    pub progress_token: Option<macc_core::service::preparation::ProgressToken>,
     #[serde(default)]
     pub preparation_inputs: macc_core::service::preparation::Inputs,
     pub plan_revision: Option<String>,
@@ -672,6 +673,8 @@ pub(crate) struct ApiApplyRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiApplyResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<macc_core::service::preparation::Report>,
     /// Whether the request completed as a dry run.
     pub dry_run: bool,
     /// Number of actions applied or simulated.

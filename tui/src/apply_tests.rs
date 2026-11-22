@@ -177,6 +177,7 @@ fn failing_semantic_proof_cannot_bypass_the_apply_assistant() {
     let (_root, mut state) = state_with_plan(Scope::Project, 1);
     state.apply_runtime.assistant.open = true;
     state.apply_runtime.assistant.report = Some(macc_core::service::preparation::Report {
+        progress_token: None,
         accepted_degraded: false,
         run_id: String::new(),
         output_kind: None,
@@ -252,7 +253,7 @@ fn apply_confirmation_scrolls_long_preparation_without_writing() {
 }
 
 #[test]
-fn failed_apply_does_not_show_a_previous_ready_report_as_current() {
+fn failed_apply_does_not_show_a_previous_input_request_as_current() {
     let (_root, mut state) = state_with_plan(Scope::Project, 1);
     let path = state
         .project_paths
@@ -263,10 +264,12 @@ fn failed_apply_does_not_show_a_previous_ready_report_as_current() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         path,
-        r#"{"revision":"old","status":"ready","completed":[],"error":null,"question":null}"#,
+        r#"{"revision":"old","status":"waiting_for_input","completed":[],"error":null,"question":{"kind":"semantic_suite","message":"Old question","data":{}}}"#,
     )
     .unwrap();
-    state.complete_apply(Err("Configuration changed before execution".into()));
+    state.complete_apply(Err(MaccError::Validation(
+        "Configuration changed before execution".into(),
+    )));
     assert!(state.apply_assistant_open());
     assert!(state.apply_runtime.assistant.report.is_none());
     let text = crate::workspace_tests::text(&crate::workspace_tests::render(&state, 100, 30));

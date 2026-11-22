@@ -20,9 +20,9 @@ pub(super) fn prepare(paths: &ProjectPaths, plan: &Plan, report: &mut Report) ->
                     ))
                 })?
                 .verify(&paths.root)?;
-            phase(
+            report.start_phase(
                 &paths.root,
-                &format!("Verifying {} MCP connection", tool.spec.id),
+                format!("Verifying {} MCP connection", tool.spec.id),
             )?;
             crate::o2::mcp::verification::verify(&paths.root, &tool.spec)?;
         }

@@ -14,11 +14,11 @@ pub fn apply(
             Ok(report) => return Ok(report),
             Err(error) => error,
         };
-        let report = status(&paths.root)?;
-        if let Some(report) = &report {
-            ui.apply_progress(report);
-        }
-        let question = report.as_ref().and_then(|r| r.question.as_ref());
+        let MaccError::ApplyPreparation { report, .. } = &error else {
+            return Err(error);
+        };
+        ui.apply_progress(report);
+        let question = report.question.as_ref();
         if question.is_none() {
             ui.error(&error.to_string());
         }
@@ -29,7 +29,7 @@ pub fn apply(
             .unwrap_or_default();
         match question.map(|q| q.kind.as_str()) {
             Some("provider_quality") => {
-                for warning in &report.as_ref().unwrap().warnings {
+                for warning in &report.warnings {
                     ui.warn(warning);
                 }
                 let question = question.unwrap();
@@ -42,7 +42,7 @@ pub fn apply(
                 let choice=ui.prompt_line("Partial index: [i] increase budget and rebuild, [k] keep partial coverage, [c] configure, [Enter] cancel: ")?;
                 match choice.trim().to_ascii_lowercase().as_str() {
                     "i" => {
-                        apply_suggested_setting(&paths.root, report.as_ref().unwrap(), true)?;
+                        apply_suggested_setting(&paths.root, report, true)?;
                         inputs.accept_degraded = false;
                     }
                     "k" => inputs.accept_degraded = true,
@@ -56,7 +56,7 @@ pub fn apply(
                 )? {
                     return Err(error);
                 }
-                allow_network(&paths.root, &report.as_ref().unwrap().revision, true)?;
+                allow_network(&paths.root, &report.revision, true)?;
             }
             Some("semantic_suite") => {
                 ui.decision_info(&question.unwrap().message);
@@ -89,7 +89,7 @@ pub fn apply(
                 )? {
                     return Err(error);
                 }
-                apply_suggested_setting(&paths.root, report.as_ref().unwrap(), true)?;
+                apply_suggested_setting(&paths.root, report, true)?;
                 inputs.semantic_suite = None;
                 inputs.semantic_approval = None;
             }
@@ -150,6 +150,8 @@ fn with_progress(
     allow_user_scope: bool,
     ui: &dyn LifecycleUi,
 ) -> Result<crate::ApplyReport> {
+    let token = ProgressToken::new_v4();
+    plan.progress_token = Some(token);
     std::thread::scope(|scope| {
         let (tx, rx) = std::sync::mpsc::channel();
         scope.spawn(move || loop {
@@ -157,7 +159,7 @@ fn with_progress(
                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
-            if let Ok(Some(report)) = status(&paths.root) {
+            if let Ok(Some(report)) = live_status(&paths.root, token) {
                 ui.apply_progress(&report);
             }
         });

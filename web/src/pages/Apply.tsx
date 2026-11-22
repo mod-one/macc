@@ -9,6 +9,16 @@ type ApplyMode = 'apply-now' | 'dry-run';
 
 type PlanSource = 'preloaded' | 'fresh';
 
+function newProgressToken(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  // getRandomValues is also available on plain HTTP project dashboards.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -105,12 +115,20 @@ const Apply: React.FC = () => {
   const [applyResult, setApplyResult] = React.useState<ApiApplyResponse | null>(null);
   const [preparationInputs, setPreparationInputs] = React.useState<ApiPreparationInputs>({});
   const [preparationReport, setPreparationReport] = React.useState<ApiPreparationReport | null>(null);
+  const activeProgress = React.useRef<string | undefined>(undefined);
   React.useEffect(() => {
-    if (!applying) return;
+    const token = activeProgress.current;
+    if (!applying || !token) return;
     let active = true;
-    const timer = setInterval(() => {void getApplyPreparation().then(report => {if(active) setPreparationReport(report);}).catch(() => {});},1000);
-    return () => {active=false;clearInterval(timer);};
-  },[applying]);
+    const timer = setInterval(() => {
+      void getApplyPreparation().then(report => {
+        if (active && activeProgress.current === token && report?.progress_token === token && report.status === 'preparing') {
+          setPreparationReport(report);
+        }
+      }).catch(() => {});
+    }, 1000);
+    return () => { active = false; clearInterval(timer); };
+  }, [applying]);
 
   const loadFreshPlan = React.useCallback(async (inputs: ApiPreparationInputs = {}) => {
     setLoadingPlan(true);
@@ -152,7 +170,10 @@ const Apply: React.FC = () => {
     async (dryRun: boolean) => {
       setApplyError(null);
       setApplying(true);
-      let succeeded = false;
+      const progressToken = dryRun ? undefined : newProgressToken();
+      activeProgress.current = progressToken;
+      setPreparationReport(null);
+      setApplyResult(null);
 
       try {
         if (dryRun) {
@@ -162,18 +183,16 @@ const Apply: React.FC = () => {
           setApplyResult(null);
         } else {
           const response = await runApply({ scope: 'project', allowUserScope: false, dryRun: false,
-            confirmed: true, planRevision: plan?.planRevision,
+            confirmed: true, planRevision: plan?.planRevision, progressToken,
             ...(Object.keys(preparationInputs).length ? {preparationInputs} : {}) });
           setApplyResult(response);
+          setPreparationReport(response.preparation ?? null);
         }
-        succeeded = true;
       } catch (error) {
         setApplyError(formatError(error));
+        setPreparationReport(error instanceof ApiClientError ? error.envelope.error.preparation ?? null : null);
       } finally {
-        try {
-          const report = await getApplyPreparation();
-          setPreparationReport(!succeeded && report?.status === 'ready' ? null : report);
-        } catch { /* Execution result remains visible if status cannot be loaded. */ }
+        activeProgress.current = undefined;
         setApplying(false);
       }
     },

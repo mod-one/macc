@@ -133,8 +133,12 @@ fn empty_semantic_corpus_offers_to_disable_only_semantic_search_and_resume_apply
     config.memory.as_mut().unwrap().semantic_enabled = true;
     std::fs::write(&paths.config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
     let mut reviewed = plan(&paths);
-    assert!(crate::apply_plan(&paths, &mut reviewed, false).is_err());
-    let report = status(&paths.root).unwrap().unwrap();
+    let Err(MaccError::ApplyPreparation { report, .. }) =
+        crate::apply_plan(&paths, &mut reviewed, false)
+    else {
+        panic!("expected a question from the current preparation attempt");
+    };
+    assert_eq!(report.run_id, status(&paths.root).unwrap().unwrap().run_id);
     assert_eq!(report.status, "waiting_for_input");
     let question = report.question.as_ref().unwrap();
     assert_eq!(question.kind, "semantic_insufficient_memories");
@@ -463,4 +467,38 @@ fn startup_budget_includes_declared_checks_and_unknown_failure_does_not_login() 
     assert!(error.contains("evidence:"));
     assert!(!paths.root.join("must-not-login").exists());
     assert!(!error.contains("requires account setup"));
+}
+
+#[test]
+fn apply_preflight_errors_do_not_return_a_previous_question() {
+    let (_temp, paths) = fixture(false);
+    let mut reviewed = plan(&paths);
+    let mut previous = begin(&paths, reviewed.preparation.as_ref().unwrap(), None).unwrap();
+    previous.status = "waiting_for_input".into();
+    previous.question = Some(Question {
+        kind: "semantic_suite".into(),
+        message: "Previous benchmark question".into(),
+        data: serde_json::Value::Null,
+    });
+    publish(&paths.root, &previous).unwrap();
+
+    let guard = lock(&paths).unwrap();
+    let locked = crate::apply_plan(&paths, &mut reviewed, false).unwrap_err();
+    assert!(
+        locked.to_string().contains("another Apply/startup"),
+        "{locked}"
+    );
+    assert!(!matches!(locked, MaccError::ApplyPreparation { .. }));
+    drop(guard);
+
+    reviewed.preparation.as_mut().unwrap().revision = "obsolete".into();
+    let stale = crate::apply_plan(&paths, &mut reviewed, false).unwrap_err();
+    assert!(
+        stale.to_string().contains("requirements changed"),
+        "{stale}"
+    );
+    assert!(!matches!(stale, MaccError::ApplyPreparation { .. }));
+    let stored = status(&paths.root).unwrap().unwrap();
+    assert_eq!(stored.run_id, previous.run_id);
+    assert_eq!(stored.question, previous.question);
 }

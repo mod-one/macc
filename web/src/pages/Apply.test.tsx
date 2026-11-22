@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import Apply from './Apply';
-import { getApplyPreparation, runApply, runPlan } from '../api/client';
+import { ApiClientError, getApplyPreparation, runApply, runPlan } from '../api/client';
 import type { ApiPlanResponse } from '../api/models';
 vi.mock('../api/client',async()=>{
   const actual=await vi.importActual<typeof import('../api/client')>('../api/client');
@@ -27,7 +27,7 @@ it('requires confirmation even for project-only apply and Cancel sends no write'
   fireEvent.click(screen.getByRole('button',{name:'Cancel'}));expect(runApply).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button',{name:'Apply Changes'}));
   fireEvent.click(screen.getByRole('button',{name:'Confirm Apply'}));
-  await waitFor(()=>expect(runApply).toHaveBeenCalledWith({scope:'project',allowUserScope:false,dryRun:false,confirmed:true,planRevision:'plan-1'}));
+  await waitFor(()=>expect(runApply).toHaveBeenCalledWith({scope:'project',allowUserScope:false,dryRun:false,confirmed:true,planRevision:'plan-1',progressToken:expect.any(String)}));
 });
 it('renders dry-run previews as plans rather than attempting to read apply results',async()=>{
   vi.mocked(runApply).mockResolvedValue({...plan,summary:{...plan.summary,totalActions:2}});
@@ -40,9 +40,11 @@ it('renders dry-run previews as plans rather than attempting to read apply resul
 });
 
 it('does not open confirmation when refreshing a preparation answer fails',async()=>{
-  vi.mocked(runApply).mockRejectedValue(new Error('Evidence needed'));
-  vi.mocked(getApplyPreparation).mockResolvedValue({revision:'r',status:'waiting_for_input',completed:[],error:null,
-    question:{kind:'semantic_review',message:'Review measured results',data:{approvable:true,report:{id:'benchmark'},checksum:'exact'}}});
+  vi.mocked(runApply).mockRejectedValue(new ApiClientError(400, {error: {
+    code:'MACC-WEB-1000', category:'Validation', message:'Evidence needed', retryable:false,
+    preparation:{run_id:'current',revision:'r',status:'waiting_for_input',completed:[],error:null,
+      question:{kind:'semantic_review',message:'Review measured results',data:{approvable:true,report:{id:'benchmark'},checksum:'exact'}}}
+  }}));
   render(<MemoryRouter><Apply /></MemoryRouter>);
   await screen.findByText('Plan Summary');
   fireEvent.click(screen.getByRole('button',{name:'Apply Changes'}));
@@ -55,3 +57,20 @@ it('does not open confirmation when refreshing a preparation answer fails',async
   expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   expect(runApply).toHaveBeenCalledTimes(1);
 });
+
+it.each(['Another Apply holds the lock', 'The reviewed plan has changed'])(
+  'shows the preflight error "%s" with an earlier question on disk', async message => {
+    vi.mocked(getApplyPreparation).mockResolvedValue({
+      run_id:'previous', revision:'r', status:'waiting_for_input', completed:[], error:null,
+      question:{kind:'semantic_suite', message:'Old benchmark question', data:{}},
+    });
+    vi.mocked(runApply).mockRejectedValue(new Error(message));
+    render(<MemoryRouter><Apply /></MemoryRouter>);
+    await screen.findByText('Plan Summary');
+    fireEvent.click(screen.getByRole('button',{name:'Apply Changes'}));
+    fireEvent.click(screen.getByRole('button',{name:'Confirm Apply'}));
+    await screen.findByText(message);
+    expect(screen.queryByText('Old benchmark question')).not.toBeInTheDocument();
+    expect(getApplyPreparation).not.toHaveBeenCalled();
+  },
+);

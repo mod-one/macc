@@ -323,60 +323,91 @@ fn public_search_explains_source_drift_and_respects_task_scope() {
 }
 
 #[cfg(unix)]
-#[test]
-fn terminal_confirmation_defaults_to_cancel_and_accepts_explicit_yes() {
+fn terminal_with_answer(root: &Path, args: &[&str], answer: &str) -> (bool, String) {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::{io::Read, sync::mpsc, time::Duration};
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_macc"));
+    command.arg("--cwd");
+    command.arg(root);
+    command.args(args);
+    let mut child = pair.slave.spawn_command(command).unwrap();
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut all = Vec::new();
+        let mut b = [0; 4096];
+        loop {
+            match reader.read(&mut b) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => all.extend_from_slice(&b[..n]),
+            }
+        }
+        let _ = tx.send(all);
+    });
+    pair.master
+        .take_writer()
+        .unwrap()
+        .write_all(answer.as_bytes())
+        .unwrap();
+    let output = match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = child.kill();
+            panic!("Confirmation did not finish: {e}")
+        }
+    };
+    (
+        child.wait().unwrap().success(),
+        String::from_utf8_lossy(&output).into_owned(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn interactive_apply_reports_the_lock_without_prompting_for_a_previous_benchmark() {
+    let project = fixture();
+    let state = project.path().join(".macc/state");
+    let previous = json!({"run_id":"previous","revision":"previous","status":"waiting_for_input",
+        "completed":[],"error":null,"question":{"kind":"semantic_suite","message":"Previous benchmark question","data":{}}}).to_string();
+    std::fs::write(state.join("apply-preparation.json"), &previous).unwrap();
+    let _owner = macc_core::fs_lock::AdvisoryLock::acquire(
+        &state.join("apply-preparation.lock"),
+        std::time::Duration::ZERO,
+        "test owner",
+    )
+    .unwrap();
+    let (success, output) = terminal_with_answer(project.path(), &["apply"], "yes\n\n");
+    assert!(!success);
+    assert!(output.contains("another Apply/startup"), "{output}");
+    assert!(!output.contains("Labelled benchmark JSON file"), "{output}");
+    assert!(!output.contains("Previous benchmark question"), "{output}");
+    assert_eq!(
+        std::fs::read_to_string(state.join("apply-preparation.json")).unwrap(),
+        previous
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_confirmation_defaults_to_cancel_and_accepts_explicit_yes() {
     for (answer, expected) in [("\n", false), ("n\n", false), ("yes\n", true)] {
         let t = fixture();
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 100,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_macc"));
-        command.args([
-            "--cwd",
-            t.path().to_str().unwrap(),
-            "o2",
-            "policy",
-            "set",
-            "memory.enabled",
-            "true",
-            "--apply",
-        ]);
-        let mut child = pair.slave.spawn_command(command).unwrap();
-        drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut all = Vec::new();
-            let mut b = [0; 4096];
-            loop {
-                match reader.read(&mut b) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => all.extend_from_slice(&b[..n]),
-                }
-            }
-            let _ = tx.send(all);
-        });
-        pair.master
-            .take_writer()
-            .unwrap()
-            .write_all(answer.as_bytes())
-            .unwrap();
-        let output = match rx.recv_timeout(Duration::from_secs(15)) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = child.kill();
-                panic!("Confirmation did not finish: {e}")
-            }
-        };
-        assert!(child.wait().unwrap().success());
-        assert!(String::from_utf8_lossy(&output).contains("Apply this O2 setting? [y/N]"));
+        let (success, output) = terminal_with_answer(
+            t.path(),
+            &["o2", "policy", "set", "memory.enabled", "true", "--apply"],
+            answer,
+        );
+        assert!(success, "{output}");
+        assert!(output.contains("Apply this O2 setting? [y/N]"));
         assert_eq!(
             value(cli(
                 t.path(),

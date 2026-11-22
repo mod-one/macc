@@ -315,10 +315,10 @@ pub(crate) fn apply(
         &CliFetchMaterializer,
     );
     ui.finish_progress();
-    if result.is_err() && !json {
+    if let (false, Err(MaccError::ApplyPreparation { report, .. })) = (json, &result) {
         eprintln!(
-            "Apply stopped. Completed work is retained. Review the cause and retry Apply. Logs: {}",
-            app.cwd.join(".macc/log/apply").display()
+            "Apply stopped. Attempt log: .macc/log/apply/{}",
+            report.run_id
         );
     }
     result

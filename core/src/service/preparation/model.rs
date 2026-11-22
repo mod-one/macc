@@ -12,8 +12,10 @@ pub struct Plan {
     pub steps: Vec<String>,
     pub network: bool,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_token: Option<ProgressToken>,
     #[serde(default)]
     pub accepted_degraded: bool,
     #[serde(default)]
@@ -51,3 +53,6 @@ pub struct Question {
     pub message: String,
     pub data: serde_json::Value,
 }
+
+/// Correlates live progress with a client invocation. Archive IDs are always issued by MACC.
+pub use uuid::Uuid as ProgressToken;

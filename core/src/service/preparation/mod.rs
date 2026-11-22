@@ -15,7 +15,8 @@ pub(crate) use tools::selected_ids as selected_tool_ids;
 mod model;
 pub use model::*;
 mod attempt;
-pub(crate) use attempt::{begin, phase, record_failure};
+pub use attempt::live_status;
+pub(crate) use attempt::{begin, failure};
 pub fn preview(paths: &ProjectPaths) -> Result<Option<Plan>> {
     if paths.macc_dir.join("worktree.json").is_file() || !paths.config_path.exists() {
         return Ok(None);
@@ -143,31 +144,32 @@ pub fn validate_review(paths: &ProjectPaths, reviewed: Option<&Plan>) -> Result<
     Ok(())
 }
 pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
-    let mut report = status(&paths.root)?
-        .filter(|r| {
-            r.status == "preparing"
-                && r.revision == plan.revision
-                && uuid::Uuid::parse_str(&r.run_id).is_ok()
-        })
-        .map(Ok)
-        .unwrap_or_else(|| begin(paths, plan))?;
+    let _guard = lock(paths)?;
+    let mut report = begin(paths, plan, None)?;
+    match execute_attempt(paths, plan, &mut report) {
+        Ok(()) => Ok(report),
+        Err(err) => Err(failure(&paths.root, report, err)),
+    }
+}
+
+pub(crate) fn execute_attempt(
+    paths: &ProjectPaths,
+    plan: &Plan,
+    report: &mut Report,
+) -> Result<()> {
     let result: Result<()> = (|| {
         progress::clear(&paths.root)?;
-        mcp::cleanup(paths, &plan.mcp_cleanup, &mut report)?;
+        mcp::cleanup(paths, &plan.mcp_cleanup, report)?;
         for tool in &plan.tools {
-            progress::clear(&paths.root)?;
-            report.current = Some(format!("Preparing tool {}", tool.spec.id));
-            publish(&paths.root, &report)?;
+            report.start_phase(&paths.root, format!("Preparing tool {}", tool.spec.id))?;
             tools::prepare(paths, tool, true)?;
             report
                 .completed
                 .push(format!("Tool {} verified", tool.spec.id));
-            publish(&paths.root, &report)?;
+            publish(&paths.root, report)?;
         }
         for provider in &plan.providers {
-            progress::clear(&paths.root)?;
-            report.current = Some(format!("Preparing provider {}", provider.id));
-            publish(&paths.root, &report)?;
+            report.start_phase(&paths.root, format!("Preparing provider {}", provider.id))?;
             if !plan.inputs.accept_degraded
                 || crate::o2::providers::preparation::verify(&paths.root, provider).is_err()
             {
@@ -176,7 +178,7 @@ pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
             report
                 .completed
                 .push(format!("Provider {} prepared and verified", provider.id));
-            publish(&paths.root, &report)?;
+            publish(&paths.root, report)?;
         }
         progress::clear(&paths.root)?;
         for provider in &plan.providers {
@@ -202,7 +204,7 @@ pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
                 }
             }
         }
-        o2::prepare(paths, plan, &mut report)?;
+        o2::prepare(paths, plan, report)?;
         let current = crate::load_canonical_config(&paths.config_path)?;
         if crate::config::transaction::revision(&current)? != plan.revision {
             return Err(MaccError::Validation(
@@ -215,8 +217,8 @@ pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
         Ok(()) => {
             report.current = None;
             report.status = "ready".into();
-            publish(&paths.root, &report)?;
-            Ok(report)
+            publish(&paths.root, report)?;
+            Ok(())
         }
         Err(error) => {
             let detail = error.to_string().to_ascii_lowercase();
@@ -230,14 +232,6 @@ pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
             {
                 report.question=Some(Question{kind:"network_access".into(),message:"Preparation needs network access. Allow it for this project and review the updated Apply plan?".into(),data:serde_json::json!({"revision":report.revision})});
             }
-            report.status = if report.question.is_some() {
-                "waiting_for_input"
-            } else {
-                "blocked"
-            }
-            .into();
-            report.error = Some(error.to_string());
-            publish(&paths.root, &report)?;
             Err(error)
         }
     }

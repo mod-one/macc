@@ -67,6 +67,13 @@ pub use worktree::{
 
 #[derive(Error, Debug)]
 pub enum MaccError {
+    #[error("{source}")]
+    ApplyPreparation {
+        report: Box<service::preparation::Report>,
+        #[source]
+        source: Box<MaccError>,
+    },
+
     #[error("Configuration error in {path}: {source}")]
     Config {
         path: String,
@@ -140,6 +147,9 @@ impl MaccError {
     /// Returns `true` for errors that may resolve on their own (disk I/O,
     /// SQLite contention) and should not immediately abort a coordinator run.
     pub fn is_transient(&self) -> bool {
+        if let Self::ApplyPreparation { source, .. } = self {
+            return source.is_transient();
+        }
         matches!(self, MaccError::Storage { .. } | MaccError::Io { .. })
     }
 }
@@ -148,6 +158,7 @@ pub type Result<T> = std::result::Result<T, MaccError>;
 
 #[derive(Debug, Clone, Default)]
 pub struct ApplyReport {
+    pub preparation: Option<service::preparation::Report>,
     pub warnings: Vec<String>,
     pub details_path: Option<PathBuf>,
     pub outcomes: std::collections::BTreeMap<String, plan::ActionStatus>,
@@ -1134,15 +1145,17 @@ pub fn apply_plan(
             "O2 prerequisites changed after preview; review macc apply again".into(),
         ));
     }
-    if let Some(preparation) = &plan.preparation {
-        service::preparation::begin(paths, preparation)?;
-    }
+    let mut attempt = plan
+        .preparation
+        .as_ref()
+        .map(|p| service::preparation::begin(paths, p, plan.progress_token))
+        .transpose()?;
     let result = (|| {
         if let Some(activation) = &plan.o2_activation {
             o2::activation::apply(&paths.root, activation)?;
         }
-        if plan.preparation.is_some() {
-            service::preparation::phase(&paths.root, "Applying project configuration")?;
+        if let Some(prepared) = &mut attempt {
+            prepared.start_phase(&paths.root, "Applying project configuration")?;
         }
         let operations = plan::collect_plan_operations(paths, plan);
         let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
@@ -1155,9 +1168,9 @@ pub fn apply_plan(
         if paths.config_path.is_file() {
             hooks::native::verify(paths)?;
         }
-        if let Some(preparation) = &plan.preparation {
-            let prepared = service::preparation::execute(paths, preparation)?;
-            report.warnings.extend(prepared.warnings);
+        if let (Some(preparation), Some(prepared)) = (&plan.preparation, &mut attempt) {
+            service::preparation::execute_attempt(paths, preparation, prepared)?;
+            report.warnings.extend(prepared.warnings.iter().cloned());
             report.details_path = Some(
                 paths
                     .macc_dir
@@ -1192,14 +1205,16 @@ pub fn apply_plan(
         report.save_details(paths, run_id.as_deref())?;
         Ok(report)
     })();
-    if let Err(error) = &result {
-        if plan.preparation.is_some() {
-            if let Err(record_error) = service::preparation::record_failure(&paths.root, error) {
-                tracing::warn!("Cannot record Apply failure: {record_error}");
-            }
+    match (result, attempt) {
+        (Ok(mut report), preparation) => {
+            report.preparation = preparation;
+            Ok(report)
         }
+        (Err(error), Some(report)) => {
+            Err(service::preparation::failure(&paths.root, report, error))
+        }
+        (Err(error), None) => Err(error),
     }
-    result
 }
 
 pub fn apply_operations<F>(

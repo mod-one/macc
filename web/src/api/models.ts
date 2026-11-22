@@ -7,6 +7,7 @@ export type ApiErrorCategory =
   | 'Internal';
 
 export interface ApiErrorBody {
+  preparation?: ApiPreparationReport;
   code: string;
   category: ApiErrorCategory;
   message: string;
@@ -628,6 +629,7 @@ export interface ApiPlanResponse {
 }
 
 export interface ApiApplyRequest {
+  progressToken?: string;
   preparationInputs?: ApiPreparationInputs;
   planRevision?: string;
   scope?: ApiScope | null;
@@ -645,6 +647,7 @@ export interface ApiPreparationInputs {
   semantic_approval?: {report_id: string; checksum: string};
 }
 export interface ApiPreparationReport {
+  progress_token?: string;
   accepted_degraded?: boolean;
   warnings?: string[];
   output_kind?: string | null;
@@ -667,6 +670,7 @@ export interface ApiApplyResult {
 }
 
 export interface ApiApplyResponse {
+  preparation?: ApiPreparationReport;
   dryRun: boolean;
   appliedActions: number;
   changedFiles: number;

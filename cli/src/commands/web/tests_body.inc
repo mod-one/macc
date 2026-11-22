@@ -5565,9 +5565,16 @@ async fn apply_rejects_a_changed_preview_without_overwriting_new_work() {
     assert_eq!(status,axum::http::StatusCode::OK,"{}",String::from_utf8_lossy(&bytes));
     let json:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
     fs::write(&target,"new work after preview").unwrap();
+    let prior = paths.macc_dir.join("state/apply-preparation.json");
+    fs::create_dir_all(prior.parent().unwrap()).unwrap();
+    fs::write(&prior, r#"{"revision":"old","status":"waiting_for_input","completed":[],"error":null,"question":{"kind":"semantic_suite","message":"Old question","data":{}}}"#).unwrap();
     let body=serde_json::json!({"dryRun":false,"confirmed":true,"planRevision":json["planRevision"]});
     let response=app.oneshot(Request::builder().uri("/api/v1/apply").method("POST").header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status(),axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["error"]["code"], "MACC-WEB-1001");
+    assert!(payload["error"].get("preparation").is_none());
     assert_eq!(fs::read_to_string(&target).unwrap(),"new work after preview");
 }
 

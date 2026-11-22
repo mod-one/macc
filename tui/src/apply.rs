@@ -2,13 +2,14 @@
 use super::*;
 use crossterm::event::KeyCode;
 use macc_core::resolve::MaterializedFetchUnit;
+use macc_core::service::preparation::ProgressToken;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 #[path = "apply/assistant.rs"]
 mod assistant;
 
 #[derive(Default)]
 pub(crate) struct ApplyRuntime {
-    pub(super) applying: Option<Receiver<Result<macc_core::ApplyReport, String>>>,
+    pub(super) applying: Option<ApplyWorker>,
     pub assistant: assistant::State,
     inputs: macc_core::service::preparation::Inputs,
     resume_after_prepare: bool,
@@ -21,6 +22,10 @@ pub(crate) struct ApplyRuntime {
     preparing: Option<Receiver<Result<Vec<MaterializedFetchUnit>, String>>>,
     planned_config: Option<CanonicalConfig>,
     planned_fingerprint: Option<String>,
+}
+pub(super) struct ApplyWorker {
+    token: ProgressToken,
+    result: Receiver<macc_core::Result<macc_core::ApplyReport>>,
 }
 impl AppState {
     pub(crate) fn apply_confirmation_open(&self) -> bool {
@@ -249,6 +254,7 @@ impl AppState {
         if !self.apply_runtime.confirm_open {
             return;
         }
+        self.apply_runtime.assistant = Default::default();
         if self.apply_runtime.planned_config.as_ref() != self.working_copy.as_ref() {
             self.apply_error =
                 Some("Configuration changed. Cancel and refresh the plan before applying.".into());
@@ -318,46 +324,44 @@ impl AppState {
             let (tx, rx) = mpsc::channel();
             let engine = self.engine.clone();
             let paths = paths.clone();
-            self.apply_runtime.applying = Some(rx);
+            let token = ProgressToken::new_v4();
+            plan.progress_token = Some(token);
+            self.apply_runtime.applying = Some(ApplyWorker { token, result: rx });
             thread::spawn(move || {
-                let _ = tx.send(
-                    engine
-                        .apply(&paths, &mut plan, allow_user_scope)
-                        .map_err(|e| e.to_string()),
-                );
+                let _ = tx.send(engine.apply(&paths, &mut plan, allow_user_scope));
             });
         } else {
-            let result = self
-                .engine
-                .apply(paths, &mut plan, allow_user_scope)
-                .map_err(|e| e.to_string());
+            let result = self.engine.apply(paths, &mut plan, allow_user_scope);
             self.complete_apply(result);
         }
     }
     fn poll_apply_execution(&mut self) {
-        let Some(receiver) = &self.apply_runtime.applying else {
+        let Some(worker) = &self.apply_runtime.applying else {
             return;
         };
         if let Some(paths) = &self.project_paths {
             self.apply_runtime.assistant.report =
-                macc_core::service::preparation::status(&paths.root)
+                macc_core::service::preparation::live_status(&paths.root, worker.token)
                     .ok()
                     .flatten();
         }
-        let result = match receiver.try_recv() {
+        let result = match worker.result.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err("Apply worker exited unexpectedly".into()),
+            Err(TryRecvError::Disconnected) => Err(MaccError::Validation(
+                "Apply worker exited unexpectedly".into(),
+            )),
         };
         self.apply_runtime.applying = None;
         self.complete_apply(result);
     }
-    fn complete_apply(&mut self, result: Result<macc_core::ApplyReport, String>) {
+    fn complete_apply(&mut self, result: macc_core::Result<macc_core::ApplyReport>) {
         let Some(paths) = self.project_paths.clone() else {
             return;
         };
         match result {
             Ok(report) => {
+                self.apply_runtime.assistant.report = report.preparation.clone();
                 self.delivery_baseline = self.apply_runtime.planned_config.clone();
                 if let Err(error) = macc_core::service::context::mark_apply_completed(&paths) {
                     self.apply_error = Some(format!(
@@ -392,11 +396,10 @@ impl AppState {
                 );
             }
             Err(err) => {
-                self.apply_runtime.assistant.report =
-                    macc_core::service::preparation::status(&paths.root)
-                        .ok()
-                        .flatten()
-                        .filter(|report| report.status != "ready");
+                self.apply_runtime.assistant.report = match &err {
+                    MaccError::ApplyPreparation { report, .. } => Some((**report).clone()),
+                    _ => None,
+                };
                 self.apply_runtime.assistant.open = true;
                 self.apply_feedback = None;
                 self.apply_error = Some(format!("Apply failed: {}", err));

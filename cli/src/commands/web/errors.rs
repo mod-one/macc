@@ -11,6 +11,8 @@ struct ApiErrorEnvelope {
 
 #[derive(Debug, Serialize)]
 struct ApiErrorBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preparation: Option<Box<macc_core::service::preparation::Report>>,
     code: String,
     category: String,
     message: String,
@@ -71,6 +73,7 @@ impl ApiError {
             status,
             body: Box::new(ApiErrorEnvelope {
                 error: ApiErrorBody {
+                    preparation: None,
                     code: code.to_string(),
                     category: category.to_string(),
                     message,
@@ -263,6 +266,11 @@ impl ApiError {
 impl From<MaccError> for ApiError {
     fn from(err: MaccError) -> Self {
         match err {
+            MaccError::ApplyPreparation { report, source } => {
+                let mut response = Self::from(*source);
+                response.body.error.preparation = Some(report);
+                response
+            }
             MaccError::Validation(message) => ApiError::new(
                 StatusCode::BAD_REQUEST,
                 WEB_ERR_VALIDATION,
