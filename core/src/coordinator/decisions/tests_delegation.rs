@@ -275,4 +275,37 @@ fn never_ask_cannot_supply_required_pull_request_reviews() {
             .contains_key("delegated_gate_resolution"));
         save(root, &registry);
     }
+    let paths = crate::ProjectPaths::from_root(root);
+    let pending = crate::service::coordinator_workflow::coordinator_list_approvals(
+        &paths,
+        None,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(pending.len(), 1);
+    let gate = &pending[0];
+    assert_eq!(gate.task_id, "G");
+    assert!(gate.awaiting_decision && !gate.auto_prompt);
+    assert_eq!(gate.missing_roles, ["OWNER"]);
+    let request = crate::coordinator::approval::DecisionRequest {
+        task_id: gate.task_id.clone(),
+        decision: crate::coordinator::model::ApprovalDecision::Approved,
+        role: "OWNER".into(),
+        actor: "Human".into(),
+        revision: gate.subject_revision.clone(),
+        evidence: Some("Independent pull request review for the delivered revision".into()),
+        reason: None,
+    };
+    let (_, pending) = crate::service::coordinator_workflow::coordinator_record_gate_decision(
+        &paths,
+        None,
+        &Default::default(),
+        request,
+    )
+    .unwrap();
+    assert!(pending.is_empty());
+    assert_eq!(
+        super::registry(root).unwrap().find_task("G").unwrap().state,
+        "approved"
+    );
 }

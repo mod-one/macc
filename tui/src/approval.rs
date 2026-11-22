@@ -85,6 +85,7 @@ pub struct Window {
     pub gate: PendingApproval,
     /// Gates awaiting a decision in total, for the title.
     pub waiting: usize,
+    pub(crate) opened_manually: bool,
     mode: Mode,
     scroll: u16,
     message: Option<(bool, String)>,
@@ -95,9 +96,17 @@ impl Window {
         Self {
             gate,
             waiting,
+            opened_manually: false,
             mode: Mode::Reading,
             scroll: 0,
             message: None,
+        }
+    }
+
+    pub(crate) fn manual(gate: PendingApproval, waiting: usize) -> Self {
+        Self {
+            opened_manually: true,
+            ..Self::new(gate, waiting)
         }
     }
 

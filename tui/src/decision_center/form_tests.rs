@@ -411,3 +411,62 @@ fn blocked_external_is_visible_and_cannot_look_like_a_recorded_answer() {
     assert!(!text.contains("Recorded decision"));
     assert!(!text.contains("Recorded response"));
 }
+
+#[test]
+fn inbox_counts_external_requests_and_manual_approvals_without_prompting() {
+    use crate::inbox::Section;
+    use macc_core::coordinator::approval::PendingApproval;
+    let (_tmp, mut state) = crate::workspace_tests::fixture();
+    let mut center = super::tests::center("never_ask");
+    let snapshot = center.snapshot.as_mut().unwrap();
+    let template = snapshot["decisions"][0].clone();
+    let rows = snapshot["decisions"].as_array_mut().unwrap();
+    for (id, status) in [("answered", "resolved"), ("device", "blocked_external")] {
+        let mut decision = template.clone();
+        decision["id"] = id.into();
+        decision["request"]["task_id"] = id.into();
+        decision["status"] = status.into();
+        rows.push(decision);
+    }
+    center.open = false;
+    center.tick(None, false);
+    assert!(!center.open);
+    assert_eq!(
+        center
+            .inbox_rows(true)
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect::<Vec<_>>(),
+        ["answered"]
+    );
+    state.decision_center = center;
+    state.coordinator_pending_approvals = vec![PendingApproval {
+        task_id: "review".into(),
+        awaiting_decision: true,
+        auto_prompt: false,
+        ..Default::default()
+    }];
+    assert_eq!(crate::workbench::pending(&state), 3);
+    assert_eq!(crate::inbox::count(&state), 2);
+    state.inspector_index = state
+        .decision_center
+        .pending_task_index(&["device".into()])
+        .unwrap();
+    crate::inbox::open(&mut state);
+    assert_eq!(state.decision_center.current.as_ref().unwrap().id, "device");
+    assert!(state.decision_center.attempt_send(false).is_none());
+    state.decision_center.open = false;
+    state.sync_approval_window();
+    assert!(state.approval_window.is_none());
+    state.inbox_section = Section::Approvals;
+    state.inspector_index = 0;
+    crate::inbox::open(&mut state);
+    state.sync_approval_window();
+    assert_eq!(
+        state.approval_window.as_ref().unwrap().gate.task_id,
+        "review"
+    );
+    state.coordinator_pending_approvals.clear();
+    state.sync_approval_window();
+    assert!(state.approval_window.is_none());
+}

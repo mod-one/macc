@@ -35,6 +35,7 @@ function gate(overrides: Partial<ApiPendingApproval> = {}): ApiPendingApproval {
     approve_command: 'macc coordinator approve FIN-APP-001 --role FINANCE --revision abcdef1 --evidence <url>',
     question: 'Do you approve FIN-CR-001 ("Specify settlement endpoints") as delivered at revision abcdef123456?',
     awaiting_decision: true,
+    auto_prompt: true,
     subject_title: 'Specify settlement endpoints',
     subject_objective: 'Close the contract gap.',
     subject_description: 'Problem/Goal: contract gap.',
@@ -81,11 +82,28 @@ it('opens by itself with the full explanation of the question', async () => {
   expect(screen.getByText(/the run continues with FIN-API-002/)).toBeInTheDocument();
 });
 
-it('requires evidence, confirms, then records the approval for the shown revision', async () => {
-  setPending([gate()]);
+it('keeps quiet approvals accessible across refreshes until a human opens them', async () => {
+  const quiet = gate({ auto_prompt: false });
+  setPending([quiet]);
+  await act(async () => { render(<ApprovalCenter />); });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '1 approval waiting' }));
+  await act(async () => { setPending([{ ...quiet }]); });
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Decide later' }));
+  await act(async () => { setPending([{ ...quiet, subject_revision: '1234567' }]); });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it.each([true, false])('records an explicit vote for the shown revision with auto_prompt=%s', async (autoPrompt) => {
+  setPending([gate({ auto_prompt: autoPrompt })]);
   await act(async () => {
     render(<ApprovalCenter />);
   });
+  if (!autoPrompt) {
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '1 approval waiting' }));
+  }
   const approve = screen.getByRole('button', { name: 'Approve…' });
   expect(approve).toBeDisabled();
   fireEvent.change(screen.getByPlaceholderText(/pull request review/), { target: { value: 'https://git/pr/7' } });

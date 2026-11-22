@@ -1156,14 +1156,6 @@ impl AppState {
     /// displayed gate, close it once decided elsewhere, and open it by itself
     /// for a gate the operator has not put off.
     pub fn sync_approval_window(&mut self) {
-        let p = self.decision_center.policy();
-        if p.enabled
-            && p.human_question_min_risk
-                == macc_core::coordinator::decisions::Consultation::NeverAsk
-        {
-            self.approval_window = None;
-            return;
-        }
         let waiting = self.awaiting_approvals().len();
         if let Some(window) = self.approval_window.as_mut() {
             let current = self
@@ -1172,24 +1164,25 @@ impl AppState {
                 .find(|p| p.task_id == window.gate.task_id && p.awaiting_decision)
                 .cloned();
             match current {
-                Some(gate) => {
+                Some(gate) if gate.auto_prompt || window.opened_manually || window.is_editing() => {
                     window.refresh(gate, waiting);
                     return;
                 }
                 None if window.is_editing() => return,
-                None => self.approval_window = None,
+                _ => self.approval_window = None,
             }
         }
-        if self.approval_window.is_some() || self.approval_input_busy() {
+        if self.approval_input_busy() {
             return;
         }
         let next = self
             .awaiting_approvals()
             .into_iter()
             .find(|p| {
-                !self
-                    .approval_snoozed
-                    .contains(&crate::approval::Window::key_of(p))
+                p.auto_prompt
+                    && !self
+                        .approval_snoozed
+                        .contains(&crate::approval::Window::key_of(p))
             })
             .cloned();
         if let Some(gate) = next {
@@ -1213,7 +1206,7 @@ impl AppState {
             Some(gate) => {
                 self.approval_snoozed
                     .remove(&crate::approval::Window::key_of(&gate));
-                self.approval_window = Some(crate::approval::Window::new(gate, waiting));
+                self.approval_window = Some(crate::approval::Window::manual(gate, waiting));
             }
             None => self.set_status(
                 UiStatusLevel::Info,
@@ -1252,7 +1245,7 @@ impl AppState {
             .unwrap_or(0);
         let total = waiting.len();
         if let Some(gate) = waiting.get(index).map(|p| (*p).clone()) {
-            self.approval_window = Some(crate::approval::Window::new(gate, total));
+            self.approval_window = Some(crate::approval::Window::manual(gate, total));
         }
     }
 
@@ -7838,6 +7831,7 @@ mod tests {
             subject_task: "SUBJ-1".into(),
             subject_revision: Some(revision.into()),
             awaiting_decision: true,
+            auto_prompt: true,
             required_roles: vec!["PRODUCT_OWNER".into()],
             missing_roles: vec!["PRODUCT_OWNER".into()],
             ..Default::default()

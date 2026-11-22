@@ -354,6 +354,7 @@ fn a_failed_merge_on_the_last_task_ends_the_run_with_blocked_tasks() {
 fn no_progress_abort_reports_the_stuck_tasks() {
     use macc_core::coordinator::engine::{
         ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController, StallDiagnosis,
+        StallDisposition,
     };
 
     let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
@@ -376,7 +377,7 @@ fn no_progress_abort_reports_the_stuck_tasks() {
             "L4H-OVERVIEW-REFACTOR-001 (waiting on dependencies: L4H-OVERVIEW-SOURCES-001)"
                 .to_string(),
         ],
-        terminal_blocked: false,
+        disposition: StallDisposition::Unexplained,
     };
 
     // First call establishes the baseline counts; the second trips the limit.
@@ -444,6 +445,7 @@ fn no_progress_abort_without_a_diagnosis_stays_terse() {
 fn terminal_blocked_stall_reports_cause_without_unlock_advice() {
     use macc_core::coordinator::engine::{
         ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController, StallDiagnosis,
+        StallDisposition,
     };
 
     let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
@@ -464,7 +466,7 @@ fn terminal_blocked_stall_reports_cause_without_unlock_advice() {
                 .to_string(),
             "L4K-VERIFY-002 (depends on blocked task L4K-ROLLOUT-001)".to_string(),
         ],
-        terminal_blocked: true,
+        disposition: StallDisposition::Blocked,
     };
 
     controller

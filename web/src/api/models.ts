@@ -206,8 +206,10 @@ export interface ApiPendingApproval {
   diff_stat: string | null;
   approve_command: string;
   question: string;
-  /** True while the gate needs a decision now; the approval dialog opens for these. */
+  /** True while the gate needs a decision now. */
   awaiting_decision: boolean;
+  /** Whether project policy allows opening this approval without operator input. */
+  auto_prompt: boolean;
   subject_title: string | null;
   subject_objective: string | null;
   subject_description: string | null;

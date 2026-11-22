@@ -474,22 +474,26 @@ pub fn current_pending_approvals(
     repo_root: &std::path::Path,
     registry: &TaskRegistry,
 ) -> Vec<PendingApproval> {
-    if crate::coordinator::decisions::policy(repo_root).is_ok_and(|p| {
-        p.enabled
-            && p.human_question_min_risk == crate::coordinator::decisions::Consultation::NeverAsk
-    }) {
-        return Vec::new();
-    }
-    let diff_stat = |rev: &str| revision_diff_stat(repo_root, rev);
     if !registry.tasks.iter().any(|t| t.is_human_approval_gate()) {
         return Vec::new();
     }
     let mut current = registry.clone();
     let now = crate::coordinator::helpers::now_iso_coordinator();
     if evaluate_human_gates_for_project(repo_root, &mut current, &now).is_err() {
-        return pending_approvals(registry, &diff_stat);
+        return project_pending_approvals(repo_root, registry);
     }
-    pending_approvals(&current, &diff_stat)
+    project_pending_approvals(repo_root, &current)
+}
+
+/// Project a registry that has already been reconciled against the ledger.
+pub(crate) fn project_pending_approvals(
+    root: &std::path::Path,
+    registry: &TaskRegistry,
+) -> Vec<PendingApproval> {
+    use super::decisions::{policy, Consultation};
+    let prompt = policy(root)
+        .is_ok_and(|p| !p.enabled || p.human_question_min_risk != Consultation::NeverAsk);
+    pending_approvals(registry, prompt, &|rev| revision_diff_stat(root, rev))
 }
 
 /// A decision as submitted by an operator, before validation.
@@ -665,6 +669,8 @@ pub struct PendingApproval {
     /// rejected gate or one waiting for requested changes waits for a new
     /// subject revision instead.
     pub awaiting_decision: bool,
+    /// Whether the effective project policy permits an unsolicited approval prompt.
+    pub auto_prompt: bool,
     pub subject_title: Option<String>,
     pub subject_objective: Option<String>,
     pub subject_description: Option<String>,
@@ -737,8 +743,9 @@ pub fn short_revision(revision: &str) -> &str {
 }
 
 /// Gates waiting for a human decision, with the command to decide them.
-pub fn pending_approvals(
+fn pending_approvals(
     registry: &TaskRegistry,
+    auto_prompt: bool,
     diff_stat: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<PendingApproval> {
     registry
@@ -831,6 +838,7 @@ pub fn pending_approvals(
                     task.id, role, revision, evidence
                 ),
                 question,
+                auto_prompt,
                 awaiting_decision: task.is_awaiting_approval()
                     && matches!(
                         approval.status,
@@ -1395,7 +1403,7 @@ mod tests {
     fn pending_view_names_missing_roles_and_the_exact_command() {
         let mut reg = registry("todo");
         reconcile_human_gates(&mut reg, NOW, &|_| Some(SHA.into()), &|_| vec![]);
-        let pending = pending_approvals(&reg, &|_| Some(" docs/adr/003.md | 40 +".into()));
+        let pending = pending_approvals(&reg, true, &|_| Some(" docs/adr/003.md | 40 +".into()));
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].missing_roles, vec!["PRODUCT_OWNER".to_string()]);
         assert_eq!(
@@ -1431,7 +1439,7 @@ mod tests {
                 NOW,
             )]
         });
-        let p = &pending_approvals(&reg, &|_| None)[0];
+        let p = &pending_approvals(&reg, true, &|_| None)[0];
         assert!(p.awaiting_decision);
         assert_eq!(
             p.question,
@@ -1480,7 +1488,7 @@ mod tests {
                 NOW,
             )]
         });
-        let pending = pending_approvals(&reg, &|_| None);
+        let pending = pending_approvals(&reg, true, &|_| None);
         assert_eq!(pending.len(), 1);
         assert!(!pending[0].awaiting_decision);
     }

@@ -381,6 +381,7 @@ export function ApprovalCenter() {
   );
   const [snoozed, setSnoozed] = React.useState<string[]>(() => loadSnoozed());
   const [openId, setOpenId] = React.useState<string | null>(null);
+  const openedManually = React.useRef(false);
   const [message, setMessage] = React.useState<string | null>(null);
   const [defaultActor, setDefaultActor] = React.useState('');
   const [trustMode,setTrustMode]=React.useState<string>();
@@ -389,14 +390,17 @@ export function ApprovalCenter() {
 
   // Open by itself for the first gate not put off; close once decided elsewhere.
   React.useEffect(() => {
-    if (openId && !awaiting.some((g) => g.task_id === openId)) {
+    if (openId && !awaiting.some((g) => g.task_id === openId && (g.auto_prompt || openedManually.current))) {
       setOpenId(null);
     }
     if (!openId) {
-      const next = awaiting.find((g) => !snoozed.includes(gateKey(g)));
+      const next = awaiting.find((g) => g.auto_prompt && !snoozed.includes(gateKey(g)));
       const active=document.activeElement;
       const editing=active instanceof HTMLElement&&active.matches('input, textarea, select, [contenteditable="true"]');
-      if (next&&!editing&&!document.querySelector('[role="dialog"]')) setOpenId(next.task_id);
+      if (next && !editing && !document.querySelector('[role="dialog"]')) {
+        openedManually.current = false;
+        setOpenId(next.task_id);
+      }
     }
   }, [awaiting, openId, snoozed]);
 
@@ -424,6 +428,7 @@ export function ApprovalCenter() {
     setSnoozed(next);
     saveSnoozed(next);
     setMessage(null);
+    openedManually.current = true;
     setOpenId(first.task_id);
   };
 
@@ -431,6 +436,7 @@ export function ApprovalCenter() {
     if (awaiting.length < 2 || !gate) return;
     const index = awaiting.findIndex((g) => g.task_id === gate.task_id);
     setMessage(null);
+    openedManually.current = true;
     setOpenId(awaiting[(index + 1) % awaiting.length].task_id);
   };
 

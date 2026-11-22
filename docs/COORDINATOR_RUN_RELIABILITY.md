@@ -233,6 +233,12 @@ alternating between delegated approval and zero human quorum. Revocation,
 subject/policy changes and a live verified human rejection or changes-request
 invalidate delegation. Delegation never creates human votes.
 
+An open approval or a pending human decision keeps an idle run available while
+queued work depends on that wait, including through intermediate tasks. An
+unrelated external intervention can coexist with these waits. The dispatch
+diagnosis names the dependency path to the approval. Independent work that
+cannot dispatch still receives its own diagnosis.
+
 ### External decision prerequisites
 
 When a performer stops with `precondition_unmet`, the final response can include its

@@ -1,4 +1,5 @@
 use super::*;
+use crate::coordinator::task_selector::DispatchWait;
 use crate::coordinator::task_selector::{diagnose_unschedulable_tasks, TaskSelectorConfig};
 use crate::coordinator_storage::{
     CoordinatorRun, CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, SqliteStorage,
@@ -51,14 +52,16 @@ fn mixed_origin_wait_survives_completion_and_requeue_in_all_diagnostics() {
             diagnose_unschedulable_tasks(&snapshot.registry, &TaskSelectorConfig::default());
         for id in ["WINDOWS", "OTHER"] {
             assert!(
-                decisions.iter().any(|d| d.id == id && d.blocked_root),
+                decisions
+                    .iter()
+                    .any(|d| d.id == id && d.cause == DispatchWait::BlockedRoot),
                 "{id}: {decisions:?}"
             );
         }
         for id in ["DOC", "MOBILE", "VERIFY"] {
             assert!(decisions
                 .iter()
-                .any(|d| d.id == id && d.depends_on_blocked && !d.blocked_root));
+                .any(|d| d.id == id && d.cause == DispatchWait::BlockedDependency));
         }
         assert_eq!(decisions.iter().filter(|d| d.id == "WINDOWS").count(), 1);
         let incident = incident::inspect(&paths).unwrap().unwrap();

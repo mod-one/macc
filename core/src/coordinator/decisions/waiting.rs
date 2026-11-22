@@ -230,49 +230,28 @@ pub fn gate_revision(root: &Path, tasks: &[String]) -> crate::Result<Vec<serde_j
 /// refresh also gets a cycle to run sync; sync clears that marker on refusal or
 /// budget exhaustion. External recovery belongs to a stopped engine/supervisor.
 pub fn human_wait_count(registry: &crate::coordinator::model::TaskRegistry) -> usize {
-    if registry.tasks.iter().any(|t| {
-        t.state == "blocked"
-            && t.task_runtime.last_error_code.as_deref() != Some("E905")
-            && t.task_runtime.extra.contains_key("decision_wait")
-            && t.task_runtime
-                .extra
-                .get("native_context_refresh")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-            && t.task_runtime
-                .extra
-                .get("decision_wait_status")
-                .and_then(serde_json::Value::as_str)
-                != Some("pending_human")
-    }) {
-        return 0;
-    }
-    registry
-        .tasks
-        .iter()
-        .filter(|t| {
-            t.state == "blocked"
-                && t.task_runtime.last_error_code.as_deref() != Some("E905")
-                && t.task_runtime
-                    .extra
-                    .get("native_context_refresh")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-        })
-        .count()
-        + registry.waiting_approval_count()
-        + registry
-            .tasks
-            .iter()
-            .filter(|t| {
-                t.task_runtime.last_error_code.as_deref() != Some("E905")
-                    && t.task_runtime
-                        .extra
-                        .get("decision_wait_status")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("pending_human")
-            })
-            .count()
+    let native_waits = registry.tasks.iter().filter(|task| {
+        let runtime = &task.task_runtime;
+        if runtime.last_error_code.as_deref() == Some("E905") {
+            return false;
+        }
+        let human = runtime
+            .extra
+            .get("decision_wait_status")
+            .and_then(serde_json::Value::as_str)
+            == Some("pending_human");
+        let refreshing = runtime
+            .extra
+            .get("native_context_refresh")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        match task.state.as_str() {
+            "blocked" => human || refreshing,
+            "todo" => human,
+            _ => false,
+        }
+    });
+    registry.waiting_approval_count() + native_waits.count()
 }
 
 #[cfg(test)]
@@ -333,8 +312,8 @@ mod handoff_tests {
         reg.tasks.push(serde_json::from_value(serde_json::json!({"id":"EXTERNAL","state":"blocked","task_runtime":{"last_error_code":"E903","decision_wait":"real-device-request","decision_wait_status":"blocked_external"}})).unwrap());
         assert_eq!(
             human_wait_count(&reg),
-            0,
-            "a separate real external prerequisite still requires handoff"
+            1,
+            "an external prerequisite must not cancel an independent refresh"
         );
         reg.tasks.last_mut().unwrap().task_runtime.extra.insert(
             "decision_wait_status".into(),

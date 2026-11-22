@@ -220,7 +220,17 @@ pub enum ControlPlaneDecision {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StallDiagnosis {
     pub lines: Vec<String>,
-    pub terminal_blocked: bool,
+    pub disposition: StallDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StallDisposition {
+    /// No registry diagnosis is available. Use the cycle counts.
+    #[default]
+    Unknown,
+    WaitingForApproval,
+    Blocked,
+    Unexplained,
 }
 
 pub struct CoordinatorRunController {
@@ -1519,11 +1529,9 @@ impl CoordinatorRunController {
     where
         F: FnOnce() -> StallDiagnosis,
     {
-        // A human approval gate is a checkpoint the run must wait at: nothing
-        // is stalled, no worker is busy, and the only thing that can move it is
-        // an operator decision. Never abort for "no progress" while one is
-        // open; the dispatcher resumes on its own once the quorum is met.
-        if counts.waiting_approval > 0 && counts.active == 0 {
+        // With no queued work an open gate can wait indefinitely without a worker.
+        // With queued work, diagnose its dependencies before suppressing the watchdog.
+        if counts.waiting_approval > 0 && counts.active == 0 && counts.todo == 0 {
             self.no_progress_cycles = 0;
             self.previous_counts = Some(counts);
             return Ok(ControlPlaneDecision::Continue);
@@ -1563,6 +1571,12 @@ impl CoordinatorRunController {
                 None => String::new(),
             };
             let stalled = diagnose();
+            if stalled.disposition == StallDisposition::WaitingForApproval
+                || (stalled.disposition == StallDisposition::Unknown && counts.waiting_approval > 0)
+            {
+                self.no_progress_cycles = 0;
+                return Ok(ControlPlaneDecision::Continue);
+            }
             let diagnosis = if stalled.lines.is_empty() {
                 String::new()
             } else {
@@ -1576,7 +1590,7 @@ impl CoordinatorRunController {
                         .join("\n")
                 )
             };
-            if stalled.terminal_blocked {
+            if stalled.disposition == StallDisposition::Blocked {
                 let blocking_diagnosis = stalled
                     .lines
                     .iter()
@@ -1595,7 +1609,9 @@ impl CoordinatorRunController {
         }
 
         if let Some(timeout) = self.cfg.timeout {
-            if self.started.elapsed() >= timeout {
+            if !(counts.waiting_approval > 0 && counts.active == 0)
+                && self.started.elapsed() >= timeout
+            {
                 return Err(MaccError::Validation(format!(
                     "Coordinator run timed out after {} seconds. Run `macc coordinator status` and `macc logs tail --component coordinator`.",
                     timeout.as_secs()
@@ -2853,8 +2869,8 @@ pub(crate) async fn run_single_prd_control_plane(
                 "command_end",
                 "-",
                 "run",
-                "failed",
-                &format!("Coordinator run failed: {}", err),
+                result_label,
+                &format!("Coordinator run {result_label}: {err}"),
                 "blocking",
             );
         }

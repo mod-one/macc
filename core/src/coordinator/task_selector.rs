@@ -1,5 +1,7 @@
+mod dependency_paths;
 use crate::coordinator::model::{Task, TaskRegistry};
 use crate::coordinator::rate_limit::{is_task_delayed, is_tool_throttled, ToolThrottleRegistry};
+use dependency_paths::{dependency_paths, is_blocked_dependency};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -268,47 +270,15 @@ pub struct UnschedulableTask {
     /// Branch still attached to the task, when it holds one. The caller can
     /// enrich the reason with how much unmerged work is sitting on it.
     pub branch: Option<String>,
-    /// This entry is itself a terminally blocked task.
-    pub blocked_root: bool,
-    /// This todo task reaches a blocked root through its dependency graph.
-    pub depends_on_blocked: bool,
+    pub cause: DispatchWait,
 }
 
-fn blocked_dependency_path<'a>(
-    task: &'a Task,
-    tasks_by_id: &HashMap<&str, &'a Task>,
-    satisfied_ids: &HashSet<String>,
-    visiting: &mut HashSet<String>,
-) -> Option<Vec<String>> {
-    if !visiting.insert(task.id.clone()) {
-        return None;
-    }
-    for dependency_id in task.dependency_ids() {
-        if satisfied_ids.contains(&dependency_id) {
-            continue;
-        }
-        let Some(dependency) = tasks_by_id.get(dependency_id.as_str()).copied() else {
-            continue;
-        };
-        if matches!(
-            dependency.workflow_state(),
-            Some(
-                crate::coordinator::WorkflowState::Blocked
-                    | crate::coordinator::WorkflowState::Rejected
-            )
-        ) || (dependency.is_merged() && !dependency.gate_verdict_satisfies_dependencies())
-        {
-            return Some(vec![task.id.clone(), dependency.id.clone()]);
-        }
-        if let Some(mut path) =
-            blocked_dependency_path(dependency, tasks_by_id, satisfied_ids, visiting)
-        {
-            path.insert(0, task.id.clone());
-            return Some(path);
-        }
-    }
-    visiting.remove(&task.id);
-    None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchWait {
+    BlockedRoot,
+    BlockedDependency,
+    ApprovalDependency,
+    Other,
 }
 
 fn blocked_task_reason(task: &Task) -> String {
@@ -428,8 +398,7 @@ pub fn diagnose_unschedulable_tasks(
             id: "-".to_string(),
             reason: format!("dispatch blocked: {:?}", reason),
             branch: None,
-            blocked_root: false,
-            depends_on_blocked: false,
+            cause: DispatchWait::Other,
         });
         return out;
     }
@@ -448,8 +417,7 @@ pub fn diagnose_unschedulable_tasks(
                 config.max_parallel
             ),
             branch: None,
-            blocked_root: false,
-            depends_on_blocked: false,
+            cause: DispatchWait::Other,
         });
         return out;
     }
@@ -488,10 +456,11 @@ pub fn diagnose_unschedulable_tasks(
                 id: task.id.clone(),
                 reason,
                 branch: task.branch().map(ToString::to_string),
-                blocked_root: task.task_runtime.last_error_code.as_deref() != Some("E905")
-                    && !shared,
-                depends_on_blocked: task.task_runtime.last_error_code.as_deref() == Some("E905")
-                    || shared,
+                cause: if shared || task.task_runtime.last_error_code.as_deref() == Some("E905") {
+                    DispatchWait::BlockedDependency
+                } else {
+                    DispatchWait::BlockedRoot
+                },
             });
         }
     }
@@ -508,8 +477,7 @@ pub fn diagnose_unschedulable_tasks(
                 id: task.id.clone(),
                 reason,
                 branch: branch.clone(),
-                blocked_root: false,
-                depends_on_blocked: false,
+                cause: DispatchWait::Other,
             });
         };
 
@@ -533,8 +501,11 @@ pub fn diagnose_unschedulable_tasks(
                 id: task.id.clone(),
                 reason: format!("worktree attached, not resumable: {detail}"),
                 branch,
-                blocked_root: task.is_awaiting_same_worktree_retry(),
-                depends_on_blocked: false,
+                cause: if task.is_awaiting_same_worktree_retry() {
+                    DispatchWait::BlockedRoot
+                } else {
+                    DispatchWait::Other
+                },
             });
             continue;
         }
@@ -550,11 +521,11 @@ pub fn diagnose_unschedulable_tasks(
             .collect();
         if !unmet.is_empty() {
             if let Some(path) =
-                blocked_dependency_path(task, &tasks_by_id, &satisfied_ids, &mut HashSet::new())
+                dependency_paths(task, &tasks_by_id, &satisfied_ids, is_blocked_dependency).next()
             {
                 let root_id = path.last().cloned().unwrap_or_default();
                 let root_reason = tasks_by_id
-                    .get(root_id.as_str())
+                    .get(root_id)
                     .map(|root| blocked_task_reason(root))
                     .unwrap_or_else(|| "blocked".to_string());
                 out.push(UnschedulableTask {
@@ -564,29 +535,28 @@ pub fn diagnose_unschedulable_tasks(
                         path.join(" -> ")
                     ),
                     branch: branch.clone(),
-                    blocked_root: false,
-                    depends_on_blocked: true,
+                    cause: DispatchWait::BlockedDependency,
                 });
                 continue;
             }
-            let waiting: Vec<String> = unmet
-                .iter()
-                .filter(|dep| {
-                    registry
-                        .tasks
-                        .iter()
-                        .any(|t| &t.id == *dep && t.is_awaiting_approval())
-                })
-                .cloned()
-                .collect();
-            if !waiting.is_empty() {
-                push(
-                    &mut out,
-                    format!(
-                        "waiting on human approval of {} (no worker is used; run `macc coordinator approve`)",
-                        waiting.join(", ")
+            let approvals: Vec<_> = dependency_paths(
+                task,
+                &tasks_by_id,
+                &satisfied_ids,
+                Task::is_awaiting_approval,
+            )
+            .map(|path| path.join(" -> "))
+            .collect();
+            if !approvals.is_empty() {
+                out.push(UnschedulableTask {
+                    id: task.id.clone(),
+                    reason: format!(
+                        "waiting on human approval via {} (open Inbox > Approvals)",
+                        approvals.join(", ")
                     ),
-                );
+                    branch,
+                    cause: DispatchWait::ApprovalDependency,
+                });
                 continue;
             }
             push(
@@ -707,12 +677,13 @@ pub fn reconcile_task_blocks(registry: &mut TaskRegistry, now: &str) -> Vec<Stri
 
             let propagated = task.task_runtime.last_error_code.as_deref() == Some("E905");
             let path = tasks_by_id.get(task.id.as_str()).and_then(|snapshot_task| {
-                blocked_dependency_path(
+                dependency_paths(
                     snapshot_task,
                     &tasks_by_id,
                     &satisfied_ids,
-                    &mut HashSet::new(),
+                    is_blocked_dependency,
                 )
+                .next()
             });
             if let Some(path) = path {
                 if task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo)
@@ -720,7 +691,7 @@ pub fn reconcile_task_blocks(registry: &mut TaskRegistry, now: &str) -> Vec<Stri
                 {
                     let root_id = path.last().cloned().unwrap_or_default();
                     let root_reason = tasks_by_id
-                        .get(root_id.as_str())
+                        .get(root_id)
                         .map(|root| blocked_task_reason(root))
                         .unwrap_or_else(|| "blocked".to_string());
                     let detail = format!(
@@ -1635,10 +1606,15 @@ mod tests {
     fn dependency_blocks_are_affected_tasks_not_additional_roots() {
         let registry=TaskRegistry::from_value(&json!({"tasks":[{"id":"ROOT","state":"blocked","task_runtime":{"last_error_code":"E103"}},{"id":"CHILD","state":"blocked","dependencies":["ROOT"],"task_runtime":{"last_error_code":"E905"}}]})).unwrap();
         let diagnosed = diagnose_unschedulable_tasks(&registry, &parked_cfg(1));
-        assert_eq!(diagnosed.iter().filter(|d| d.blocked_root).count(), 1);
+        assert_eq!(
+            diagnosed
+                .iter()
+                .filter(|d| d.cause == DispatchWait::BlockedRoot)
+                .count(),
+            1
+        );
         let child = diagnosed.iter().find(|d| d.id == "CHILD").unwrap();
-        assert!(child.depends_on_blocked);
-        assert!(!child.blocked_root);
+        assert_eq!(child.cause, DispatchWait::BlockedDependency);
     }
 
     #[test]
@@ -1664,7 +1640,7 @@ mod tests {
 
         let root = diagnosed
             .iter()
-            .find(|task| task.blocked_root)
+            .find(|task| task.cause == DispatchWait::BlockedRoot)
             .expect("blocked root");
         assert_eq!(root.id, "L4K-ROLLOUT-001");
         assert!(root.reason.contains("E902"));
@@ -1674,7 +1650,7 @@ mod tests {
             .iter()
             .find(|task| task.id == "L4K-VERIFY-002")
             .expect("transitive dependent");
-        assert!(leaf.depends_on_blocked);
+        assert_eq!(leaf.cause, DispatchWait::BlockedDependency);
         assert!(leaf.reason.contains(
             "L4K-VERIFY-002 -> L4K-REACTFLOW-CLEANUP-001 -> L4K-ROLLOUT-ACCEPTANCE-001 -> L4K-ROLLOUT-001"
         ));
@@ -1698,7 +1674,7 @@ mod tests {
             .find(|task| task.id == "CURRENT")
             .expect("current task diagnosis");
 
-        assert!(!current.depends_on_blocked);
+        assert_eq!(current.cause, DispatchWait::Other);
         assert_eq!(current.reason, "waiting on dependencies: MISSING");
     }
 

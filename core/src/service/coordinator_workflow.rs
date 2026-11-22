@@ -2384,9 +2384,7 @@ pub fn coordinator_record_gate_decision(
     if !changed.is_empty() {
         line.push_str(&format!(". Reconciled: {}", changed.join(", ")));
     }
-    let pending = approval::pending_approvals(&registry, &|rev| {
-        approval::revision_diff_stat(&paths.root, rev)
-    });
+    let pending = approval::project_pending_approvals(&paths.root, &registry);
     Ok((line, pending))
 }
 

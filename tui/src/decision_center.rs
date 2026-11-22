@@ -273,17 +273,31 @@ impl Center {
         self.current = self
             .list()
             .into_iter()
-            .find(|d| d.status == "pending_human")
+            .find(|d| Self::inbox_pending(&d.status))
             .or_else(|| self.list().pop());
         self.open = true;
         self.manual = true;
         self.scroll = 0;
         self.focus = 0;
     }
-    pub(crate) fn inbox_rows(&self, history: bool) -> Vec<dm::Decision> {
-        self.list()
+    fn inbox_pending(status: &str) -> bool {
+        matches!(status, "pending_human" | "blocked_external")
+    }
+    fn inbox_entries(&self, history: bool) -> impl Iterator<Item = &Value> {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot["decisions"].as_array())
             .into_iter()
-            .filter(|d| (d.status == "pending_human") != history)
+            .flatten()
+            .filter(move |decision| {
+                decision["status"]
+                    .as_str()
+                    .is_some_and(|status| Self::inbox_pending(status) != history)
+            })
+    }
+    pub(crate) fn inbox_rows(&self, history: bool) -> Vec<dm::Decision> {
+        self.inbox_entries(history)
+            .filter_map(|decision| serde_json::from_value(decision.clone()).ok())
             .collect()
     }
     pub(crate) fn show_exact(&mut self, decision: dm::Decision) {
@@ -291,25 +305,14 @@ impl Center {
         self.current = Some(decision);
     }
     pub(crate) fn pending_task_index(&self, tasks: &[String]) -> Option<usize> {
-        self.snapshot.as_ref()?["decisions"]
-            .as_array()?
-            .iter()
-            .filter(|d| d["status"] == "pending_human")
-            .position(|d| {
-                d["request"]["task_id"]
-                    .as_str()
-                    .is_some_and(|id| tasks.iter().any(|t| t == id))
-            })
+        self.inbox_entries(false).position(|d| {
+            d["request"]["task_id"]
+                .as_str()
+                .is_some_and(|id| tasks.iter().any(|task| task == id))
+        })
     }
     pub fn pending(&self) -> usize {
-        self.snapshot
-            .as_ref()
-            .and_then(|v| v["decisions"].as_array())
-            .map_or(0, |rows| {
-                rows.iter()
-                    .filter(|d| d["status"] == "pending_human")
-                    .count()
-            })
+        self.inbox_entries(false).count()
     }
     fn navigation_key(&mut self, key: KeyCode) -> Option<Action> {
         self.save_drafts();
