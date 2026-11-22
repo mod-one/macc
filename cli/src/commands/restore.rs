@@ -115,7 +115,6 @@ impl Command for RestoreCommand {
             };
 
             let opts = macc_core::save::RestoreOptions {
-                apply: self.apply,
                 config_only: self.config_only,
                 sessions: self.sessions,
                 no_sessions: self.no_sessions,
@@ -124,7 +123,7 @@ impl Command for RestoreCommand {
                 yes: self.yes,
             };
 
-            if !self.yes {
+            if !self.dry_run && !self.yes {
                 println!("Restoring MACC save \"{}\"...", name);
                 if !crate::confirm_yes_no("Proceed with restore [y/N]? ")? {
                     println!("Restore cancelled.");
@@ -133,9 +132,13 @@ impl Command for RestoreCommand {
             }
 
             macc_core::save::restore_save_bundle(&paths, &name, &opts)?;
+            if self.dry_run {
+                println!("Restore preview for {name}: bundle checks completed. Storage compatibility is checked during restore.");
+                return Ok(());
+            }
             println!("Restore completed successfully.");
 
-            if opts.apply {
+            if self.apply {
                 println!("Running macc apply...");
                 crate::commands::lifecycle_support::apply(
                     &self.app, None, false, // dry_run

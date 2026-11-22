@@ -77,8 +77,11 @@ pub fn capture_backup(root: &Path, directory: &Path) -> crate::Result<Option<Con
             .into(),
     }))
 }
-pub fn validate_backup(root: &Path, source: &Path, meta: &ControlSnapshot) -> crate::Result<()> {
-    crate::session_store::require_stopped(root)?;
+pub(crate) fn validated_snapshot(
+    root: &Path,
+    source: &Path,
+    meta: &ControlSnapshot,
+) -> crate::Result<Store> {
     if meta.version != 1
         || meta.project_root
             != root
@@ -93,6 +96,12 @@ pub fn validate_backup(root: &Path, source: &Path, meta: &ControlSnapshot) -> cr
     if snapshot.project_id != meta.project_id || snapshot.state_digest()? != meta.state_digest {
         return Err(error("Decision backup project identity mismatch"));
     }
+    Ok(snapshot)
+}
+
+pub fn validate_backup(root: &Path, source: &Path, meta: &ControlSnapshot) -> crate::Result<()> {
+    crate::session_store::require_stopped(root)?;
+    let snapshot = validated_snapshot(root, source, meta)?;
     let location = Store::location(root)?;
     if location.exists() {
         let current = Store::open(root)?;

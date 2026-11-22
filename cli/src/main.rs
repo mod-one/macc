@@ -360,8 +360,8 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Run macc apply after restore
-        #[arg(long)]
+        /// Run macc apply after restoring (incompatible with --dry-run)
+        #[arg(long, conflicts_with = "dry_run")]
         apply: bool,
         /// Restore only the config file
         #[arg(long)]

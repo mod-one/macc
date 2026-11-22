@@ -172,7 +172,12 @@ pub(super) fn restore_from(
     let restore_sessions = !config_only
         && !opts.no_sessions
         && (opts.sessions || manifest.includes.coordinator_sessions);
-    let _session_guard = if restore_sessions {
+    let skill_lock = if manifest.includes.config {
+        super::skill_locks::load(&target_save_dir)?
+    } else {
+        None
+    };
+    let _session_guard = if restore_sessions && !opts.dry_run {
         Some(crate::session_store::lock(&paths.root)?)
     } else {
         None
@@ -180,7 +185,11 @@ pub(super) fn restore_from(
     let sqlite_source = if restore_sessions {
         if let Some(meta) = &manifest.session_store {
             let source = super::sessions::payload(&target_save_dir, &meta.database_path)?;
-            crate::session_store::bundle::validate_locked(&paths.root, &source, meta)?;
+            if opts.dry_run {
+                crate::session_store::bundle::validate_snapshot(&paths.root, &source, meta)?;
+            } else {
+                crate::session_store::bundle::validate_locked(&paths.root, &source, meta)?;
+            }
             Some(source)
         } else {
             if crate::session_store::is_sqlite(&paths.root)? {
@@ -194,7 +203,11 @@ pub(super) fn restore_from(
     let decision_source = if !config_only && !opts.no_sessions {
         if let Some(meta) = &manifest.decision_store {
             let source = super::sessions::payload(&target_save_dir, &meta.database_path)?;
-            crate::coordinator::decisions::validate_backup(&paths.root, &source, meta)?;
+            if opts.dry_run {
+                crate::coordinator::decisions::validated_snapshot(&paths.root, &source, meta)?;
+            } else {
+                crate::coordinator::decisions::validate_backup(&paths.root, &source, meta)?;
+            }
             Some(source)
         } else {
             None
@@ -202,24 +215,16 @@ pub(super) fn restore_from(
     } else {
         None
     };
-    let skill_lock = if manifest.includes.config {
-        super::skill_locks::load(&target_save_dir)?
-    } else {
-        None
-    };
     if opts.dry_run {
         return Ok(());
     }
-
     if let (Some(source), Some(meta)) = (&decision_source, &manifest.decision_store) {
         crate::coordinator::decisions::restore_backup(&paths.root, source, meta)?;
     }
     // 1. Restore config
     // SQLite preflight above runs before any configuration is overwritten.
     if let (Some(source), Some(meta)) = (&sqlite_source, &manifest.session_store) {
-        if !opts.dry_run {
-            crate::session_store::bundle::restore_locked(&paths.root, source, meta)?;
-        }
+        crate::session_store::bundle::restore_locked(&paths.root, source, meta)?;
     }
     if manifest.includes.config {
         if let Some(config_rel) = &manifest.paths.config {

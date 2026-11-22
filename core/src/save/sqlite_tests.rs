@@ -34,7 +34,6 @@ fn options() -> SaveOptions {
 }
 fn restore_options() -> RestoreOptions {
     RestoreOptions {
-        apply: false,
         config_only: false,
         sessions: false,
         no_sessions: false,

@@ -50,7 +50,6 @@ pub struct SaveOptions {
 }
 
 pub struct RestoreOptions {
-    pub apply: bool,
     pub config_only: bool,
     pub sessions: bool,
     pub no_sessions: bool,

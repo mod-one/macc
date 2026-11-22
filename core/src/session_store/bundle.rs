@@ -56,8 +56,7 @@ fn read(path: &Path) -> Result<Connection> {
     crate::o2::ready(&db)?;
     Ok(db)
 }
-pub(crate) fn validate_locked(root: &Path, source: &Path, meta: &Snapshot) -> Result<()> {
-    migration::stopped(root)?;
+pub(crate) fn validate_snapshot(root: &Path, source: &Path, meta: &Snapshot) -> Result<()> {
     if meta.version != 1
         || meta.project_root
             != root
@@ -82,6 +81,12 @@ pub(crate) fn validate_locked(root: &Path, source: &Path, meta: &Snapshot) -> Re
     {
         return Err(error("Snapshot identity/state mismatch"));
     }
+    Ok(())
+}
+
+pub(crate) fn validate_locked(root: &Path, source: &Path, meta: &Snapshot) -> Result<()> {
+    migration::stopped(root)?;
+    validate_snapshot(root, source, meta)?;
     if let Some(a) = authority(root)? {
         if a.project_id != meta.project_id {
             return Err(error(

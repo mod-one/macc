@@ -62,7 +62,6 @@ impl Command for InitCommand {
             };
 
             let opts = macc_core::save::RestoreOptions {
-                apply: self.apply,
                 config_only: false,
                 sessions: true,
                 no_sessions: false,
@@ -134,7 +133,6 @@ impl Command for InitCommand {
 
                 if choice.is_empty() || choice == "y" || choice == "yes" {
                     let opts = macc_core::save::RestoreOptions {
-                        apply: self.apply,
                         config_only: false,
                         sessions: true,
                         no_sessions: false,
