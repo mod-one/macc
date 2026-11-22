@@ -139,6 +139,9 @@ impl CheckRef {
 struct Packet {
     proposal: Proposal,
     binding: serde_json::Value,
+    // Omitted for original packets so existing content addresses remain valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_packet: Option<String>,
     script_sha256: Option<String>,
 }
 

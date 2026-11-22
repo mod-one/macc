@@ -53,7 +53,7 @@ fn observe(
         .as_ref()
         .ok_or_else(|| error("Technical condition has no script"))?;
     let candidate = binding::candidate(root, task)?;
-    let commit = crate::git::head_commit(&candidate)?;
+    let commit = &packet.binding["commit"];
     let deadline = Instant::now() + Duration::from_secs(3);
     let observation = match observations::collect(&v.source, &candidate, deadline)? {
         observations::Reading::Observed(observation) => observation,
@@ -82,21 +82,33 @@ fn check_task(
     task: &mut Task,
     reference: &mut CheckRef,
 ) -> Result<Outcome> {
-    let packet = packets::load(root, reference)?;
-    verify_binding(root, prd, task, &packet)?;
-    let outcome = observe(root, task, &packet, &mut reference.observation_sha256)?;
+    let mut packet = packets::load_for_replay(root, prd, task, reference)?;
+    let mut outcome = observe(root, task, &packet, &mut reference.observation_sha256)?;
     if outcome.status != Status::Ready {
         return Ok(outcome);
     }
-    let p = &packet.proposal;
     // Stage recovery in a copy. A failed reconciliation keeps the original task blocked.
     let mut next = task.clone();
-    if p.decision.is_none() {
+    if packet.proposal.decision.is_none() {
         crate::coordinator::worktree_recovery::recover_task(root, &mut next)?;
         crate::session_store::checkpoints::recovery::ensure_task_ready(root, &next.id)?;
         if next.has_worktree_attached() {
             let branch = CoordinatorConfigResolved::resolve(config).reference_branch;
-            let base = repair_handoff::reconcile_task(root, &mut next, &branch)?;
+            let original = packet.binding["commit"]
+                .as_str()
+                .ok_or_else(|| error("Missing candidate commit"))?;
+            let base =
+                repair_handoff::reconcile_task_from(root, &mut next, &branch, Some(original))?;
+            if base != original {
+                packet = packet.successor(&reference.id, &base);
+                reference.id = packets::save(root, &packet)?;
+            }
+            reference.observation_sha256 = None;
+            verify_binding(root, prd, &next, &packet)?;
+            outcome = observe(root, &next, &packet, &mut reference.observation_sha256)?;
+            if outcome.status != Status::Ready {
+                return Ok(outcome);
+            }
             next.task_runtime.extra.insert(
                 repair_handoff::RESUME_KEY.into(),
                 json!({"base":base,"evidence":reference.id}),
@@ -105,6 +117,7 @@ fn check_task(
         }
     }
     verify_binding(root, prd, &next, &packet)?;
+    let p = &packet.proposal;
     if p.phase == "merge" {
         dm::merge_ready(root, &next.id)?
     }
@@ -155,9 +168,14 @@ pub fn replay_at_startup(
     config: Option<&CoordinatorConfig>,
     env: &CoordinatorEnvConfig,
 ) -> Result<()> {
+    let _unblock = crate::fs_lock::AdvisoryLock::acquire(
+        &root.join(".macc/state/unblock.lock"),
+        Duration::ZERO,
+        "replay retained task checks",
+    )?;
     let args = packets::storage_args(config, env);
-    let mut registry =
-        TaskRegistry::from_value(&state::coordinator_state_registry_load(root, &args)?)?;
+    let original = state::coordinator_state_registry_load(root, &args)?;
+    let mut registry = TaskRegistry::from_value(&original)?;
     let mut checked = false;
     let mut released = false;
     for task in &mut registry.tasks {
@@ -206,6 +224,9 @@ pub fn replay_at_startup(
         task.task_runtime.resume_check = Some(reference);
     }
     if checked {
+        if state::coordinator_state_registry_load(root, &args)? != original {
+            return Err(error("The task registry changed during replay. Restart to check the current block and phase"));
+        }
         state::coordinator_state_registry_save(root, &args, &registry.to_value()?)?;
     }
     if released {

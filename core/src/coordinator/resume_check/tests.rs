@@ -54,7 +54,10 @@ struct Project {
 }
 impl Project {
     fn new() -> Self {
-        let proposal = Proposal {
+        Self::with_proposal(Self::ci_proposal())
+    }
+    fn ci_proposal() -> Proposal {
+        Proposal {
             task_id: "CI".into(),
             phase: "dev".into(),
             category: Category::TechnicalCondition,
@@ -67,8 +70,7 @@ impl Project {
                 },
                 script: CI.into(),
             }),
-        };
-        Self::with_proposal(proposal)
+        }
     }
     fn with_proposal(proposal: Proposal) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -116,15 +118,21 @@ impl Project {
         replay_at_startup(
             self.root(),
             &self.root().join("prd.json"),
-            None,
+            Some(&crate::config::CoordinatorConfig {
+                reference_branch: Some("main".into()),
+                ..Default::default()
+            }),
             &CoordinatorEnvConfig::default(),
         )
         .unwrap();
         self.tasks().remove(0)
     }
     fn report(&self, commit: &str) {
-        fs::create_dir_all(self.root().join("reports")).unwrap();
-        fs::write(self.root().join("reports/ci.json"),json!({"commit":commit,"environment":"staging","finished_at":chrono::Utc::now().timestamp(),"result":"passed"}).to_string()).unwrap()
+        self.report_at(self.root(), commit)
+    }
+    fn report_at(&self, worktree: &Path, commit: &str) {
+        fs::create_dir_all(worktree.join("reports")).unwrap();
+        fs::write(worktree.join("reports/ci.json"),json!({"commit":commit,"environment":"staging","finished_at":chrono::Utc::now().timestamp(),"result":"passed"}).to_string()).unwrap()
     }
 }
 fn git(root: &Path, args: &[&str]) {
@@ -391,5 +399,96 @@ fn a_custom_time_window_can_run_without_an_artifact_or_device() {
         p.install();
         assert_eq!(outcome(&p.replay()).status, expected);
         assert_eq!(p.tasks()[1].state, "blocked");
+    }
+}
+
+#[test]
+fn reconciliation_rechecks_the_retained_phase_on_its_new_commit() {
+    for commit_specific in [false, true] {
+        let mut proposal = Project::ci_proposal();
+        proposal.phase = "review".into();
+        if !commit_specific {
+            proposal.criterion = "The maintenance window is open".into();
+            proposal.verifier = Some(Verifier {
+                source: Source::Inputs { fields: Default::default() },
+                script: "SELECT json_object('status','ready','detail','Window open') WHERE :input ->> '$.now_unix' > 0".into(),
+            });
+        }
+        let project = Project::with_proposal(proposal);
+        let root = project.root();
+        git(root, &["config", "user.name", "Fixture"]);
+        git(root, &["config", "user.email", "test@example.invalid"]);
+        fs::write(root.join(".gitignore"), ".macc/\nreports/\n").unwrap();
+        git(root, &["add", ".gitignore"]);
+        git(root, &["commit", "-qm", "ignore local artifacts"]);
+        let worker = root.join(".macc/worktree/worker");
+        let branch = "ai/fixture/worker";
+        git(
+            root,
+            &["worktree", "add", "-qb", branch, worker.to_str().unwrap()],
+        );
+        fs::create_dir_all(worker.join(".macc")).unwrap();
+        fs::write(
+            worker.join(".macc/worktree.json"),
+            json!({
+                "id":"worker","slug":"worker","tool":"fixture","branch":branch,"base":"main"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let args = Default::default();
+        let mut registry = state::coordinator_state_registry_load(root, &args).unwrap();
+        registry["tasks"][0]["worktree"] =
+            json!({"branch":branch,"base_branch":"main","worktree_path":worker});
+        registry["tasks"][0]["task_runtime"]["current_phase"] = json!("review");
+        state::coordinator_state_registry_save(root, &args, &registry).unwrap();
+        let previous = project.install();
+        let registered = state::coordinator_state_registry_load(root, &args).unwrap();
+        let old_head = crate::git::head_commit(&worker).unwrap();
+        if commit_specific {
+            project.report_at(&worker, &old_head);
+        }
+        git(
+            root,
+            &[
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Independent task advanced main",
+            ],
+        );
+        let head = crate::git::head_commit(root).unwrap();
+        let task = project.replay();
+        assert_eq!(
+            crate::git::head_commit(&worker).unwrap(),
+            head,
+            "{:?}",
+            outcome(&task)
+        );
+        let check = task.task_runtime.resume_check.as_deref().unwrap();
+        let packet = packets::load(root, check).unwrap();
+        assert_eq!(packet.previous_packet.as_deref(), Some(previous.as_str()));
+        assert_eq!(packet.binding["commit"], head);
+        let resumed = if commit_specific {
+            assert_eq!(task.state, "blocked");
+            assert_eq!(outcome(&task).status, Status::Waiting);
+            // Simulate interruption between packet publication and registry publication.
+            state::coordinator_state_registry_save(root, &args, &registered).unwrap();
+            let recovered = project.replay();
+            assert_eq!(outcome(&recovered).status, Status::Waiting);
+            assert_eq!(recovered.task_runtime.resume_check.unwrap().id, check.id);
+            project.report_at(&worker, &head);
+            project.replay()
+        } else {
+            task
+        };
+        assert_eq!(
+            outcome(&resumed).status,
+            Status::Ready,
+            "{:?}",
+            outcome(&resumed)
+        );
+        assert_eq!(resumed.state, "testing");
+        assert!(resumed.external_block_is_cleared());
     }
 }

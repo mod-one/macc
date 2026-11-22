@@ -30,17 +30,31 @@ pub(super) fn git(path: &Path, args: &[&str]) -> Result<String> {
 /// Successful reconciliation keeps the branch and leaves unfinished work uncommitted.
 pub fn reconcile(root: &Path, task: &Task, reference: &str) -> Result<String> {
     let _roles = super::worktree_roles::lock(root)?;
-    reconcile_inner(root, task, reference)
+    reconcile_inner(root, task, reference, None)
 }
 
 /// Supported recovery used by coordinator sync, unblock and supervisor repair.
 pub fn reconcile_task(root: &Path, task: &mut Task, reference: &str) -> Result<String> {
-    let _locks = super::worktree_roles::retained_locks(root, task)?;
-    super::worktree_recovery::recover_reserved(root, task)?;
-    reconcile_inner(root, task, reference)
+    reconcile_task_from(root, task, reference, None)
 }
 
-fn reconcile_inner(root: &Path, task: &Task, reference: &str) -> Result<String> {
+pub(super) fn reconcile_task_from(
+    root: &Path,
+    task: &mut Task,
+    reference: &str,
+    expected_head: Option<&str>,
+) -> Result<String> {
+    let _locks = super::worktree_roles::retained_locks(root, task)?;
+    super::worktree_recovery::recover_reserved(root, task)?;
+    reconcile_inner(root, task, reference, expected_head)
+}
+
+fn reconcile_inner(
+    root: &Path,
+    task: &Task,
+    reference: &str,
+    expected_head: Option<&str>,
+) -> Result<String> {
     let path = task.worktree_path().map(Path::new).ok_or_else(|| {
         MaccError::Validation(format!("Task {} has no retained worktree", task.id))
     })?;
@@ -85,6 +99,11 @@ fn reconcile_inner(root: &Path, task: &Task, reference: &str) -> Result<String> 
         "retained task reconciliation",
     )?;
     let head = git(path, &["rev-parse", "HEAD"])?;
+    if expected_head.is_some_and(|expected| expected != head) {
+        return Err(MaccError::Validation(
+            "Candidate changed before retained task reconciliation".into(),
+        ));
+    }
     let target = git(
         root,
         &["rev-parse", "--verify", &format!("refs/heads/{reference}")],

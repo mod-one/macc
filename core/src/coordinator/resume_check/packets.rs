@@ -33,6 +33,16 @@ fn path(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(root.join(relative))
 }
 
+pub(super) fn save(root: &Path, packet: &Packet) -> Result<String> {
+    let id = dm::digest(packet);
+    crate::atomic_write(
+        &ProjectPaths::from_root(root),
+        &path(root, &id)?,
+        &serde_json::to_vec_pretty(packet).map_err(error)?,
+    )?;
+    Ok(id)
+}
+
 pub(super) fn load(root: &Path, r: &CheckRef) -> Result<Packet> {
     let file = path(root, &r.id)?;
     let bytes = super::observations::read_regular(&file, 256 * 1024)?
@@ -55,6 +65,44 @@ pub(super) fn load(root: &Path, r: &CheckRef) -> Result<Packet> {
         ));
     }
     Ok(packet)
+}
+
+impl Packet {
+    /// Only the candidate commit may change during a native handoff.
+    pub(super) fn successor(mut self, previous: &str, commit: &str) -> Self {
+        self.previous_packet = Some(previous.to_owned());
+        self.binding["commit"] = serde_json::json!(commit);
+        self
+    }
+}
+
+pub(super) fn load_for_replay(
+    root: &Path,
+    prd: &Path,
+    task: &Task,
+    reference: &mut CheckRef,
+) -> Result<Packet> {
+    let packet = load(root, reference)?;
+    let current = binding::version(root, prd, task, &packet.proposal)?;
+    if current == packet.binding {
+        return Ok(packet);
+    }
+    // The registry write may have been interrupted after the handoff. Accept only
+    // a saved successor of this packet whose complete binding still matches.
+    if let Some(commit) = current["commit"].as_str() {
+        let successor = packet.successor(&reference.id, commit);
+        if successor.binding == current {
+            let mut next = reference.clone();
+            next.id = dm::digest(&successor);
+            if let Ok(saved) = load(root, &next) {
+                reference.id = next.id;
+                return Ok(saved);
+            }
+        }
+    }
+    Err(error(
+        "The recorded block or candidate changed. A fresh diagnosis is required",
+    ))
 }
 
 /// Capture the diagnosed commits and PRD contracts before sending the incident to the agent.
@@ -155,6 +203,7 @@ impl DiagnosisSnapshot {
                 return Err(error("Task changed during diagnosis"));
             }
             let packet = Packet {
+                previous_packet: None,
                 proposal: proposal.clone(),
                 binding,
                 script_sha256: proposal
@@ -162,13 +211,7 @@ impl DiagnosisSnapshot {
                     .as_ref()
                     .map(|v| dm::evidence_digest(v.script.as_bytes())),
             };
-            let id = dm::digest(&packet);
-            let dest = path(root, &id)?;
-            crate::atomic_write(
-                &paths,
-                &dest,
-                &serde_json::to_vec_pretty(&packet).map_err(error)?,
-            )?;
+            let id = save(root, &packet)?;
             if task
                 .task_runtime
                 .resume_check
