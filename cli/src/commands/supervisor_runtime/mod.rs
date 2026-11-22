@@ -16,6 +16,7 @@ mod report;
 mod restart_observation;
 mod resume_checks;
 mod review_protocol_recovery;
+mod scoped_prd_recovery;
 mod shutdown;
 mod task_requeue;
 mod workspace;

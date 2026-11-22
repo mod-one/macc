@@ -6,11 +6,19 @@ use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+#[path = "run_summary_diagnosis.rs"]
+mod diagnosis;
+pub use diagnosis::{publish_incident, SupervisorAnnotation};
+
 const RECENT_RUN_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinatorRunHistoryItem {
     pub run_id: String,
+    #[serde(default)]
+    pub epoch: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorAnnotation>,
     pub status: String,
     pub started_at: String,
     pub stopped_at: Option<String>,
@@ -20,6 +28,14 @@ pub struct CoordinatorRunHistoryItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinatorRunSummary {
     pub run_id: String,
+    #[serde(default)]
+    pub epoch: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_prd: Option<crate::coordinator::scoped_prd::Incident>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorAnnotation>,
     pub status: String,
     pub severity: String,
     pub headline: String,
@@ -43,6 +59,45 @@ pub struct CoordinatorRunSummary {
     /// belongs to another module (supervisor repair or another task).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub out_of_scope_paths: Vec<String>,
+}
+
+pub fn load_project_run_summary(
+    paths: &crate::ProjectPaths,
+    sqlite: &SqliteStorage,
+    registry: &TaskRegistry,
+) -> Result<Option<CoordinatorRunSummary>> {
+    let Some(mut summary) = load_latest_run_summary(sqlite, registry)? else {
+        return Ok(None);
+    };
+    for past in summary.recent_runs.iter_mut().skip(1) {
+        past.supervisor = diagnosis::historical_annotation(paths, past);
+    }
+    if !matches!(
+        summary.status.as_str(),
+        "failed" | "blocked" | "crashed" | "paused"
+    ) {
+        if matches!(summary.status.as_str(), "running" | "draining") {
+            summary.refresh_supervisor(paths);
+        }
+        return Ok(Some(summary));
+    }
+    if let Some(task) = summary
+        .task_id
+        .as_deref()
+        .and_then(|id| registry.find_task(id))
+    {
+        if let Some(info) = crate::coordinator::scoped_prd::describe(&paths.root, task) {
+            summary.headline = "Worker reuse blocked".into();
+            summary.cause = info.to_string();
+            summary.next_action = match info.cause {
+                crate::coordinator::scoped_prd::Cause::LegacyPerformerMarker => "Use native supervisor recovery to archive the historical marker and resume dispatch.".into(),
+                crate::coordinator::scoped_prd::Cause::UnverifiedFile => "Inspect the preserved file. Use a free worker or move the file to a safe location before retrying this task.".into(),
+            };
+            summary.scoped_prd = Some(info);
+        }
+    }
+    summary.refresh_supervisor(paths);
+    Ok(Some(summary))
 }
 
 pub fn load_latest_run_summary(
@@ -104,6 +159,12 @@ pub fn load_latest_run_summary(
 
     Ok(Some(CoordinatorRunSummary {
         run_id: latest.run_id.clone(),
+        epoch: latest.epoch,
+        task_revision: blocked_task
+            .map(crate::coordinator::control::task_revision)
+            .transpose()?,
+        scoped_prd: None,
+        supervisor: None,
         status: latest.status.clone(),
         severity: severity.to_string(),
         headline,
@@ -395,6 +456,8 @@ impl From<CoordinatorRun> for CoordinatorRunHistoryItem {
     fn from(run: CoordinatorRun) -> Self {
         Self {
             run_id: run.run_id,
+            epoch: run.epoch,
+            supervisor: None,
             status: run.status,
             started_at: run.started_at,
             stopped_at: run.stopped_at,

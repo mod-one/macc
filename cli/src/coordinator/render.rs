@@ -30,6 +30,15 @@ pub(crate) fn print_status_summary(repo_root: &Path, status: &CoordinatorStatus)
     if let Some(latest_error) = &status.latest_error {
         println!("Latest error: {}", latest_error);
     }
+    if let Some(summary) = &status.last_run_summary {
+        if let Some(note) = &summary.supervisor {
+            println!("Last result: {}", summary.headline);
+            println!("  Cause: {}", summary.cause);
+            print_supervisor_note(note);
+        } else {
+            print_previous_diagnosis(summary);
+        }
+    }
     if let Some(report) = &status.failure_report {
         println!("Failure report:");
         println!("  kind: {:?}", report.kind);
@@ -50,5 +59,24 @@ pub(crate) fn print_status_summary(repo_root: &Path, status: &CoordinatorStatus)
                 println!("    - {}", fix);
             }
         }
+    }
+}
+
+pub(crate) fn print_supervisor_note(note: &macc_core::service::run_summary::SupervisorAnnotation) {
+    println!("  {}: {}", note.heading(), note.diagnosis);
+    if let Some(result) = &note.outcome {
+        println!("  Outcome: {result}");
+    }
+    if let Some(action) = &note.next_action {
+        println!("  Supervisor next: {action}");
+    }
+}
+
+pub(crate) fn print_previous_diagnosis(
+    summary: &macc_core::service::run_summary::CoordinatorRunSummary,
+) {
+    if let Some((run, note)) = summary.previous_diagnosis() {
+        println!("Previous incident ({run}):");
+        print_supervisor_note(note);
     }
 }

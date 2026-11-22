@@ -170,6 +170,13 @@ fn print_coordinator_section(coord: &CoordinatorStatus) {
         println!("  State: not running");
     }
 
+    if let Some(summary) = coord
+        .last_run_summary
+        .as_ref()
+        .filter(|s| s.supervisor.is_none())
+    {
+        crate::coordinator::render::print_previous_diagnosis(summary);
+    }
     if !coord.running {
         if let Some(summary) = &coord.last_run_summary {
             println!("  Last result: {} ({})", summary.headline, summary.severity);
@@ -194,6 +201,9 @@ fn print_coordinator_section(coord: &CoordinatorStatus) {
                 for item in &summary.unmet_preconditions {
                     println!("                 - {}", item);
                 }
+            }
+            if let Some(note) = &summary.supervisor {
+                crate::coordinator::render::print_supervisor_note(note);
             }
             if !summary.dependent_task_ids.is_empty() {
                 println!("  Dependents:  {}", summary.dependent_task_ids.join(", "));

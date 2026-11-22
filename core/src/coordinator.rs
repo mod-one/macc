@@ -34,6 +34,7 @@ pub mod retained_reconciliation;
 pub mod review_budget;
 pub mod runner_output;
 pub mod runtime;
+pub mod scoped_prd;
 pub mod session_identity;
 pub mod session_manager;
 pub mod state;

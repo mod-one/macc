@@ -140,6 +140,18 @@ pub(super) fn widget_input(state: &mut AppState, key: KeyCode) {
             KeyCode::Enter | KeyCode::Esc => state.dismiss_coordinator_finished(),
             _ => {}
         },
+        Layer::Paused
+            if state
+                .coordinator_pause_summary
+                .as_ref()
+                .is_some_and(|s| s.scoped_prd.is_some()) =>
+        {
+            match key {
+                KeyCode::Char('o') => state.open_logs_after_coordinator_pause(),
+                KeyCode::Esc => state.stop_after_coordinator_pause(),
+                _ => {}
+            }
+        }
         Layer::Paused => match key {
             KeyCode::Char('r') | KeyCode::Enter => state.retry_after_coordinator_pause(),
             KeyCode::Char('s') => state.skip_after_coordinator_pause(),

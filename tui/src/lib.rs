@@ -1152,25 +1152,37 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
         .and_then(|s| s.coordinator.pause_reason.as_deref())
         .unwrap_or("operator requested pause");
 
-    let (banner_area, content_area) = if is_paused {
+    let supervisor = snapshot
+        .and_then(|s| s.coordinator.last_run_summary.as_ref())
+        .and_then(|summary| summary.supervisor.as_ref());
+    let mut banner_lines = Vec::new();
+    if is_paused {
+        banner_lines.push(format!("⚠ COORDINATOR PAUSED — {pause_reason}"));
+    }
+    if let Some(note) = supervisor {
+        banner_lines.push(format!("{}: {}", note.heading(), note.diagnosis));
+        banner_lines.extend(note.outcome.iter().cloned());
+        banner_lines.extend(note.next_action.iter().cloned());
+    }
+    let content_area = if banner_lines.is_empty() {
+        area
+    } else {
+        let banner = Paragraph::new(banner_lines.join("\n"))
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(crate::ui::theme().warn));
+        let width = usize::from(area.width.max(1));
+        let height = banner_lines
+            .iter()
+            .map(|s| s.chars().count().div_ceil(width).max(1))
+            .sum::<usize>()
+            .min(usize::from(area.height / 2)) as u16;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .constraints([Constraint::Length(height), Constraint::Min(0)])
             .split(area);
-        (Some(chunks[0]), chunks[1])
-    } else {
-        (None, area)
+        f.render_widget(banner, chunks[0]);
+        chunks[1]
     };
-
-    if let Some(ba) = banner_area {
-        let banner = Paragraph::new(format!("  ⚠  COORDINATOR PAUSED — {} ", pause_reason)).style(
-            Style::default()
-                .fg(crate::ui::theme().background)
-                .bg(crate::ui::theme().warn)
-                .add_modifier(Modifier::BOLD),
-        );
-        f.render_widget(banner, ba);
-    }
 
     // Build the vertical layout depending on --logs-only / --events-only filter flags.
     let (show_top, show_log) = if state.watch_logs_only {
@@ -1748,9 +1760,12 @@ fn approval_request_lines(
 }
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(75, 45, ui::content_area(f.size()));
+    let summary = state.coordinator_pause_summary.as_ref();
+    let supervisor = summary.and_then(|s| s.supervisor.as_ref());
+    let height = if supervisor.is_some() { 76 } else { 45 };
+    let area = ui::centered_rect(75, height, ui::content_area(f.size()));
     f.render_widget(Clear, area);
-    let diagnostic_label = state.coordinator_run_summary.as_ref().and_then(|s|s.diagnostic_delivery.as_ref()).map(|_| "Diagnostic report complete · feature changes requested · external verification pending\n").unwrap_or("");
+    let diagnostic_label = summary.and_then(|s|s.diagnostic_delivery.as_ref()).map(|_| "Diagnostic report complete · feature changes requested · external verification pending\n").unwrap_or("");
     let message = state
         .coordinator_pause_error
         .as_deref()
@@ -1758,7 +1773,6 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
     let message_with_status = format!("{diagnostic_label}{message}");
     let message = message_with_status.as_str();
     let command_name = state.coordinator_pause_command.as_deref().unwrap_or("run");
-    let summary = state.coordinator_run_summary.as_ref();
     let task = state
         .coordinator_pause_task_id
         .as_deref()
@@ -1778,17 +1792,48 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
         (Some(task), None) => format!("task={task} phase=dev"),
         _ => "global/blocking (no task context)".into(),
     };
-    let (title, text, border) = pause_overlay_content(
-        message,
-        &retry_target,
-        command_name,
-        summary.and_then(|s| s.error_code.as_deref()),
-        summary.and_then(|s| s.task_id.as_deref()),
-        summary
-            .map(|s| s.unmet_preconditions.as_slice())
-            .unwrap_or(&[]),
-        summary.map(|s| s.next_action.as_str()),
-    );
+    let (title, text, border) = if let Some(s) = summary.filter(|s| s.scoped_prd.is_some()) {
+        (
+            "Worker reuse blocked",
+            format!(
+                "{}\n\nNext: {}\n\n[o] Logs   [Esc] Close",
+                s.cause, s.next_action
+            ),
+            crate::ui::theme().warn,
+        )
+    } else {
+        pause_overlay_content(
+            message,
+            &retry_target,
+            command_name,
+            summary.and_then(|s| s.error_code.as_deref()),
+            summary.and_then(|s| s.task_id.as_deref()),
+            summary
+                .map(|s| s.unmet_preconditions.as_slice())
+                .unwrap_or(&[]),
+            summary.map(|s| s.next_action.as_str()),
+        )
+    };
+    let cause_area = if let Some(note) = supervisor {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(area);
+        let mut explanation = note.diagnosis.clone();
+        if let Some(outcome) = &note.outcome {
+            explanation.push_str(&format!("\n{outcome}"));
+        }
+        if let Some(next) = note.next_action.as_deref() {
+            explanation = format!("{next}\n\n{explanation}");
+        }
+        let note = Paragraph::new(explanation)
+            .block(Block::default().title(note.heading()).borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
+        f.render_widget(note, sections[1]);
+        sections[0]
+    } else {
+        area
+    };
     let popup = Paragraph::new(text)
         .block(
             Block::default()
@@ -1797,7 +1842,7 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
                 .border_style(Style::default().fg(border)),
         )
         .wrap(Wrap { trim: true });
-    f.render_widget(popup, area);
+    f.render_widget(popup, cause_area);
 }
 
 /// Title, body and border colour of the pause/stop overlay.

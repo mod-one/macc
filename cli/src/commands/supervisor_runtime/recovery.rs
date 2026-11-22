@@ -37,6 +37,22 @@ pub(super) async fn intervene(
             "{}: review and explicitly accept the PRD queue transition; no application repair or AI diagnosis is appropriate", macc_core::prd_queue::transition::CODE
         )));
     }
+    let progress = super::report::Progress { paths, config, dir };
+    config.validate()?;
+    if super::scoped_prd_recovery::handle(paths, canonical, config, report, &progress)? {
+        if config.auto_restart && restart_allowed {
+            report.restart_only = true;
+            restart(paths, canonical, report, lock, &progress).await?;
+        } else {
+            report.status = "ready_to_resume".into();
+            if config.auto_restart {
+                report
+                    .detail
+                    .push_str(" The automatic restart budget is exhausted.");
+            }
+        }
+        return Ok(());
+    }
     stop_orphan_jobs(&report.incident).await?;
     macc_core::session_store::checkpoints::recovery::maintain(&paths.root)?;
     if let Some(diagnosis) = super::compliance_review::diagnosis(&paths.root, &report.incident)? {
@@ -74,8 +90,6 @@ pub(super) async fn intervene(
         report.diagnosis = Some(diagnosis);
         return Err(MaccError::Validation("DM_EXTERNAL_VERIFICATION: diagnostic report retained; provide and independently verify the selected assistance, or explicitly reconcile the decision. Source edits and an unchanged restart cannot satisfy it.".into()));
     }
-    let progress = super::report::Progress { paths, config, dir };
-    config.validate()?;
     // The engine stopped while every incident task was between phases: no
     // task failed and nothing needs repairing — the restarted run resumes
     // their pending test, review, fix or merge. No AI call is needed.

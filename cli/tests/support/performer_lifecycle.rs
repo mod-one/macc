@@ -5,12 +5,16 @@ use std::os::unix::fs::PermissionsExt;
 fn run_case(fail_mode: &str) -> (tempfile::TempDir, std::process::Output, Vec<Value>) {
     let (temp, lib) = setup();
     let root = temp.path();
-    std::fs::write(
-        root.join("worktree.prd.json"),
-        json!({"tasks":[{"id":"A","title":"Keep work","acceptance_criteria":["Keep work"]}]})
-            .to_string(),
-    )
-    .unwrap();
+    let mut prd =
+        json!({"tasks":[{"id":"A","title":"Keep work","acceptance_criteria":["Keep work"]}]});
+    if matches!(fail_mode, "scoped_assignment" | "standalone_batch") {
+        prd["tasks"].as_array_mut().unwrap().insert(
+            0,
+            json!({"id":"B","title":"Second task", "acceptance_criteria":["Store work"]}),
+        );
+    }
+    let original_prd = prd.to_string();
+    std::fs::write(root.join("worktree.prd.json"), &original_prd).unwrap();
     std::fs::write(
         root.join(".macc/worktree.json"),
         json!({"id":"worker-test","slug":"worker-test","tool":"future-ai","branch":"main","base":"main"}).to_string(),
@@ -50,7 +54,7 @@ if [[ "$FAIL_MODE" == transient && ! -f .macc/first-failure ]]; then
   echo 'Error: temporary transport failure' >&2
   exit 23
 fi
-printf 'retained work\n' > implementation.txt
+printf 'retained work\n' >> implementation.txt
 ack="$(printf '%s\n' "${@: -1}" | sed -n '/^MACC_CHECKPOINT_ACK: /p')"
 if [[ "$FAIL_MODE" != missing_ack ]]; then
   jq -nc --arg ack "$ack" '{type:"assistant",message:{content:[{type:"thinking",thinking:"private-unprojected"},{type:"text",text:$ack}]}}'
@@ -108,6 +112,9 @@ jq -nc --arg sid"#);
         std::fs::write(path, script).unwrap();
     }
     let mut performer = Command::new("bash");
+    if fail_mode == "scoped_assignment" {
+        performer.env("MACC_CLAIM_ID", "test-claim");
+    }
     if let Some(context) = &decision_context {
         performer
             .env("MACC_DECISION_ROOT", root)
@@ -151,11 +158,15 @@ jq -nc --arg sid"#);
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    assert_eq!(
+        std::fs::read_to_string(root.join("worktree.prd.json")).unwrap(),
+        original_prd
+    );
     (temp, out, events)
 }
 #[test]
 fn streamed_initial_ack_allows_actual_performer_commit_in_passive_capture_mode() {
-    let (temp, out, events) = run_case("none");
+    let (temp, out, events) = run_case("scoped_assignment");
     assert!(
         out.status.success(),
         "{}\n{}",
@@ -169,7 +180,14 @@ fn streamed_initial_ack_allows_actual_performer_commit_in_passive_capture_mode()
         .args(["log", "-1", "--format=%s%n%b"])
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&commit.stdout).contains("A"));
+    assert!(String::from_utf8_lossy(&commit.stdout).contains("[macc:task A]"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "phase_result" && e["status"] == "done")
+            .count(),
+        1
+    );
     let committed = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -183,6 +201,28 @@ fn streamed_initial_ack_allows_actual_performer_commit_in_passive_capture_mode()
         .any(|e| e["type"] == "phase_result" && e["status"] == "done"));
     let usage = value(cli(root, &["usage"], None));
     assert_eq!(usage["records"][0]["incremental"]["input_uncached"], 17);
+}
+#[test]
+fn standalone_performer_delivers_each_task_without_rewriting_the_prd() {
+    let (temp, out, events) = run_case("standalone_batch");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let completed: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "phase_result" && event["status"] == "done")
+        .map(|event| event["task_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(completed, ["B", "A"]);
+    let commits = Command::new("git")
+        .current_dir(temp.path())
+        .args(["log", "-2", "--format=%b"])
+        .output()
+        .unwrap();
+    let trailers = String::from_utf8(commits.stdout).unwrap();
+    assert!(trailers.contains("[macc:task A]") && trailers.contains("[macc:task B]"));
 }
 #[test]
 fn transient_retry_is_progress_until_the_final_attempt_completes() {

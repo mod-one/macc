@@ -54,6 +54,12 @@ pub(super) fn record(
     if budget_failure {
         runtime.unmet_preconditions = vec![detail.clone()];
     }
+    if let MaccError::ScopedPrd(incident) = &cause {
+        runtime.extra.insert(
+            crate::coordinator::scoped_prd::INCIDENT_KEY.into(),
+            serde_json::json!(incident),
+        );
+    }
     runtime.extra.insert(
         "dispatch_preparation_failure".into(),
         serde_json::json!({"claim_id":claim.claim_id,"phase":"dev","cause":cause.to_string()}),
@@ -84,4 +90,42 @@ pub(super) fn record(
         code,
         message: detail,
     })
+}
+
+/// Persist the reason a task could not acquire a safe slot. No assignment or
+/// performer claim exists for this dispatch attempt.
+pub(super) fn before_claim(
+    root: &Path,
+    value: &mut serde_json::Value,
+    id: &str,
+    incident: crate::coordinator::scoped_prd::Incident,
+) -> Result<()> {
+    let mut registry = TaskRegistry::from_value(value)?;
+    let task = registry
+        .find_task_mut(id)
+        .filter(|t| t.state == "todo")
+        .ok_or_else(|| {
+            MaccError::Validation(format!("Task {id} is no longer ready for dispatch"))
+        })?;
+    task.set_workflow_state(WorkflowState::Blocked);
+    task.touch_state_changed(&now_iso_coordinator());
+    let rt = task.ensure_runtime();
+    rt.clear_last_error_details();
+    rt.last_error = Some(incident.to_string());
+    rt.set_last_error_details("E901", "worker_preflight", incident.to_string());
+    rt.current_phase = Some("dev".into());
+    rt.run_id = std::env::var("COORDINATOR_RUN_ID").ok();
+    rt.coordinator_epoch = std::env::var("COORDINATOR_EPOCH")
+        .ok()
+        .and_then(|e| e.parse().ok());
+    rt.set_status(RuntimeStatus::Failed);
+    rt.extra.insert(
+        crate::coordinator::scoped_prd::INCIDENT_KEY.into(),
+        serde_json::json!(incident),
+    );
+    *value = registry.to_value()?;
+    recompute_resource_locks_from_tasks(value);
+    set_registry_updated_at(value);
+    crate::coordinator::state::coordinator_state_registry_save(root, &BTreeMap::new(), value)?;
+    crate::coordinator::scoped_prd::record_event(root, &incident, "worker_preflight_blocked")
 }

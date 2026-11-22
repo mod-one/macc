@@ -73,6 +73,19 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
             "Last run: {}\n{}\n",
             run.headline, run.next_action
         ));
+        if let Some((id, note)) = run
+            .previous_diagnosis()
+            .filter(|_| run.supervisor.is_none())
+        {
+            overview.push_str(&format!(
+                "Previous incident ({id}) · {}\n{}\n",
+                note.heading(),
+                note.diagnosis
+            ));
+            if let Some(result) = &note.outcome {
+                overview.push_str(&format!("{result}\n"));
+            }
+        }
     }
     overview.push('\n');
     if !state.errors.is_empty() {

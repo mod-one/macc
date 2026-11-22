@@ -63,6 +63,22 @@ fn state_with_worker_and_intervention() -> (tempfile::TempDir, AppState) {
 }
 
 #[test]
+fn supervisor_diagnosis_stays_visible_in_last_result_after_closing_the_popup() {
+    let (_project, mut state) = state_with_worker_and_intervention();
+    let summary = state.coordinator_run_summary.as_mut().unwrap();
+    summary.supervisor = Some(
+        serde_json::from_value(serde_json::json!({
+            "status":"escalated", "diagnosis":"Worker provenance check failed.",
+            "outcome":"Original PRD preserved.", "next_action":"Inspect the file."
+        }))
+        .unwrap(),
+    );
+    let screen = text(&render(&state, 150, 46));
+    let result = screen.split("LAST RESULT").nth(1).unwrap();
+    assert!(result.contains("Worker provenance check failed."));
+    assert!(result.contains("Original PRD preserved."));
+}
+#[test]
 fn live_preserves_field_order_and_stacks_full_width_panes() {
     let (_project, mut s) = state_with_worker_and_intervention();
     for (width, height) in [(80, 24), (120, 36), (180, 48)] {

@@ -18,20 +18,29 @@ pub(super) fn execute(
         MaccError::Validation(format!("Cannot unblock unknown task '{task_id}'."))
     })?;
     let request = Request::new(task, evidence)?;
+    submit(paths, coordinator_cfg, env_cfg, &request)
+}
+
+pub fn submit(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    request: &Request,
+) -> Result<()> {
     let pid_path = paths.root.join(".macc/state/coordinator.pid");
     let live = std::fs::read_to_string(pid_path)
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .is_some_and(crate::coordinator::helpers::is_pid_running);
     if live {
-        crate::coordinator::control::send_sync(&paths.root, &request)
+        crate::coordinator::control::send_sync(&paths.root, request)
     } else {
         let _guard = crate::fs_lock::AdvisoryLock::acquire(
             &paths.macc_dir.join("state/unblock.lock"),
             Duration::ZERO,
             "offline task unblock",
         )?;
-        apply(paths, coordinator_cfg, env_cfg, &request)
+        apply(paths, coordinator_cfg, env_cfg, request)
     }
 }
 pub(crate) fn apply(
@@ -54,7 +63,7 @@ pub(crate) fn apply(
         .filter(|t| t.id != task_id)
         .filter_map(|t| t.worktree_path().map(str::to_string))
         .collect();
-    let task = registry.find_task_mut(task_id).ok_or_else(|| {
+    let task = registry.find_task(task_id).ok_or_else(|| {
         MaccError::Validation(format!("Cannot unblock unknown task '{task_id}'."))
     })?;
     if let Some(receipt) = task.task_runtime.extra.get("unblock_control") {
@@ -81,6 +90,28 @@ pub(crate) fn apply(
         return Err(MaccError::Validation(format!(
             "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
         )));
+    }
+    let scoped_recovery = crate::coordinator::scoped_prd::is_dispatch_failure(task);
+    let release_worker = if scoped_recovery {
+        let prd =
+            crate::prd_queue::active_path(&paths.root, coordinator_cfg, env_cfg.prd.as_deref())?;
+        let reference =
+            crate::config::CoordinatorConfigResolved::resolve(coordinator_cfg).reference_branch;
+        crate::coordinator::scoped_prd::recover_dispatch(
+            &paths.root,
+            &registry,
+            task,
+            &prd,
+            &reference,
+        )?
+    } else {
+        false
+    };
+    let task = registry
+        .find_task_mut(task_id)
+        .expect("validated task remains in registry");
+    if release_worker {
+        task.clear_assignment();
     }
     let restored = protocol_recovery::restore(paths, coordinator_cfg, task, &occupied)?;
     if restored.is_some() {
@@ -139,6 +170,7 @@ pub(crate) fn apply(
         WorkflowState::Todo
     };
     task.set_workflow_state(next_state);
+    let repaired_worker_attached = task.has_worktree_attached();
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Idle);
     runtime.pid = None;
@@ -147,6 +179,11 @@ pub(crate) fn apply(
             crate::coordinator::repair_handoff::RESUME_KEY.into(),
             serde_json::json!({"base":base,"evidence":evidence}),
         );
+    }
+    if scoped_recovery {
+        runtime.extra.insert(crate::coordinator::scoped_prd::RECOVERY_KEY.into(),serde_json::json!({
+            "claim_id":runtime.claim_id,"run_id":runtime.run_id,"epoch":runtime.coordinator_epoch,"worktree_retained":repaired_worker_attached
+        }));
     }
     runtime.last_error = None;
     runtime.clear_last_error_details();

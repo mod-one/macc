@@ -117,7 +117,14 @@ pub fn inspect_with_config(
         .iter()
         .filter(|task| !waits.is_consumer(task))
         .map(|task| waits.reported_task(task))
-        .filter(|task| diagnostic_candidate(task))
+        .filter(|task| {
+            diagnostic_candidate(task)
+                || (crate::coordinator::scoped_prd::requeued(task)
+                    && run.as_ref().is_some_and(|r| {
+                        task.task_runtime.run_id.as_deref() == Some(r.run_id.as_str())
+                            && task.task_runtime.coordinator_epoch == Some(r.epoch)
+                    }))
+        })
         .map(|task| task.into_owned())
         .collect();
     // A terminal block consisting only of protected gates is an operator decision.

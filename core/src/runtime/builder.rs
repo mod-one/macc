@@ -44,16 +44,27 @@ impl RuntimeSnapshotBuilder {
 
         // Check the coordinator_runs table for an active run.
         let sqlite = SqliteStorage::new(storage_paths);
-        let active_run = sqlite.get_active_coordinator_run().unwrap_or(None);
-        if let Some(run) = active_run {
-            coordinator.running = matches!(run.status.as_str(), "running" | "draining");
-            coordinator.run_id = Some(run.run_id);
-            coordinator.epoch = Some(run.epoch);
+        if let Ok(Some(run)) = sqlite.get_latest_coordinator_run() {
+            if matches!(run.status.as_str(), "running" | "draining") {
+                coordinator.running = true;
+                coordinator.run_id = Some(run.run_id);
+                coordinator.epoch = Some(run.epoch);
+            }
         }
         if let Ok(snapshot) = &snapshot {
-            coordinator.last_run_summary =
-                crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)
-                    .unwrap_or(None);
+            coordinator.last_run_summary = crate::service::run_summary::load_project_run_summary(
+                paths,
+                &sqlite,
+                &snapshot.registry,
+            )
+            .unwrap_or(None);
+            if coordinator
+                .last_run_summary
+                .as_ref()
+                .is_some_and(|summary| summary.status == "crashed")
+            {
+                coordinator.running = false;
+            }
             coordinator.pending_approvals = crate::coordinator::approval::current_pending_approvals(
                 &paths.root,
                 &snapshot.registry,

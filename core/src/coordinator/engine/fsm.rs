@@ -700,6 +700,13 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     runtime
         .extra
         .remove(crate::coordinator::repair_handoff::RESUME_KEY);
+    runtime
+        .extra
+        .remove(crate::coordinator::scoped_prd::INCIDENT_KEY);
+    runtime.extra.remove("dispatch_preparation_failure");
+    runtime
+        .extra
+        .remove(crate::coordinator::scoped_prd::RECOVERY_KEY);
     runtime.set_status(RuntimeStatus::Dispatched);
     runtime.current_phase = Some(update.phase.clone());
     runtime.started_at = Some(update.now.clone());

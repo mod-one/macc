@@ -1,3 +1,4 @@
+import { PreviousSupervisorDiagnosis, SupervisorDiagnosis } from '../components/SupervisorDiagnosis';
 import React from 'react';
 import { getConfig, getDoctorReport, getSnapshot, getWorktrees, ApiClientError } from '../api/client';
 import type {
@@ -555,6 +556,16 @@ const Dashboard: React.FC = () => {
           )}
         </div>
       )}
+
+      {status?.last_run_summary?.supervisor && (
+        <section aria-label="Coordinator incident" className="rounded-md border border-[var(--border)] px-4 py-2.5">
+          <strong>{status.last_run_summary.headline}</strong>
+          <p>{status.last_run_summary.cause}</p>
+          <SupervisorDiagnosis note={status.last_run_summary.supervisor} />
+        </section>
+      )}
+
+      <PreviousSupervisorDiagnosis summary={status?.last_run_summary} />
 
       {/* Alerts */}
       {alerts.length > 0 && (

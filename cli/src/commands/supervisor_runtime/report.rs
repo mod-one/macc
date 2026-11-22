@@ -106,8 +106,9 @@ pub(super) fn write_report(
     } else {
         paths.root.join(&config.report_output_path)
     };
+    macc_core::service::run_summary::publish_incident(paths, &value)?;
     write_json(&report_path, &value)?;
-    // Stable latest file for status/UI consumers, independent of custom report location.
+    // A published latest report implies its scoped incident is already available.
     write_json(&paths.root.join(".macc/log/supervisor/latest.json"), &value)
 }
 pub(super) fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
@@ -150,6 +151,7 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
                 s,
                 "recovered"
                     | "repair_integrated"
+                    | "ready_to_resume"
                     | "escalated"
                     | "interrupted"
                     | "waiting_condition"
@@ -159,7 +161,6 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
         value["intervention"]["status"] = json!("interrupted");
         value["intervention"]["detail"] =
             json!("Supervisor stopped during intervention; isolated worktree and logs retained");
-        write_json(&latest, &value)?;
         let dir = value
             .pointer("/intervention/log_dir")
             .and_then(|v| v.as_str())
@@ -200,8 +201,10 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
                     "Supervisor stopped during intervention; evidence archived; clean slot removed"
                 );
             }
-            write_json(&latest, &value)?;
         }
+        value["intervention"]["next_action"] =
+            json!("Inspect the retained work and restart the supervisor when ready.");
+        macc_core::service::run_summary::publish_incident(paths, &value)?;
         write_json(&dir.join("report.json"), &value)?;
         let report = if cfg.report_output_path.is_absolute() {
             cfg.report_output_path
@@ -209,6 +212,7 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
             paths.root.join(cfg.report_output_path)
         };
         write_json(&report, &value)?;
+        write_json(&latest, &value)?;
     }
     Ok(())
 }

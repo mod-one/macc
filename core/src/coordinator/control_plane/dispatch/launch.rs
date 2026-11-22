@@ -15,7 +15,8 @@ pub(super) async fn launch_performer(
         logger,
     } = ctx;
     let prepared: Result<_> = async {
-        write_worktree_prd_for_task(prd_file, &claim.task_id, &claim.worktree_path)?;
+        let expected_prd =
+            crate::coordinator::helpers::scoped_prd_for_task(prd_file, &claim.task_id)?;
         ensure_tool_json_for_tool(repo_root, &claim.worktree_path, &claim.tool)?;
         let worktree_paths = crate::ProjectPaths::from_root(&claim.worktree_path);
         crate::init(&worktree_paths, false)?;
@@ -93,6 +94,13 @@ pub(super) async fn launch_performer(
         }
         routing_env.extend(decision_environment(repo_root, claim, &current_exe)?);
 
+        // Apply and context preparation can take time. Check the actual worker
+        // file after those operations, immediately before the performer starts.
+        crate::coordinator::scoped_prd::verify_dispatch(
+            &expected_prd,
+            &claim.task_id,
+            &claim.worktree_path,
+        )?;
         Ok((current_exe, epoch, phase_timeout_seconds, routing_env))
     }
     .await;
@@ -128,7 +136,12 @@ pub(super) async fn launch_performer(
                 )?;
                 return Ok(None);
             }
-            return Err(super::failure::record(repo_root, claim, error, logger)?);
+            let scoped_conflict = matches!(error, MaccError::ScopedPrd(_));
+            let recorded = super::failure::record(repo_root, claim, error, logger)?;
+            if scoped_conflict {
+                return Ok(None);
+            }
+            return Err(recorded);
         }
     };
 

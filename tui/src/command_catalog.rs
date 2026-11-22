@@ -179,7 +179,10 @@ fn editor_commands() -> Vec<Command> {
     ])
 }
 fn pause_commands(state: &AppState) -> Vec<Command> {
-    let summary = state.coordinator_run_summary.as_ref();
+    let summary = state.coordinator_pause_summary.as_ref();
+    if summary.is_some_and(|s| s.scoped_prd.is_some()) {
+        return rows(vec![(k::ch('o'), "Open logs"), (k::ESC, "Keep stopped")]);
+    }
     if crate::precondition_stop(
         state.coordinator_pause_error.as_deref().unwrap_or_default(),
         summary.and_then(|s| s.error_code.as_deref()),

@@ -121,6 +121,7 @@ export interface ApiFailureReport {
 }
 
 export interface ApiCoordinatorRunHistoryItem {
+  supervisor?: ApiCoordinatorRunSummary['supervisor'];
   run_id: string;
   status: string;
   started_at: string;
@@ -140,6 +141,7 @@ export interface ApiCoordinatorRunSummary {
   error_code: string | null;
   occurred_at: string;
   next_action: string;
+  supervisor?: { status: string; diagnosis: string; task_ids?: string[]; outcome?: string | null; next_action?: string | null };
   dependent_task_ids: string[];
   repeated_count: number;
   recent_runs: ApiCoordinatorRunHistoryItem[];

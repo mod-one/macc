@@ -1,3 +1,4 @@
+import { PreviousSupervisorDiagnosis, SupervisorDiagnosis } from '../../components/SupervisorDiagnosis';
 import { DiagnosticDeliveryStatus } from '../../components/DiagnosticDeliveryStatus';
 /**
  * Console — merged coordinator control + live worker monitor
@@ -728,6 +729,8 @@ const Console: React.FC = () => {
       </div>
 
       {/* Failure notice */}
+      <PreviousSupervisorDiagnosis summary={status?.last_run_summary} />
+
       {status?.failure_report && !status.last_run_summary && (
         <div
           style={{
@@ -753,7 +756,7 @@ const Console: React.FC = () => {
         </div>
       )}
 
-      {(status?.active ?? 0) === 0 && status?.last_run_summary && (
+      {status?.last_run_summary && ((status.active ?? 0) === 0 || status.last_run_summary.supervisor) && (
         <div
           style={{
             padding: '10px 14px',
@@ -777,6 +780,9 @@ const Console: React.FC = () => {
             {status.last_run_summary.phase && <span>Phase: {status.last_run_summary.phase} · </span>}
             Cause: {status.last_run_summary.cause}
           </div>
+          {status.last_run_summary.supervisor && (
+            <SupervisorDiagnosis note={status.last_run_summary.supervisor} />
+          )}
           {status.last_run_summary.diagnostic_delivery && <DiagnosticDeliveryStatus delivery={status.last_run_summary.diagnostic_delivery} />}
           {status.last_run_summary.task_id && (
             <button

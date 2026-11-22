@@ -123,18 +123,28 @@ pub fn context(
         "out_of_scope_fix":task.task_runtime.extra.get(macc_core::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY),
         "extra":task.extra,"blocked_on_external":task.blocked_on_external
     })).collect();
+    let scoped_prds: BTreeMap<_, _> = incident
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            macc_core::coordinator::scoped_prd::recovery_revision(&paths.root, task)
+                .map(|revision| (&task.id, revision))
+        })
+        .collect();
     // Repairs publish to the reference branch: its movement is new evidence too.
     let reference =
         super::workspace::target(&paths.root, canonical.automation.coordinator.as_ref())?;
-    Ok(
-        json!({"runtime_build":super::product_findings::runtime_identity(),"tasks":tasks,"head":git(&paths.root,&["rev-parse","HEAD"])?,
+    let mut context = json!({"runtime_build":super::product_findings::runtime_identity(),"tasks":tasks,"head":git(&paths.root,&["rev-parse","HEAD"])?,
         "reference":{"branch":reference.branch,"tip":reference.base},
         "source_status":git(&paths.root,&["status","--porcelain"])?,
         "source_diff":git(&paths.root,&["diff","HEAD","--binary"])?,
         "tools":canonical.tools,"supervisor":canonical.automation.supervisor,
         "prd_queue":canonical.automation.coordinator.as_ref().map(|c|json!({"files":c.prd_files,"entries":macc_core::prd_queue::validate(&paths.root,&c.prd_files).ok(),"progress":macc_core::prd_queue::load(&paths.root).ok()})),
-        "decision_gates":macc_core::coordinator::decisions::gate_revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?,"availability":availability,"decision_policy":canonical.automation.coordinator.as_ref().and_then(|c|c.decisions.as_ref()),"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?}),
-    )
+        "decision_gates":macc_core::coordinator::decisions::gate_revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?,"availability":availability,"decision_policy":canonical.automation.coordinator.as_ref().and_then(|c|c.decisions.as_ref()),"checkpoint_revision":macc_core::session_store::checkpoints::recovery::revision(&paths.root,&incident.tasks.iter().map(|t|t.id.clone()).collect::<Vec<_>>())?});
+    if !scoped_prds.is_empty() {
+        context["scoped_prds"] = json!(scoped_prds);
+    }
+    Ok(context)
 }
 
 pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32) -> bool {
@@ -263,6 +273,9 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     if report.status == "recovered" {
         return None;
     }
+    if report.status == "ready_to_resume" {
+        return Some("Worker recovery completed. Start `macc coordinator run` when ready.".into());
+    }
     if report.status == "waiting_condition" {
         return Some("Supply the outstanding condition, then run `macc coordinator run`. MACC will check each target and resume its retained phase when ready.".into());
     }
@@ -275,6 +288,14 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
             pending.attempts + 1,
             max_attempts
         ));
+    }
+    if report
+        .incident
+        .tasks
+        .iter()
+        .any(macc_core::coordinator::scoped_prd::is_dispatch_failure)
+    {
+        return Some(format!("Inspect the retained worker and its scoped PRD. MACC archives proven historical markers in .macc/persistent/scoped-prd-archive/. Preserve any other edits, then retry the native recovery (`{RETRY}`)."));
     }
     let mut paths: Vec<_> = report
         .incident
@@ -587,6 +608,15 @@ pub fn restore_previous(
     let report: Intervention = serde_json::from_value(value.get("intervention")?.clone()).ok()?;
     if report.incident.id != incident.id
         || !matches!(report.status.as_str(), "escalated" | "waiting_condition")
+    {
+        return None;
+    }
+    // An older model diagnosis can say this requires human intervention.
+    // With no retry ledger, let the native handler inspect the current proof.
+    if incident
+        .tasks
+        .iter()
+        .any(macc_core::coordinator::scoped_prd::is_dispatch_failure)
     {
         return None;
     }

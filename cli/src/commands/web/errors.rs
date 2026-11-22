@@ -374,6 +374,16 @@ impl From<MaccError> for ApiError {
                 Some(serde_json::json!({ "path": path, "action": action })),
                 Some(source.to_string()),
             ),
+            MaccError::ScopedPrd(incident) => ApiError::new(
+                StatusCode::CONFLICT,
+                WEB_ERR_COORDINATOR,
+                "Conflict",
+                incident.to_string(),
+                false,
+                Some("Inspect the preserved scoped PRD and native worker recovery status".into()),
+                Some(serde_json::json!({"code":"E901","incident":incident})),
+                None,
+            ),
             MaccError::Coordinator { code, message } => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 WEB_ERR_COORDINATOR,

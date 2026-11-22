@@ -114,6 +114,9 @@ pub enum MaccError {
     #[error("Secret(s) detected in generated output for {path}: {details}")]
     SecretDetected { path: String, details: String },
 
+    #[error("Worker reuse blocked: {0}")]
+    ScopedPrd(Box<crate::coordinator::scoped_prd::Incident>),
+
     #[error("Coordinator error [{code}]: {message}")]
     Coordinator { code: &'static str, message: String },
 

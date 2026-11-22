@@ -243,6 +243,7 @@ pub struct AppState {
     pub coordinator_running_command: Option<String>,
     pub coordinator_last_result: Option<String>,
     pub coordinator_pause_error: Option<String>,
+    pub coordinator_pause_summary: Option<CoordinatorRunSummary>,
     pub coordinator_pause_command: Option<String>,
     pub coordinator_pause_task_id: Option<String>,
     pub coordinator_pause_phase: Option<String>,
@@ -433,6 +434,7 @@ impl AppState {
             coordinator_running_command: None,
             coordinator_last_result: None,
             coordinator_pause_error: None,
+            coordinator_pause_summary: None,
             coordinator_finished_message: None,
             coordinator_pause_command: None,
             coordinator_pause_task_id: None,
@@ -1033,13 +1035,36 @@ impl AppState {
         if let Ok(status) = status {
             if self.coordinator_pause_error.is_some() {
                 if let Some(summary) = &status.last_run_summary {
-                    if self
+                    let matches_target = self
                         .coordinator_pause_task_id
                         .as_deref()
-                        .is_none_or(|t| t == "-")
+                        .is_none_or(|id| id == "-" || Some(id) == summary.task_id.as_deref());
+                    let matches_attempt = self.coordinator_pause_summary.as_ref().is_none_or(|p| {
+                        p.run_id == summary.run_id
+                            && p.epoch == summary.epoch
+                            && p.task_revision == summary.task_revision
+                    });
+                    if matches_target
+                        && matches_attempt
+                        && matches!(
+                            summary.status.as_str(),
+                            "failed" | "blocked" | "crashed" | "paused"
+                        )
                     {
-                        self.coordinator_pause_task_id = summary.task_id.clone();
-                        self.coordinator_pause_phase = summary.phase.clone();
+                        if self
+                            .coordinator_pause_task_id
+                            .as_deref()
+                            .is_none_or(|id| id == "-")
+                        {
+                            self.coordinator_pause_task_id = summary.task_id.clone();
+                            self.coordinator_pause_phase = summary.phase.clone();
+                        }
+                        self.coordinator_pause_summary = Some(summary.clone());
+                    } else if let (Some(pinned), Some(paths)) = (
+                        self.coordinator_pause_summary.as_mut(),
+                        self.project_paths.as_ref(),
+                    ) {
+                        pinned.refresh_supervisor(paths);
                     }
                 }
             }
@@ -2994,6 +3019,7 @@ impl AppState {
                         reason.trim()
                     );
                     finished_message = Some((UiStatusLevel::Error, msg.clone()));
+                    self.coordinator_pause_summary = None;
                     self.coordinator_pause_error = Some(msg);
                     self.coordinator_pause_command = Some(command);
                     self.coordinator_pause_next_action = None;
@@ -3052,6 +3078,7 @@ impl AppState {
                     )));
                     self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
+                    self.coordinator_pause_summary = None;
                     self.coordinator_pause_error = Some(format!(
                         "Coordinator '{}' polling error: {}",
                         command_name, err

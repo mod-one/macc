@@ -1,4 +1,5 @@
 use super::*;
+use crate::coordinator::helpers::write_worktree_prd_for_task;
 use crate::coordinator::{decisions, model::TaskRegistry};
 use serde_json::json;
 
@@ -238,3 +239,6 @@ async fn preparation_exception_is_handled_by_the_actual_launch_boundary() {
     assert!(state.join_set.is_empty());
     assert!(state.active_jobs.is_empty());
 }
+
+#[path = "scoped_prd_tests.rs"]
+mod scoped_prd_tests;

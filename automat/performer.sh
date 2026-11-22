@@ -603,49 +603,6 @@ def task_items:
 task_items
 '
 
-get_next_task_json() {
-  jq -c "${JQ_ITEMS} | map(select(.passes != true)) | .[0] // empty" "$prd"
-}
-
-get_next_task_id() {
-  jq -r "${JQ_ITEMS} | map(select(.passes != true)) | .[0].id // \"\"" "$prd"
-}
-
-get_next_task_title() {
-  jq -r "${JQ_ITEMS} | map(select(.passes != true)) | .[0].title // \"\"" "$prd"
-}
-
-mark_task_passed() {
-  local id="$1"
-  local tmp
-  tmp="$(mktemp)"
-  jq --arg id "$id" '
-    def match_id($t):
-      (($t.id|tostring) == $id);
-    if type == "array" then
-      map(if match_id(.) then .passes = true else . end)
-    elif type == "object" then
-      (if ((.tasks | type) == "array") then
-         .tasks |= map(if match_id(.) then .passes = true else . end)
-       else
-         .
-       end)
-      | (if ((.userStories | type) == "array") then
-           .userStories |= map(if match_id(.) then .passes = true else . end)
-         else
-           .
-         end)
-    else
-      .
-    end
-  ' "$prd" >"$tmp"
-  mv "$tmp" "$prd"
-}
-
-pending_task_count() {
-  jq -r "${JQ_ITEMS} | map(select(.passes != true)) | length" "$prd"
-}
-
 # Read the explanation this task recorded on its previous attempt.
 #
 # The performer's own task log is the authoritative local record: it holds both
@@ -1017,7 +974,7 @@ run_tool() {
     if [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]]; then
       # The tool emitted an explicit error or precondition result marker
       # This is a failure or an intentional terminal block, not a successful
-      # completion. It must NOT be marked passed.
+      # completion. Preserve the failed outcome.
       if [[ "$result_kind" == "precondition_unmet" ]]; then
         set_last_error "E903" "precondition" "task precondition is not met"
       elif [[ -z "$LAST_ERROR_CODE" ]]; then
@@ -1110,7 +1067,7 @@ run_tool() {
     # must_emit_performer_event here would NOT abort the script on its own,
     # and `run_tool` would still `return "$status"` (the tool's own exit code,
     # unrelated to whether the terminal event was accepted). This previously
-    # let the performer mark the task passed and exit 0 even though the
+    # let the performer report success and exit 0 even though the
     # coordinator had rejected the only record of that success. An explicit
     # `exit 1` is required to terminate the script regardless of call context.
     if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc \
@@ -1135,7 +1092,7 @@ run_tool() {
       + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end)
       + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end)
       + (if $completion_commit_sha != "" then {completion_commit_sha:$completion_commit_sha,reported_result_kind:$reported_result_kind} else {} end))')"; then
-      echo "Error: failed to persist terminal phase_result event (status=done); refusing to mark task passed" >&2
+      echo "Error: failed to persist terminal phase_result event (status=done); receipt required to complete the task" >&2
       log_task_line "- Exit status: ${status}"
       exit 1
     fi
@@ -1392,8 +1349,6 @@ if [[ "$performer_session_enabled" == "true" ]]; then
   fi
 fi
 
-last_id=""
-last_title=""
 task_start_seconds=""
 task_duration_seconds=""
 task_log_file="$(task_log_path "$task_id")"
@@ -1407,8 +1362,20 @@ log_task_line ""
 soft_emit_performer_event "started" "$CURRENT_PHASE" "started" "$(jq -nc --arg tool "$tool" --arg worktree "$worktree" '{tool:$tool, worktree:$worktree}')"
 heartbeat_start
 
-for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
-  next_task_json="$(get_next_task_json)"
+# Snapshot the work list. Progress belongs to this invocation, never to the PRD.
+assigned=""
+if [[ -n "$EVENT_CLAIM_ID" || -n "${MACC_EVENT_TASK_ID:-}" ]]; then
+  assigned="$task_id"
+fi
+pending="$(jq -c --arg assigned "$assigned" "${JQ_ITEMS}"'
+  | if $assigned == "" then . else
+      map(select((.id|tostring) == $assigned))
+      | if length == 1 then . else error("Assigned task missing or duplicated: " + $assigned) end
+    end
+  | map(select(.passes != true))' "$prd")"
+task_count="$(jq length <<< "$pending")"
+for ((i=0; i<PERFORMER_MAX_ITERATIONS; i++)); do
+  next_task_json="$(jq -c --argjson i "$i" '.[$i] // empty' <<< "$pending")"
   if [[ -z "$next_task_json" ]]; then
     # A passed PRD alone is ephemeral state. This shortcut requires an existing
     # reference-branch delivery; it cannot manufacture an unverified success.
@@ -1437,8 +1404,12 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
     exit 0
   fi
 
-  next_id="$(get_next_task_id)"
-  next_title="$(get_next_task_title)"
+  next_id="$(jq -r '.id' <<< "$next_task_json")"
+  # Uncoordinated batch events, runner arguments and delivery evidence must
+  # all identify the task at the current cursor.
+  task_id="$next_id"
+  EVENT_TASK_ID="$next_id"
+  next_title="$(jq -r '.title // ""' <<< "$next_task_json")"
   task_log_file="$(task_log_path "$next_id")"
   log_task_header_if_needed "$task_log_file" "$next_id" "$next_title"
   log_task_line "## Processing task ${next_id}"
@@ -1508,8 +1479,6 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   fi
   rm -f "$prompt_file"
 
-  mark_task_passed "$next_id"
-  log_task_line "- Marked as passed in worktree PRD: ${next_id}"
   log_task_line "- Completed: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   task_end_seconds="$(date +%s)"
   if [[ -n "$task_start_seconds" ]]; then
@@ -1517,11 +1486,8 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   fi
   log_task_line ""
 
-  last_id="$next_id"
-  last_title="$next_title"
-
-  if [[ "$(pending_task_count)" -eq 0 ]]; then
-    commit_changes "$last_id" "$last_title"
+  commit_changes "$next_id" "$next_title"
+  if (( i + 1 == task_count )); then
     TERMINAL_EVENT_EMITTED="true"
     exit 0
   fi

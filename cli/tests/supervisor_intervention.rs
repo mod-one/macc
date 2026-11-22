@@ -173,6 +173,28 @@ fn sqlite_incident_is_diagnosed_repaired_validated_integrated_and_restarted() {
             .unwrap()
             .is_some_and(|r| r.run_id != "run-fixture" && r.status == "success")
     });
+    let snapshot = Command::new(env!("CARGO_BIN_EXE_macc"))
+        .arg("--cwd")
+        .arg(root)
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    assert!(snapshot.status.success());
+    let snapshot: Value = serde_json::from_slice(&snapshot.stdout).unwrap();
+    let summary = &snapshot["coordinator"]["last_run_summary"];
+    assert_ne!(summary["run_id"], "run-fixture");
+    assert!(summary["supervisor"].is_null());
+    let prior = summary["recent_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "run-fixture")
+        .unwrap();
+    assert_eq!(prior["supervisor"]["status"], "recovered");
+    assert_eq!(
+        prior["supervisor"]["diagnosis"],
+        r["intervention"]["diagnosis"]["summary"]
+    );
     let status = Command::new(env!("CARGO_BIN_EXE_macc"))
         .args(["--cwd", root.to_str().unwrap(), "supervisor", "status"])
         .output()
@@ -484,5 +506,133 @@ fn an_engine_stop_between_phases_is_recovered_by_a_restart_without_repair() {
             .as_object()
             .map(|restarts| restarts.values().cloned().collect::<Vec<_>>()),
         Some(vec![json!(1)])
+    );
+}
+
+#[test]
+fn historical_scoped_prd_is_recovered_without_ai_with_manual_restart_policy() {
+    use macc_core::coordinator::{
+        helpers::write_worktree_prd_for_task, model::TaskWorktree, scoped_prd,
+    };
+    let temp = fixture(false);
+    let root = temp.path();
+    let paths = ProjectPaths::from_root(root);
+    let mut cfg = macc_core::load_canonical_config(&paths.config_path).unwrap();
+    cfg.automation.supervisor.as_mut().unwrap().auto_restart = false;
+    macc_core::save_canonical_config(&paths, &cfg).unwrap();
+    let prd = root.join("prd.json");
+    std::fs::write(&prd, r#"{"tasks":[{"id":"PREVIOUS"},{"id":"ROOT"}]}"#).unwrap();
+    git(root, &["add", "prd.json"]);
+    git(root, &["commit", "-qm", "record scoped PRD fixture"]);
+    let worker = root.join(".macc/worktree/worker-01");
+    std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+    let branch = "ai/fake/worker-01";
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            worker.to_str().unwrap(),
+            "master",
+        ],
+    );
+    std::fs::create_dir_all(worker.join(".macc")).unwrap();
+    std::fs::write(
+        worker.join(".macc/worktree.json"),
+        json!({"id":"worker-01","slug":"worker-01","tool":"fake","base":"master","branch":branch})
+            .to_string(),
+    )
+    .unwrap();
+    write_worktree_prd_for_task(&prd, "PREVIOUS", &worker).unwrap();
+    let path = worker.join(scoped_prd::NAME);
+    let mut old: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old["tasks"][0]["passes"] = true.into();
+    std::fs::write(&path, old.to_string()).unwrap();
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = db.load_snapshot().unwrap();
+    let task = snapshot.registry.find_task_mut("ROOT").unwrap();
+    task.worktree = Some(TaskWorktree {
+        worktree_path: Some(worker.display().to_string()),
+        branch: Some(branch.into()),
+        base_branch: Some("master".into()),
+        last_commit: Some(macc_core::git::head_commit(&worker).unwrap()),
+        ..Default::default()
+    });
+    let rt = task.ensure_runtime();
+    rt.current_phase = Some("dev".into());
+    rt.claim_id = Some("unlaunched".into());
+    rt.run_id = Some("run-fixture".into());
+    rt.coordinator_epoch = Some(1);
+    let cause=format!("Validation error: Cannot replace {}: preserve or move the existing scoped PRD before dispatch",path.display());
+    rt.set_last_error_details("E901", "dispatch_preparation", &cause);
+    rt.extra.insert(
+        "dispatch_preparation_failure".into(),
+        json!({"cause":cause,"claim_id":"unlaunched","phase":"dev"}),
+    );
+    snapshot.registry.tasks.push(Task {
+        id: "INDEPENDENT".into(),
+        state: "changes_requested".into(),
+        ..Default::default()
+    });
+    db.save_snapshot(&snapshot).unwrap();
+    // Simulate upgrading a project that already has a conclusive legacy
+    // escalation. The previous AI diagnosis must not silence native recovery.
+    let previous = macc_core::supervisor::incident::inspect(&paths)
+        .unwrap()
+        .unwrap();
+    let dir = root.join(".macc/log/supervisor");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("latest.json"), json!({"intervention":{
+        "incident":previous, "attempt":1, "status":"escalated", "tool":"fake",
+        "validation":[], "detail":"Worker dispatch failed.",
+        "diagnosis":{"summary":"Inspect worker manually", "repairable":false, "requires_human":true}
+    }}).to_string()).unwrap();
+    let _supervisor = start(root);
+    wait_for(|| report(root).is_some_and(|v| v["intervention"]["status"] == "ready_to_resume"));
+    let report = report(root).unwrap();
+    for args in [vec!["status"], vec!["coordinator", "status"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_macc"))
+            .arg("--cwd")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let status = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            status.contains("ready_to_resume") && status.contains("PREVIOUS"),
+            "{status}"
+        );
+    }
+    let incident_dir = root.join(".macc/log/coordinator/incidents");
+    let files: Vec<_> = std::fs::read_dir(incident_dir).unwrap().collect();
+    assert_eq!(files.len(), 1);
+    let incident: Value =
+        serde_json::from_slice(&std::fs::read(files[0].as_ref().unwrap().path()).unwrap()).unwrap();
+    assert_eq!(incident["supervisor"]["status"], "ready_to_resume");
+    assert_eq!(incident["run_id"], "run-fixture");
+    assert!(report["intervention"]["tool"].is_null());
+    assert!(report["intervention"]["restart_pid"].is_null());
+    assert!(report["intervention"]["diagnosis"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("PREVIOUS"));
+    let task = db
+        .load_registry()
+        .unwrap()
+        .find_task("ROOT")
+        .unwrap()
+        .clone();
+    assert!(scoped_prd::requeued(&task));
+    assert_eq!(task.worktree_path(), worker.to_str());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["tasks"][0]["id"],
+        "ROOT"
     );
 }

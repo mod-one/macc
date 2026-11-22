@@ -16,9 +16,9 @@ use super::sanitize::{
 };
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
-    append_coordinator_event_with_severity, find_reusable_worktree_native,
+    append_coordinator_event_with_severity, find_reusable_worktree_for_task,
     is_worktree_activity_recent, now_iso_coordinator, recompute_resource_locks_from_tasks,
-    score_worktree_session_warmth, set_registry_updated_at, write_worktree_prd_for_task,
+    score_worktree_session_warmth, set_registry_updated_at,
 };
 use crate::coordinator::runtime::{CoordinatorJob, CoordinatorRunState};
 use crate::coordinator::types::CoordinatorEnvConfig;
@@ -304,14 +304,21 @@ pub(super) async fn acquire_worktree_for_dispatch(
             });
     }
 
-    let (reusable, reuse_prepare_error) = find_reusable_worktree_native(
+    crate::coordinator::scoped_prd::check_base(repo_root, &task.base_branch, &task.id)?;
+    let search = find_reusable_worktree_for_task(
         repo_root,
         registry,
         &task.tool,
         &task.base_branch,
         session_cache_ttl_seconds,
         &state.last_session_activity_at,
-    )?;
+        &task.id,
+    );
+    let (reusable, reuse_prepare_error, preserved_prd) = match search {
+        Ok((worker, reason)) => (worker, reason, None),
+        Err(MaccError::ScopedPrd(incident)) => (None, None, Some(incident)),
+        Err(error) => return Err(error),
+    };
     if let Some((path, branch, last_commit, skipped_reset, dirty_before)) = reusable {
         let _ = candidate.worktree_slot.clone();
         let warm_by_session = matches!(
@@ -397,7 +404,14 @@ pub(super) async fn acquire_worktree_for_dispatch(
         scope: None,
         feature: None,
     };
-    let mut created = crate::create_worktrees(repo_root, &create_spec)?;
+    let mut created = crate::create_worktrees(repo_root, &create_spec).map_err(|error| {
+        if let Some(mut incident) = preserved_prd {
+            incident.allocation_error = Some(error.to_string());
+            MaccError::ScopedPrd(incident)
+        } else {
+            error
+        }
+    })?;
     let created = created
         .pop()
         .ok_or_else(|| MaccError::Validation("No worktree created".into()))?;
@@ -544,6 +558,7 @@ pub(super) async fn run_dispatch_pipeline(
         cfg,
     } = ctx;
     let mut dispatched = 0usize;
+    let mut deferred: BTreeMap<String, MaccError> = BTreeMap::new();
     while dispatched < remaining_budget {
         if state.effective_max_parallel > 0
             && state.active_jobs.len() >= state.effective_max_parallel
@@ -563,9 +578,33 @@ pub(super) async fn run_dispatch_pipeline(
             coordinator,
             state,
         );
-        let selection_registry =
+        let mut selection_registry =
             crate::coordinator::drain::selection_registry(repo_root, &registry)?;
+        if let Some(tasks) = selection_registry["tasks"].as_array_mut() {
+            for t in tasks {
+                if t["id"].as_str().is_some_and(|id| deferred.contains_key(id)) {
+                    t["state"] = "blocked".into();
+                }
+            }
+        }
         let Some(candidate) = select_dispatch_candidate(&selection_registry, &config) else {
+            let other_work = !state.active_jobs.is_empty()
+                || registry["tasks"].as_array().is_some_and(|tasks| {
+                    tasks.iter().any(|t| {
+                        t["state"]
+                            .as_str()
+                            .is_some_and(crate::coordinator::drain::is_pending)
+                    })
+                });
+            if !other_work {
+                if let Some((id, error)) = deferred.pop_first() {
+                    if let MaccError::ScopedPrd(incident) = error {
+                        failure::before_claim(repo_root, &mut registry, &id, *incident)?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
             break;
         };
         // Merge-gate: for retry tasks, check if the task branch is already
@@ -655,11 +694,31 @@ pub(super) async fn run_dispatch_pipeline(
         if !super::decision_preflight::ready(repo_root, &mut registry, &candidate.task.id)? {
             continue;
         }
-        let worktree =
+        let acquired =
             acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger)
-                .await?;
-        let claim =
-            claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
+                .await;
+        let worktree = match acquired {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                deferred.insert(candidate.task.id.clone(), error);
+                continue;
+            }
+        };
+        let claim = {
+            let _roles = crate::coordinator::worktree_roles::lock(repo_root)?;
+            let typed = crate::coordinator::model::TaskRegistry::from_value(&registry)?;
+            if let Err(error) = crate::coordinator::scoped_prd::prepare_dispatch(
+                repo_root,
+                &typed,
+                &worktree.path,
+                prd_file,
+                &candidate.task.id,
+            ) {
+                deferred.insert(candidate.task.id.clone(), error);
+                continue;
+            }
+            claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?
+        };
         match super::checkpoint_preflight::ready(repo_root, &mut registry, &claim.task_id, prd_file)
         {
             Ok(true) => {}
@@ -679,6 +738,9 @@ pub(super) async fn run_dispatch_pipeline(
             &claim,
         )
         .await?;
+        if pid.is_none() {
+            continue;
+        }
         let _ = append_task_lifecycle_event_with_session(
             repo_root,
             "task_dispatched",

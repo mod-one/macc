@@ -168,7 +168,7 @@ async fn tool_handoff_preserves_commits_index_working_files_and_untracked_data()
                 let typed = TaskRegistry::from_value(&registry).unwrap();
                 assert!(!typed.can_reuse_worktree_slot(fixture.worker.to_str().unwrap()));
                 // Another task must not be able to sanitize the parked slot.
-                let (reusable, _) = find_reusable_worktree_native(
+                let (reusable, _) = crate::coordinator::helpers::find_reusable_worktree_native(
                     fixture.root.path(),
                     &registry,
                     replacement,

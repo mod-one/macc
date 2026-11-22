@@ -294,6 +294,35 @@ pub fn find_reusable_worktree_native(
     Option<ReusableWorktree>,
     Option<ReusableWorktreePrepareError>,
 )> {
+    match find_reusable_worktree_for_task(
+        repo_root,
+        registry,
+        tool,
+        base_branch,
+        session_cache_ttl_seconds,
+        last_session_activity_at,
+        "-",
+    ) {
+        Err(MaccError::ScopedPrd(incident)) => Ok((
+            None,
+            Some(("scoped_prd_preserved".into(), incident.to_string())),
+        )),
+        result => result,
+    }
+}
+
+pub(super) fn find_reusable_worktree_for_task(
+    repo_root: &Path,
+    registry: &serde_json::Value,
+    tool: &str,
+    base_branch: &str,
+    session_cache_ttl_seconds: u64,
+    last_session_activity_at: &HashMap<String, i64>,
+    incoming: &str,
+) -> Result<(
+    Option<ReusableWorktree>,
+    Option<ReusableWorktreePrepareError>,
+)> {
     let _roles = super::worktree_roles::lock(repo_root)?;
     let registry = TaskRegistry::from_value(registry)?;
     let entries = crate::list_worktrees(repo_root)?;
@@ -329,6 +358,7 @@ pub fn find_reusable_worktree_native(
             .then_with(|| a.0.cmp(&b.0))
     });
     let mut last_prepare_error: Option<(String, String)> = None;
+    let mut preserved_prd = None;
     for (_, entry, _, _) in ranked_entries {
         let key = entry.path.to_string_lossy().to_string();
         if !registry.can_reuse_worktree_slot(&key) {
@@ -390,6 +420,22 @@ pub fn find_reusable_worktree_native(
                 ),
             ));
             continue;
+        }
+        if super::scoped_prd::worker_busy(&registry, &entry.path) {
+            last_prepare_error = Some(("worktree_busy".into(), key));
+            continue;
+        }
+        match super::scoped_prd::prepare(&entry.path, incoming) {
+            Ok(Some(incident)) => {
+                super::scoped_prd::record_event(repo_root, &incident, "scoped_prd_restored")?
+            }
+            Ok(None) => {}
+            Err(MaccError::ScopedPrd(incident)) => {
+                super::scoped_prd::record_event(repo_root, &incident, "scoped_prd_preserved")?;
+                preserved_prd = Some(incident);
+                continue;
+            }
+            Err(error) => return Err(error),
         }
         if !is_worktree_clean(&entry.path)?
             || (!released
@@ -468,7 +514,10 @@ pub fn find_reusable_worktree_native(
         crate::worktree::write_worktree_metadata(&entry.path, updated)?;
         return Ok((Some((entry.path, branch, last_commit, true, false)), None));
     }
-    Ok((None, last_prepare_error))
+    match preserved_prd {
+        Some(incident) => Err(MaccError::ScopedPrd(incident)),
+        None => Ok((None, last_prepare_error)),
+    }
 }
 
 #[cfg(test)]
@@ -804,6 +853,27 @@ pub fn append_coordinator_event_with_severity(
     message: &str,
     severity: &str,
 ) -> Result<()> {
+    append_coordinator_event_payload(
+        repo_root,
+        event_type,
+        task_id,
+        phase,
+        status,
+        severity,
+        serde_json::json!({"message":message}),
+    )
+}
+
+pub(super) fn append_coordinator_event_payload(
+    repo_root: &Path,
+    event_type: &str,
+    task_id: &str,
+    phase: &str,
+    status: &str,
+    severity: &str,
+    details: serde_json::Value,
+) -> Result<()> {
+    let message = details["message"].as_str().unwrap_or_default();
     let run_id = ensure_coordinator_run_id();
     let now = now_iso_coordinator();
     let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
@@ -819,7 +889,7 @@ pub fn append_coordinator_event_with_severity(
         "phase": phase,
         "status": status,
         "severity": severity,
-        "payload": {"message": message}
+        "payload": details
     });
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let _ = append_event_sqlite(&project_paths, &payload)?;
@@ -1212,18 +1282,12 @@ pub fn write_worktree_prd_for_task(
         .map_err(|e| MaccError::Validation(format!("Failed to serialize scoped PRD: {e}")))?;
     crate::project_ownership::validate_path(&paths, name)?;
     let existing = crate::plan::read_existing(&out_path);
-    if out_path.try_exists().map_err(crate::persistent::error)?
-        && !crate::project_ownership::owned_unchanged(&paths, name)?
+    if (out_path.try_exists().map_err(crate::persistent::error)?
+        && !crate::project_ownership::owned_unchanged(&paths, name)?)
+        || (worktree_path.join(".git").exists() && super::scoped_prd::tracked(worktree_path)?)
     {
-        crate::local_exclusions::refresh_runtime(&paths)?;
-        if crate::plan::compute_write_status(name, &bytes, &existing)
-            == crate::plan::ActionStatus::Unchanged
-        {
-            return Ok(());
-        }
-        return Err(MaccError::Validation(format!(
-            "Cannot replace {}: preserve or move the existing scoped PRD before dispatch",
-            out_path.display()
+        return Err(MaccError::ScopedPrd(Box::new(
+            super::scoped_prd::Incident::unverified(worktree_path, task_id),
         )));
     }
     let status =

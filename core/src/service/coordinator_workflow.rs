@@ -1678,12 +1678,15 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
 
     // Surface the most recent run's status and stop reason so clients can show
     // *why* a run ended (normal completion vs error) once it is no longer live.
-    if let Ok(Some(run)) = sqlite.get_latest_coordinator_run() {
-        status.last_run_status = Some(run.status);
-        status.last_run_stop_reason = run.stop_reason;
-    }
     status.last_run_summary =
-        crate::service::run_summary::load_latest_run_summary(&sqlite, &registry)?;
+        crate::service::run_summary::load_project_run_summary(paths, &sqlite, &registry)?;
+    if let Some(summary) = &status.last_run_summary {
+        status.last_run_status = Some(summary.status.clone());
+        status.last_run_stop_reason = summary
+            .recent_runs
+            .first()
+            .and_then(|run| run.stop_reason.clone());
+    }
     status.pending_approvals =
         crate::coordinator::approval::current_pending_approvals(&paths.root, &registry);
 
@@ -2268,6 +2271,8 @@ pub fn coordinator_block_task(
 
 #[path = "coordinator_unblock.rs"]
 pub(crate) mod unblocking;
+pub use unblocking::submit as submit_unblock_request;
+
 pub fn coordinator_unblock_task(
     paths: &ProjectPaths,
     coordinator_cfg: Option<&CoordinatorConfig>,

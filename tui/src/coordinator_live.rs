@@ -336,6 +336,21 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
                         Style::default().fg(theme.muted),
                     ),
                 ]));
+                if let Some(note) = &summary.supervisor {
+                    logs_lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{}: ", note.heading()),
+                            Style::default().fg(theme.accent),
+                        ),
+                        Span::raw(note.diagnosis.clone()),
+                    ]));
+                    if let Some(outcome) = &note.outcome {
+                        logs_lines.push(Line::from(outcome.clone()));
+                    }
+                    if let Some(action) = &note.next_action {
+                        logs_lines.push(Line::from(format!("Supervisor next: {action}")));
+                    }
+                }
                 if let Some(check) = summary.task_id.as_deref().and_then(|id| {
                     state
                         .coordinator_registry_for_render()?

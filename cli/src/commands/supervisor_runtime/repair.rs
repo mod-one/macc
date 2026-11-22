@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Diagnosis {
     /// Issued by MACC after binding a supervisor script to a stopped task.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
