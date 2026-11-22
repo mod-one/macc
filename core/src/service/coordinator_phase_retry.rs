@@ -1,5 +1,5 @@
 //! Retry a retained phase using the same review budget as the control plane.
-use super::{apply_storage_mode_args, parse_retry_phase_args, retry_dev_phase};
+use super::{apply_storage_mode_args, parse_retry_phase_args};
 use crate::config::CoordinatorConfig;
 use crate::coordinator::{
     control_plane::CoordinatorLog, engine as coordinator_engine, types::CoordinatorEnvConfig,
@@ -11,14 +11,14 @@ use std::collections::BTreeMap;
 pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     engine: &E,
     paths: &ProjectPaths,
-    canonical: &crate::config::CanonicalConfig,
+    _canonical: &crate::config::CanonicalConfig,
     coordinator_cfg: Option<&CoordinatorConfig>,
     env_cfg: &CoordinatorEnvConfig,
     args: &[String],
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
     let (task_id, phase, skip) = parse_retry_phase_args(args)?;
-    let _phase_guard = if matches!(phase.as_str(), "review" | "fix") {
+    let _phase_guard = if matches!(phase.as_str(), "review" | "fix" | "dev") {
         Some(crate::coordinator::control_plane::acquire_phase_driver(
             &paths.root,
         )?)
@@ -40,15 +40,13 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     }
 
     if phase == "dev" {
-        state_args.insert("task-id".to_string(), task_id.clone());
-        engine.coordinator_state_increment_retries(&paths.root, &state_args)?;
         return retry_dev_phase(
             engine,
             paths,
-            canonical,
             coordinator_cfg,
             env_cfg,
-            &task_id,
+            task,
+            &state_args,
             logger,
         );
     }
@@ -162,6 +160,10 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
     outcome
 }
+
+#[path = "coordinator_dev_retry.rs"]
+mod dev;
+use dev::retry_dev_phase;
 
 #[cfg(test)]
 mod tests {
