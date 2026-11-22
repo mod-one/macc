@@ -258,15 +258,6 @@ pub fn validate_writes(plan: &ActionPlan) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn owned_unchanged(paths: &ProjectPaths, path: &str) -> Result<bool> {
-    let inventory = crate::project_ownership::read(paths)?;
-    Ok(!inventory.protected.contains(path)
-        && inventory.files.get(path).is_some_and(|expected| {
-            crate::project_ownership::digest(&paths.root.join(path))
-                .is_ok_and(|actual| &actual == expected)
-        }))
-}
-
 pub(crate) fn preserve_custom(
     paths: &ProjectPaths,
     protected: &BTreeSet<String>,
@@ -277,7 +268,7 @@ pub(crate) fn preserve_custom(
         if let Action::WriteFile { path, content, .. } = &action {
             if protected.contains(path)
                 && paths.root.join(path).is_file()
-                && !owned_unchanged(paths, path)?
+                && !crate::project_ownership::owned_unchanged(paths, path)?
             {
                 if std::fs::read(paths.root.join(path)).map_err(crate::persistent::error)?
                     != *content

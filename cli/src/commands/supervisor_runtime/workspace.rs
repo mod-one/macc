@@ -1,4 +1,5 @@
 //! Owned supervisor slots and durable evidence, independent of attempt log directories.
+mod config_copy;
 use super::{io, repair::git, report::write_json};
 use macc_core::{MaccError, Result};
 use serde_json::{json, Value};
@@ -49,6 +50,7 @@ pub fn prepare(
     target: &Target,
     retain_branch: bool,
 ) -> Result<PathBuf> {
+    macc_core::gitignore_policy::ensure_local_exclusions(root)?;
     let head = target.base.as_str();
     let pool = root.join(".macc/worktree");
     std::fs::create_dir_all(&pool).map_err(|e| io(&pool, e))?;
@@ -110,7 +112,7 @@ pub fn prepare(
             "repair_branch": &branch,
         });
         write_json(&path.join(OWNER), &marker)?;
-        sync_config(root, &path)?;
+        config_copy::sync(root, &path)?;
         return Ok(path);
     }
     let path = vacant.ok_or_else(|| MaccError::Validation("No vacant supervisor slot".into()))?;
@@ -125,27 +127,6 @@ pub fn prepare(
     }
     macc_core::project_ownership::record_branch(root, &branch)?;
     std::fs::create_dir_all(path.join(".macc")).map_err(|e| io(&path, e))?;
-    // This repository-wide exclude keeps local evidence out of repair commits.
-    let exclude = PathBuf::from(git(&path, &["rev-parse", "--git-path", "info/exclude"])?);
-    let exclude = if exclude.is_absolute() {
-        exclude
-    } else {
-        path.join(exclude)
-    };
-    let excluded = std::fs::read_to_string(&exclude)
-        .is_ok_and(|text| text.lines().any(|line| line.trim() == ".macc/"));
-    if !excluded {
-        use std::io::Write;
-        if let Some(parent) = exclude.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io(&exclude, e))?;
-        }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&exclude)
-            .and_then(|mut file| file.write_all(b"\n.macc/\n"))
-            .map_err(|e| io(&exclude, e))?;
-    }
     let marker = json!({
         "incident_id": incident,
         "base": head,
@@ -153,7 +134,7 @@ pub fn prepare(
         "repair_branch": &branch,
     });
     write_json(&path.join(OWNER), &marker)?;
-    sync_config(root, &path)?;
+    config_copy::sync(root, &path)?;
     Ok(path)
 }
 /// Named repair refs isolate and validate fixes. When retain_branch is false,
@@ -179,14 +160,6 @@ fn repair_branch(root: &Path, incident: &str, base: &str) -> Result<String> {
     Err(MaccError::Validation(
         "No vacant supervisor repair branch".into(),
     ))
-}
-
-fn sync_config(root: &Path, path: &Path) -> Result<()> {
-    let cfg = root.join(".macc/macc.yaml");
-    if cfg.exists() {
-        std::fs::copy(&cfg, path.join(".macc/macc.yaml")).map_err(|e| io(&cfg, e))?;
-    }
-    Ok(())
 }
 
 /// Content identity of a slot (tracked, staged and untracked files), computed
@@ -223,10 +196,19 @@ pub fn restore_repair(path: &Path) -> Result<()> {
 
 pub fn safe_to_remove(root: &Path, path: &Path) -> Result<bool> {
     // A slot parked on the base still owns an unrestored repair.
-    if path.join(RESTORE).exists() {
+    if path.join(RESTORE).exists() || config_copy::customized(path) {
         return Ok(false);
     }
-    if !git(path, &["status", "--porcelain"])?.is_empty() {
+    let status = git(
+        path,
+        &["status", "--porcelain", "--untracked-files=all", "-z"],
+    )?;
+    if !status.is_empty()
+        && !(status
+            .split_terminator('\0')
+            .all(|row| row.get(3..) == Some(config_copy::CONFIG))
+            && config_copy::disposable(root, path)?)
+    {
         return Ok(false);
     }
     if !macc_core::project_ownership::unowned_ignored_files(path)?.is_empty() {
@@ -334,6 +316,7 @@ pub fn finish(
         ));
     }
     let target = owner["branch"].as_str();
+    config_copy::restore_before_removal(root, path)?;
 
     git(
         root,
@@ -376,6 +359,65 @@ mod tests {
         git(root, &["commit", "-qm", "initial"]).unwrap();
         temp
     }
+    #[test]
+    fn a_supervisor_slot_keeps_portable_setup_visible_before_apply() {
+        let temp = fixture();
+        let root = temp.path();
+        git(root, &["rm", ".gitignore"]).unwrap();
+        git(root, &["commit", "-qm", "project without shared policy"]).unwrap();
+        let (slot, _) = open(root, "visibility").unwrap();
+        for path in [root, slot.as_path()] {
+            for (file, expected) in [
+                (OWNER, true),
+                (RESTORE, true),
+                (".macc/log/diagnosis.log", true),
+                (".macc/macc.yaml", false),
+                (".macc/catalog/nested/item.json", false),
+                (".macc/skills.lock.json", false),
+            ] {
+                let status = macc_core::git::run_git_output_mapped(
+                    path,
+                    &["check-ignore", "-q", "--no-index", "--", file],
+                    "verify visibility",
+                )
+                .unwrap()
+                .status;
+                assert_eq!(status.code(), Some(if expected { 0 } else { 1 }), "{file}");
+            }
+        }
+        let policy = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        assert!(!policy.lines().any(|line| line == ".macc/"));
+    }
+
+    #[test]
+    fn only_the_unchanged_portable_config_copy_is_disposable() {
+        let temp = fixture();
+        let root = temp.path();
+        git(root, &["rm", ".gitignore"]).unwrap();
+        git(root, &["commit", "-qm", "no portable setup in HEAD"]).unwrap();
+        std::fs::create_dir_all(root.join(".macc")).unwrap();
+        let primary = macc_core::config::CanonicalConfig::default()
+            .to_yaml()
+            .unwrap();
+        std::fs::write(root.join(config_copy::CONFIG), &primary).unwrap();
+        let (slot, _) = open(root, "untracked-config").unwrap();
+        assert!(safe_to_remove(root, &slot).unwrap());
+        std::fs::write(slot.join(config_copy::CONFIG), "customized").unwrap();
+        assert!(!safe_to_remove(root, &slot).unwrap());
+        assert!(open(root, "untracked-config").is_err());
+        assert_eq!(
+            std::fs::read_to_string(slot.join(config_copy::CONFIG)).unwrap(),
+            "customized"
+        );
+        std::fs::write(slot.join(config_copy::CONFIG), &primary).unwrap();
+        assert!(finish(root, &slot, &root.join(".macc/log/receipt"), true, false).unwrap());
+        assert!(!slot.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(config_copy::CONFIG)).unwrap(),
+            primary
+        );
+    }
+
     #[test]
     fn same_incident_reuses_dirty_slot_and_archive_precedes_clean_cleanup() {
         let temp = fixture();

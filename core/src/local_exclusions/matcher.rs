@@ -25,6 +25,23 @@ pub(super) fn covered(
     user_exclude: &str,
     candidates: &[(String, bool)],
 ) -> Result<BTreeSet<(String, bool)>> {
+    match_policy(root, Some(user_exclude), candidates)
+}
+
+/// Exclude precedence is global < info/exclude < .gitignore. In a checkout
+/// without a portable policy, a local exception must respect personal ignores.
+pub(super) fn global_only(
+    root: &Path,
+    candidates: &[(String, bool)],
+) -> Result<BTreeSet<(String, bool)>> {
+    match_policy(root, None, candidates)
+}
+
+fn match_policy(
+    root: &Path,
+    user_exclude: Option<&str>,
+    candidates: &[(String, bool)],
+) -> Result<BTreeSet<(String, bool)>> {
     if candidates.is_empty() {
         return Ok(BTreeSet::new());
     }
@@ -39,8 +56,11 @@ pub(super) fn covered(
         ));
     }
     fs::create_dir_all(mirror.path().join(".git/info")).map_err(crate::persistent::error)?;
-    fs::write(mirror.path().join(".git/info/exclude"), user_exclude)
-        .map_err(crate::persistent::error)?;
+    fs::write(
+        mirror.path().join(".git/info/exclude"),
+        user_exclude.unwrap_or_default(),
+    )
+    .map_err(crate::persistent::error)?;
     let mut ignore_dirs = BTreeSet::from([PathBuf::new()]);
     for (relative, directory) in candidates {
         let target = mirror.path().join(relative);
@@ -56,7 +76,7 @@ pub(super) fn covered(
             parent = dir.parent();
         }
     }
-    for dir in ignore_dirs {
+    for dir in ignore_dirs.into_iter().filter(|_| user_exclude.is_some()) {
         let source = root.join(&dir).join(".gitignore");
         if source
             .symlink_metadata()

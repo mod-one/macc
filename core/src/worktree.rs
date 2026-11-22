@@ -475,36 +475,24 @@ pub fn ensure_performer(worktree_path: &Path) -> Result<PathBuf> {
     let _ = crate::ensure_embedded_automation_scripts(&worktree_paths)?;
     let source = worktree_paths.automation_performer_path();
 
-    if target.exists() {
-        let inventory = crate::project_ownership::read(&worktree_paths)?;
-        if !inventory.files.get("performer.sh").is_some_and(|hash| {
-            crate::project_ownership::digest(&target).is_ok_and(|actual| &actual == hash)
-        }) {
-            // A user script or a modified generated launcher stays intact. The
-            // task runner can execute the canonical embedded launcher directly.
-            return Ok(source);
-        }
-        if std::fs::read(&target).ok() == std::fs::read(&source).ok() {
-            return Ok(target);
-        }
+    if target.is_symlink()
+        || (target.exists()
+            && !crate::project_ownership::owned_unchanged(&worktree_paths, "performer.sh")?)
+    {
+        // Another checkout may already have a common exclusion at this name.
+        crate::local_exclusions::refresh_runtime(&worktree_paths)?;
+        return Ok(source);
     }
-
-    let existed = target.exists();
-    let previous = std::fs::read(&target).ok();
-    std::fs::copy(&source, &target).map_err(|e| MaccError::Io {
-        path: target.to_string_lossy().into(),
-        action: "copy performer.sh".into(),
+    let launcher = std::fs::read(&source).map_err(|e| MaccError::Io {
+        path: source.display().to_string(),
+        action: "read embedded performer".into(),
         source: e,
     })?;
-
-    crate::project_ownership::record_write(
-        &worktree_paths,
-        &target,
-        existed,
-        vec![],
-        previous.as_deref(),
-    )?;
-    crate::ensure_gitignore_entries(&worktree_paths, &["performer.sh"], None)?;
+    let status =
+        crate::write_if_changed(&worktree_paths, "performer.sh", &target, &launcher, |_| {
+            Ok(())
+        })?;
+    crate::local_exclusions::after_runtime_write(&worktree_paths, "performer.sh", status)?;
 
     #[cfg(unix)]
     {
@@ -588,7 +576,7 @@ pub fn sync_context_files_from_root(
 
         if dest.is_file()
             && protected.contains(&rel)
-            && !crate::project_context::owned_unchanged(&dest_paths, &rel)?
+            && !crate::project_ownership::owned_unchanged(&dest_paths, &rel)?
         {
             tracing::warn!(path=%dest.display(), "Preserved customized worktree context");
             continue;
@@ -596,8 +584,8 @@ pub fn sync_context_files_from_root(
         // A worktree's freshly generated bundle describes its own installed
         // tools/skills. Never replace it with the broader root bundle.
         if dest.is_file()
-            && crate::project_context::owned_unchanged(&source_paths, &rel)?
-            && crate::project_context::owned_unchanged(&dest_paths, &rel)?
+            && crate::project_ownership::owned_unchanged(&source_paths, &rel)?
+            && crate::project_ownership::owned_unchanged(&dest_paths, &rel)?
             && std::fs::read(&dest)
                 .map_err(crate::persistent::error)?
                 .windows(b"MACC deterministic context v2".len())
@@ -610,22 +598,17 @@ pub fn sync_context_files_from_root(
             action: "read context source".into(),
             source,
         })?;
-        crate::write_if_changed(
-            &ProjectPaths::from_root(worktree_root),
-            &rel,
-            &dest,
-            &bytes,
-            |existing| {
-                if existing.exists {
-                    crate::create_timestamped_backup(
-                        &dest_paths,
-                        &chrono::Local::now().format("%Y%m%d-%H%M%S-%f").to_string(),
-                        &rel,
-                    )?;
-                }
-                Ok(())
-            },
-        )?;
+        let status = crate::write_if_changed(&dest_paths, &rel, &dest, &bytes, |existing| {
+            if existing.exists {
+                crate::create_timestamped_backup(
+                    &dest_paths,
+                    &chrono::Local::now().format("%Y%m%d-%H%M%S-%f").to_string(),
+                    &rel,
+                )?;
+            }
+            Ok(())
+        })?;
+        crate::local_exclusions::after_runtime_write(&dest_paths, &rel, status)?;
     }
     Ok(())
 }

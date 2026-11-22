@@ -44,9 +44,9 @@ pub fn rewrite(existing: &str, requested: &BTreeSet<String>) -> String {
         lines.join("\n") + "\n"
     }
 }
-/// Local defense in depth, never an allow-rule for config: exclusions only.
-pub(crate) fn ensure_local_exclusions(common: &Path) -> Result<()> {
-    crate::local_exclusions::bootstrap(common)
+/// Install the runtime visibility boundary even on branches without a project policy.
+pub fn ensure_local_exclusions(root: &Path) -> Result<()> {
+    crate::local_exclusions::bootstrap(root)
 }
 #[cfg(test)]
 mod tests {

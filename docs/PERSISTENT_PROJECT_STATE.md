@@ -133,6 +133,11 @@ Generated tool assets are excluded locally in Git's common `info/exclude`, insid
 `# BEGIN MACC local tool exclusions` / `# END MACC local tool exclusions`.
 Apply removes historical per-file entries only from MACC's shared block; rules
 outside managed blocks remain user policy. MACC does not change `core.excludesFile`.
+Writing or reusing a worker's `performer.sh` or `worktree.prd.json` also reconciles
+missing local rules. This works before Apply and uses the same ownership records
+as generated tool directories. A conflicting, customized scoped PRD stops dispatch
+before replacement. The local runtime rules cover supervisor slots on branches
+that have yet to receive the project's portable policy.
 
 - A directory proven to have been created by MACC receives one anchored directory
   rule; child rules are redundant and removed from the managed local block.
@@ -163,8 +168,8 @@ protect private authority/worktrees when portable configuration is not yet prese
 Without a Git repository, no `info/exclude` is created and MACC does not initialize
 Git implicitly. Exclusions never untrack files already in the Git index.
 
-Runtime initialization and supervisor restarts do not rewrite visibility rules or
-publish previously ignored configuration. MACC never automatically stages or
+Runtime initialization and supervisor restarts preserve the shared project ignore file.
+The local fallback respects personal Git ignores for portable files. MACC never automatically stages or
 commits these portable files. Review
 configuration/catalog contents for private values before publishing them. Doctor
 and Apply diagnose typed native-session/lease/owner fields, literal credentials,

@@ -626,14 +626,7 @@ fn init_project_files(paths: &ProjectPaths, force: bool, update_visibility: bool
     }
 
     if update_visibility {
-        let mut ignore_entries: Vec<String> = BASELINE_IGNORE_ENTRIES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        ignore_entries.extend(collect_tool_gitignore_entries(paths, None));
-        ignore_entries.extend(["performer.sh".into(), "worktree.prd.json".into()]);
-        let ignore_refs: Vec<&str> = ignore_entries.iter().map(|s| s.as_str()).collect();
-        let gitignore_status = ensure_gitignore_entries(paths, &ignore_refs, None)?;
+        let gitignore_status = ensure_gitignore_entries(paths, BASELINE_IGNORE_ENTRIES, None)?;
         if gitignore_status == plan::ActionStatus::Created {
             created_paths.push(".gitignore".to_string());
         }
@@ -691,16 +684,6 @@ pub fn build_plan(
     for entry in BASELINE_IGNORE_ENTRIES {
         total_plan.add_action(plan::Action::EnsureGitignore {
             pattern: entry.to_string(),
-            scope: plan::Scope::Project,
-        });
-    }
-
-    let mut tool_ignore_entries =
-        collect_tool_gitignore_entries(paths, Some(&resolved.tools.enabled));
-    tool_ignore_entries.extend(["performer.sh".into(), "worktree.prd.json".into()]);
-    for entry in tool_ignore_entries {
-        total_plan.add_action(plan::Action::EnsureGitignore {
-            pattern: entry,
             scope: plan::Scope::Project,
         });
     }
@@ -1292,7 +1275,7 @@ where
                 let existing = plan::read_existing(&full_path);
                 if protected_context_paths.contains(&path)
                     && existing.exists
-                    && !project_context::owned_unchanged(paths, &path)?
+                    && !project_ownership::owned_unchanged(paths, &path)?
                 {
                     if op.after.as_deref() != existing.bytes.as_deref() {
                         report.warnings.push(format!("Preserved customized context {path}; review the generated context migration"));
@@ -1505,36 +1488,6 @@ pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
 }
 
 pub const BASELINE_IGNORE_ENTRIES: &[&str] = gitignore_policy::BASELINE;
-
-fn collect_tool_gitignore_entries(
-    paths: &ProjectPaths,
-    enabled_tools: Option<&[String]>,
-) -> Vec<String> {
-    let search_paths = crate::tool::ToolSpecLoader::default_search_paths(&paths.root);
-    let loader = crate::tool::ToolSpecLoader::new(search_paths);
-    let (specs, _) = loader.load_all_with_embedded();
-
-    let enabled: Option<HashSet<&str>> =
-        enabled_tools.map(|tools| tools.iter().map(|id| id.as_str()).collect());
-
-    let mut seen = HashSet::new();
-    let mut entries = Vec::new();
-
-    for spec in specs {
-        if let Some(ref enabled_set) = enabled {
-            if !enabled_set.contains(spec.id.as_str()) {
-                continue;
-            }
-        }
-        for entry in spec.gitignore {
-            if seen.insert(entry.clone()) {
-                entries.push(entry);
-            }
-        }
-    }
-
-    entries
-}
 
 pub fn ensure_gitignore_entries(
     paths: &ProjectPaths,

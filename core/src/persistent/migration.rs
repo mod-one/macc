@@ -76,7 +76,7 @@ pub(super) fn prepare(root: &Path) -> Result<PathBuf> {
         )?);
     }
     // Exclude technical state even before Apply updates the project's managed .gitignore.
-    crate::gitignore_policy::ensure_local_exclusions(&common)?;
+    crate::gitignore_policy::ensure_local_exclusions(root)?;
     backup(&legacy)?;
     move_integration(&primary, &legacy)?;
     io(fs::write(legacy.join("layout.json"), LAYOUT))?;

@@ -5,7 +5,25 @@ use macc_core::{MaccError, Result};
 use std::{collections::BTreeSet, path::Path};
 
 pub fn prepare(worktree: &Path, incident: &Incident) -> Result<()> {
-    git(worktree, &["add", "--all"])?;
+    // Baseline verification stages a full snapshot, including the copied runner
+    // configuration. Publish only application changes from this repair slot.
+    let staged_setup = git(
+        worktree,
+        &["diff", "--cached", "--name-only", "--", ".macc"],
+    )?;
+    if !staged_setup.is_empty() {
+        if !git(worktree, &["diff", "--name-only", "--", ".macc"])?.is_empty() {
+            return Err(MaccError::Validation(
+                "Supervisor slot has separately staged MACC setup changes. Preserve or reconcile the index before retrying.".into(),
+            ));
+        }
+        git(worktree, &["reset", "-q", "HEAD", "--", ".macc"])?;
+    }
+    // A literal ignored directory in a pathspec makes Git reject the add.
+    git(
+        worktree,
+        &["add", "--all", "--", ".", ":(top,exclude,glob)[.]macc/**"],
+    )?;
     // Omit newly generated dependency/cache files while preserving deletions
     // of previously committed caches and retaining all evidence on disk.
     let added = git(
@@ -66,13 +84,15 @@ mod tests {
         git(p, &["init", "-q"]).unwrap();
         git(p, &["config", "user.name", "Test"]).unwrap();
         git(p, &["config", "user.email", "test@example.invalid"]).unwrap();
-        std::fs::write(p.join(".gitignore"), ".macc/\n").unwrap();
+        std::fs::write(p.join(".gitignore"), "/.macc/*\n!/.macc/macc.yaml\n").unwrap();
         git(p, &["add", "."]).unwrap();
         git(p, &["commit", "-qm", "initial"]).unwrap();
         std::fs::create_dir_all(p.join("docs/evidence/.vite/deps")).unwrap();
         std::fs::create_dir_all(p.join(".macc")).unwrap();
         std::fs::write(p.join("docs/evidence/.vite/deps/cache.js"), "cache").unwrap();
         std::fs::write(p.join("docs/evidence/results.txt"), "proof").unwrap();
+        std::fs::write(p.join(".macc/macc.yaml"), "runtime: configuration").unwrap();
+        git(p, &["add", ".macc/macc.yaml"]).unwrap();
         let incident = Incident {
             id: "i".into(),
             run_id: "r".into(),
@@ -86,6 +106,8 @@ mod tests {
         let staged = git(p, &["diff", "--cached", "--name-only"]).unwrap();
         assert!(staged.contains("results.txt"));
         assert!(!staged.contains("cache.js"));
+        assert!(!staged.contains(".macc/"));
+        assert!(p.join(".macc/macc.yaml").is_file());
         assert!(p.join("docs/evidence/.vite/deps/cache.js").exists());
     }
 }

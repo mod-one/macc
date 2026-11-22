@@ -1205,12 +1205,32 @@ pub fn write_worktree_prd_for_task(
     worktree_path: &Path,
 ) -> Result<()> {
     let payload = scoped_prd_for_task(prd_file, task_id)?;
-    let out_path = worktree_path.join("worktree.prd.json");
+    let name = "worktree.prd.json";
+    let out_path = worktree_path.join(name);
     let paths = crate::ProjectPaths::from_root(worktree_path);
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| MaccError::Validation(format!("Failed to serialize scoped PRD: {e}")))?;
-    crate::write_if_changed(&paths, "worktree.prd.json", &out_path, &bytes, |_| Ok(()))?;
-    Ok(())
+    crate::project_ownership::validate_path(&paths, name)?;
+    let existing = crate::plan::read_existing(&out_path);
+    if out_path.try_exists().map_err(crate::persistent::error)?
+        && !crate::project_ownership::owned_unchanged(&paths, name)?
+    {
+        crate::local_exclusions::refresh_runtime(&paths)?;
+        if crate::plan::compute_write_status(name, &bytes, &existing)
+            == crate::plan::ActionStatus::Unchanged
+        {
+            return Ok(());
+        }
+        return Err(MaccError::Validation(format!(
+            "Cannot replace {}: preserve or move the existing scoped PRD before dispatch",
+            out_path.display()
+        )));
+    }
+    let status =
+        crate::write_if_changed_with_existing(&paths, name, &out_path, &bytes, &existing, |_| {
+            Ok(())
+        })?;
+    crate::local_exclusions::after_runtime_write(&paths, name, status)
 }
 
 pub fn is_pid_running(pid: i64) -> bool {

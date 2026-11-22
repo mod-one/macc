@@ -120,7 +120,7 @@ fn nested_rules_and_local_user_rules_are_respected_without_being_changed() {
     fs::write(&path, user).unwrap();
     deploy(&paths, &[".tool/skills/new/SKILL.md", "settings.json"]);
     let local = excludes(&paths);
-    assert!(local.starts_with(user));
+    assert!(local.ends_with(user));
     assert!(!local.contains("/.tool/"));
     assert_eq!(local.matches("/settings.json").count(), 1);
 }
@@ -160,7 +160,7 @@ fn clear_prunes_owned_rules_and_preserves_user_local_rules() {
     assert!(proof.contains(".tool/settings.json"));
     assert!(proof.contains("AGENTS.md"));
     let local = excludes(&paths);
-    assert!(local.starts_with("# user\n*.private\n"));
+    assert!(local.ends_with("# user\n*.private\n"));
     assert!(!local.contains(".tool"));
     assert!(!local.contains("AGENTS.md"));
 }
@@ -244,9 +244,9 @@ fn apply_after_clone_reconstructs_exclusions_from_new_local_creation() {
 fn malformed_blocks_and_literal_metacharacters_are_safe() {
     let before = format!("# user\n{BEGIN}\n*.private\n");
     let rules = BTreeSet::from(["/.tool/".into()]);
-    let after = rewrite(&before, &rules);
-    assert!(after.starts_with(&before));
-    assert_eq!(rewrite(&after, &rules), after);
+    let after = rewrite(&before, &rules, &[]);
+    assert!(after.ends_with(&before));
+    assert_eq!(rewrite(&after, &rules, &[]), after);
     let (_tmp, paths) = fixture();
     deploy(&paths, &["tool[1]/generated", "assets/a*b.txt"]);
     assert!(ignored(&paths, "tool[1]/generated"));
@@ -258,8 +258,8 @@ fn bootstrap_never_adopts_rules_from_an_unterminated_user_block() {
     let (_tmp, paths) = fixture();
     let before = format!("# user\n{BEGIN}\n/visible\n!/visible\n");
     fs::write(paths.root.join(".git/info/exclude"), &before).unwrap();
-    bootstrap(&crate::git::git_common_dir(&paths.root).unwrap()).unwrap();
-    assert!(excludes(&paths).starts_with(&before));
+    bootstrap(&paths.root).unwrap();
+    assert!(excludes(&paths).ends_with(&before));
     assert_eq!(
         excludes(&paths)
             .lines()
@@ -346,4 +346,133 @@ fn symlinked_exclude_file_is_refused_before_generating_assets() {
     .is_err());
     assert!(!paths.root.join(".tool/settings.json").exists());
     assert_eq!(fs::read_to_string(user_file.path()).unwrap(), "user rules");
+}
+
+#[test]
+fn standalone_worker_writes_install_and_repair_shared_local_exclusions() {
+    let (_tmp, root) = fixture();
+    let project_rules = "# project policy\n*.private\n\n";
+    fs::write(root.root.join(".gitignore"), project_rules).unwrap();
+    git(&root.root, &["add", ".gitignore"]);
+    git(&root.root, &["commit", "-qm", "initial"]);
+    let tmp = tempfile::tempdir().unwrap();
+    let slot = tmp.path().join("slot");
+    git(
+        &root.root,
+        &["worktree", "add", "--detach", slot.to_str().unwrap()],
+    );
+    let worker = ProjectPaths::from_root(&slot);
+    let prd = root.root.join("prd.json");
+    fs::write(&prd, r#"{"tasks":[{"id":"A"}]}"#).unwrap();
+    let scope =
+        || crate::coordinator::helpers::write_worktree_prd_for_task(&prd, "A", &slot).unwrap();
+    scope();
+    assert!(ignored(&worker, "worktree.prd.json"));
+    crate::ensure_performer(&slot).unwrap();
+    let local = root.root.join(".git/info/exclude");
+    fs::write(&local, "# custom\n*.mine\n").unwrap();
+    crate::ensure_performer(&slot).unwrap();
+    assert!(ignored(&worker, "performer.sh"));
+    fs::write(&local, "# custom\n*.mine\n").unwrap();
+    scope();
+    assert!(ignored(&worker, "worktree.prd.json"));
+    for checkout in [&worker, &root] {
+        assert_eq!(
+            fs::read_to_string(checkout.root.join(".gitignore")).unwrap(),
+            project_rules
+        );
+        assert!(ignored(checkout, "performer.sh"));
+        assert!(ignored(checkout, "worktree.prd.json"));
+        assert!(!ignored(checkout, "scripts/performer.sh"));
+    }
+    deploy(
+        &worker,
+        &[".codex/config.toml", ".codex/skills/sample/SKILL.md"],
+    );
+    for checkout in [&worker, &root] {
+        for path in [
+            ".macc/state/tool-sessions.json",
+            ".macc/log/run",
+            ".macc/persistent/generated-project-files.json",
+            ".macc/memory.db-wal",
+            ".codex/config.toml",
+            ".codex/skills/sample/SKILL.md",
+        ] {
+            assert!(ignored(checkout, path), "{path}");
+        }
+        for path in [
+            ".macc/macc.yaml",
+            ".macc/catalog/nested/item.json",
+            ".macc/skills.lock.json",
+        ] {
+            assert!(!ignored(checkout, path), "{path}");
+        }
+    }
+    let local = fs::read_to_string(local).unwrap();
+    assert_eq!(local.lines().filter(|l| *l == "/.codex/").count(), 1);
+    assert!(!local.contains("/.codex/config.toml"));
+    assert!(local.contains("*.mine\n"));
+
+    // A user can introduce a conflicting path after a common rule was installed.
+    fs::write(root.root.join("performer.sh"), "my launcher").unwrap();
+    assert_ne!(
+        crate::ensure_performer(&root.root).unwrap(),
+        root.root.join("performer.sh")
+    );
+    assert!(!ignored(&root, "performer.sh"));
+    assert_eq!(
+        fs::read_to_string(root.root.join("performer.sh")).unwrap(),
+        "my launcher"
+    );
+}
+
+#[test]
+fn existing_user_runner_files_stay_visible_and_intact() {
+    let (_tmp, paths) = fixture();
+    for name in ["performer.sh", "worktree.prd.json"] {
+        fs::write(paths.root.join(name), "user content").unwrap();
+    }
+    let prd = paths.root.join("prd.json");
+    fs::write(&prd, r#"{"tasks":[{"id":"A"}]}"#).unwrap();
+    assert_ne!(
+        crate::ensure_performer(&paths.root).unwrap(),
+        paths.root.join("performer.sh")
+    );
+    assert!(
+        crate::coordinator::helpers::write_worktree_prd_for_task(&prd, "A", &paths.root).is_err()
+    );
+    deploy(&paths, &[".codex/settings.json"]);
+    for name in ["performer.sh", "worktree.prd.json"] {
+        assert_eq!(
+            fs::read_to_string(paths.root.join(name)).unwrap(),
+            "user content"
+        );
+        assert!(!ignored(&paths, name));
+    }
+}
+
+#[test]
+fn runtime_bootstrap_respects_personal_ignores_before_project_setup() {
+    let (_tmp, paths) = fixture();
+    let global = tempfile::NamedTempFile::new().unwrap();
+    fs::write(global.path(), "*.yaml\n").unwrap();
+    git(
+        &paths.root,
+        &[
+            "config",
+            "core.excludesFile",
+            global.path().to_str().unwrap(),
+        ],
+    );
+    for prepare in [true, false] {
+        if prepare {
+            bootstrap(&paths.root).unwrap();
+        } else {
+            reconcile(&paths).unwrap();
+        }
+        assert!(ignored(&paths, ".macc/macc.yaml"));
+        assert!(ignored(&paths, ".macc/supervisor-owner.json"));
+        assert!(!ignored(&paths, ".macc/catalog/nested/file.json"));
+        assert!(!ignored(&paths, ".macc/skills.lock.json"));
+    }
 }

@@ -64,6 +64,14 @@ pub(crate) fn digest(path: &Path) -> Result<String> {
         Sha256::digest(std::fs::read(path).map_err(crate::persistent::error)?)
     ))
 }
+pub(crate) fn owned_unchanged(paths: &ProjectPaths, path: &str) -> Result<bool> {
+    let inventory = read(paths)?;
+    Ok(!inventory.protected.contains(path)
+        && inventory.files.get(path).is_some_and(|expected| {
+            digest(&paths.root.join(path)).is_ok_and(|actual| &actual == expected)
+        }))
+}
+
 /// Capture before parent creation, then record only successful MACC creations/updates.
 pub(crate) fn missing_parents(paths: &ProjectPaths, path: &Path) -> Vec<String> {
     let mut parents = vec![];
