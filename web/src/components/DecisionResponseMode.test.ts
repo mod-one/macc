@@ -1,7 +1,6 @@
 import {expect,it} from 'vitest';
 import type {Decision} from '../api/decisions';
-import {decisionAnswer,responseProblems,type DecisionDraft} from './DecisionResponseForm';
-import {changeResponseMode} from './decisionResponseMode';
+import {changeResponseMode, decisionAnswer, responseProblems, type DecisionDraft} from './decisionResponse';
 const request=():Decision=>({id:'a',version:1,status:'pending_human',effective_risk:'high',resolution:null,request:{task_id:'A',kind:'intervention',question:'Provide device or defer?',context:'No USB',recommendation:'Provide',recommended_option_id:'provide',affected_tasks:['A'],options:[{id:'provide',label:'Provide access',consequences:[],intervention_response:'completed'},{id:'defer',label:'Keep unverified',consequences:[],intervention_response:'defer_observation'}],response_fields:[{id:'device',label:'Actual device output',required:true,multiline:true,choices:[]}]}});
 const draft=():DecisionDraft=>({text:'',option:'defer',advisory:false});
 it('sends an explicit typed deferral without inventing an action, text or observations',()=>{

@@ -64,8 +64,8 @@ jobs:
       - name: Tool runner regressions
         run: make test-tool-runner
 
-      #- name: Web quality
-      #  run: make web-ci
+      - name: Web quality
+        run: make web-ci
 
       - name: Tool-agnostic guardrail
         run: make check-generic

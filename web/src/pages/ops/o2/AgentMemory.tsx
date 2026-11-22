@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import McpAccessStatus, { accessStates } from './McpAccessStatus';
+import McpAccessStatus from './McpAccessStatus';
+import { accessStates } from './mcpAccess';
 import { o2Action } from '../../../api/o2';
 export default function AgentMemory({ onExtracted }: { onExtracted: () => Promise<void> }) {
   const [checkpoint, setCheckpoint] = useState('');

@@ -1,5 +1,6 @@
 import React from 'react';
-import {ApprovalConditions,validApprovalConditions} from './DecisionEvidence';
+import {ApprovalConditions} from './DecisionEvidence';
+import {validApprovalConditions} from './approvalConditions';
 import type {ApprovalCondition} from '../api/decisions';
 import {ApprovalTicketDetails} from './ApprovalTicketDetails';
 import * as Dialog from '@radix-ui/react-dialog';

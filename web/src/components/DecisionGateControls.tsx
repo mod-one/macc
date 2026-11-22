@@ -1,5 +1,6 @@
 import React from 'react';
-import {ApprovalConditions,validApprovalConditions} from './DecisionEvidence';
+import {ApprovalConditions} from './DecisionEvidence';
+import {validApprovalConditions} from './approvalConditions';
 import type {ApprovalCondition} from '../api/decisions';
 import type {ApiPendingApproval} from '../api/models';
 export function DecisionGateControls({gates,plan,identity,busy,run}:{gates:ApiPendingApproval[];plan:string;identity:string;busy:boolean;run:(intent:Record<string,unknown>,message:string)=>Promise<void>}){
