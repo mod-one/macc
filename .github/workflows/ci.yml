@@ -58,6 +58,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Installer smoke tests
+        run: bash scripts/tests/install.sh
+
       - name: Tool runner regressions
         run: make test-tool-runner
 

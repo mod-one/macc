@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset CDPATH
 
 usage() {
   cat <<'EOF'
@@ -58,31 +59,15 @@ update_shell_path() {
   fi
 }
 
-clone_source() {
-  local repo_url="$1"
-  local ref="$2"
-  local keep_src="$3"
-  local tmpdir
-  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/macc-install.XXXXXX")"
-  if ! git clone --quiet --depth 1 --branch "$ref" "$repo_url" "$tmpdir/repo" 2>/dev/null; then
-    git clone --quiet "$repo_url" "$tmpdir/repo"
-    (
-      cd "$tmpdir/repo"
-      git checkout --quiet "$ref"
-    )
-  fi
-  if [[ "$keep_src" -eq 1 ]]; then
-    echo "Using fetched source (kept): $tmpdir/repo"
-  else
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmpdir'" EXIT
-  fi
-  echo "$tmpdir/repo"
+local_source() {
+  # bash -s (including curl | bash) has no installer file to locate.
+  [[ -n "$1" ]] || return 1
+  local script_dir root
+  script_dir="$(cd -- "$(dirname -- "$1")" && pwd -P)" || return 1
+  root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [[ "$script_dir" == "$root/scripts" && -f "$root/cli/Cargo.toml" && -f "$root/Cargo.toml" ]] || return 1
+  printf '%s\n' "$root"
 }
-
-SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
-SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-LOCAL_PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 INSTALL_DIR="${HOME}/.local/bin"
 UPDATE_PATH=1
@@ -95,7 +80,7 @@ KEEP_SRC=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix)
-      [[ $# -ge 2 ]] || { echo "Error: --prefix requires a value" >&2; exit 1; }
+      [[ $# -ge 2 && -n "${2:-}" ]] || { echo "Error: --prefix requires a value" >&2; exit 1; }
       INSTALL_DIR="$2"
       shift 2
       ;;
@@ -142,13 +127,24 @@ need_cmd cargo
 need_cmd git
 need_cmd mktemp
 
-PROJECT_ROOT=""
-if [[ -f "$LOCAL_PROJECT_ROOT/Cargo.toml" && -d "$LOCAL_PROJECT_ROOT/.git" ]]; then
-  PROJECT_ROOT="$LOCAL_PROJECT_ROOT"
-  echo "Using local source: $PROJECT_ROOT"
+# Relative prefixes refer to the invocation directory, including after a fetch.
+[[ "$INSTALL_DIR" == /* ]] || INSTALL_DIR="$PWD/$INSTALL_DIR"
+
+if PROJECT_ROOT="$(local_source "${BASH_SOURCE[0]:-}")"; then
+  echo "Using local source: $PROJECT_ROOT" >&2
 else
-  echo "Fetching source from $REPO_URL ($REPO_REF)..."
-  PROJECT_ROOT="$(clone_source "$REPO_URL" "$REPO_REF" "$KEEP_SRC")"
+  clone_dir="$(cd -- "${TMPDIR:-/tmp}" && mktemp -d "$PWD/macc-install.XXXXXX")"
+  PROJECT_ROOT="$clone_dir/repo"
+  if [[ "$KEEP_SRC" -eq 1 ]]; then
+    echo "Using fetched source (kept): $PROJECT_ROOT" >&2
+  else
+    trap 'rm -rf -- "$clone_dir"' EXIT
+  fi
+  echo "Fetching source from $REPO_URL ($REPO_REF)..." >&2
+  if ! git clone --quiet --depth 1 --branch "$REPO_REF" -- "$REPO_URL" "$PROJECT_ROOT" 2>/dev/null; then
+    git clone --quiet -- "$REPO_URL" "$PROJECT_ROOT"
+    git -C "$PROJECT_ROOT" checkout --quiet "$REPO_REF"
+  fi
 fi
 
 cd "$PROJECT_ROOT"
@@ -163,18 +159,20 @@ export MACC_BUILD_SHA="${BUILD_SHA}${BUILD_DIRTY}"
 if [[ "$BUILD_PROFILE" == "release" ]]; then
   need_cmd npm
   if [[ -d "$PROJECT_ROOT/web" ]]; then
-    echo "Building web assets..."
+    echo "Building web assets..." >&2
     (
       cd "$PROJECT_ROOT/web"
+      if [[ ! -d node_modules ]]; then
+        npm ci --include=dev
+      fi
       npm run build
-      cd "$PROJECT_ROOT"
-    )
+    ) >&2
   fi
-  echo "Building macc (release) [${MACC_BUILD_SHA}]..."
+  echo "Building macc (release) [${MACC_BUILD_SHA}]..." >&2
   cargo build --release
   BIN_PATH="$PROJECT_ROOT/target/release/macc"
 else
-  echo "Building macc (debug) [${MACC_BUILD_SHA}]..."
+  echo "Building macc (debug) [${MACC_BUILD_SHA}]..." >&2
   cargo build
   BIN_PATH="$PROJECT_ROOT/target/debug/macc"
 fi
@@ -192,7 +190,7 @@ fi
 
 if [[ "$USE_SYSTEM" -eq 1 ]]; then
   need_cmd sudo
-  echo "Installing to $INSTALL_DIR (sudo required)..."
+  echo "Installing to $INSTALL_DIR (sudo required)..." >&2
   sudo install -d "$INSTALL_DIR"
   sudo install -m 0755 "$BIN_PATH" "$INSTALL_DIR/macc"
   sudo install -m 0755 "$UNINSTALL_SRC" "$INSTALL_DIR/macc-uninstall"
