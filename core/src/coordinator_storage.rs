@@ -306,6 +306,15 @@ pub struct JsonStorage {
     paths: CoordinatorStoragePaths,
 }
 
+pub(crate) fn lock_json_registry(path: &Path) -> Result<crate::fs_lock::AdvisoryLock> {
+    crate::fs_lock::AdvisoryLock::acquire_with_retry(
+        &path.with_extension("json.write.lock"),
+        std::time::Duration::from_secs(8),
+        std::time::Duration::from_millis(50),
+        "coordinator registry",
+    )
+}
+
 impl JsonStorage {
     pub fn new(paths: CoordinatorStoragePaths) -> Self {
         Self { paths }
@@ -359,7 +368,10 @@ impl CoordinatorStorage for JsonStorage {
         ensure_parent_dir(&self.paths.events_jsonl_path)?;
         ensure_parent_dir(&self.paths.cursor_json_path)?;
 
-        write_json_atomic(&self.paths.registry_json_path, &snapshot.registry)?;
+        {
+            let _guard = lock_json_registry(&self.paths.registry_json_path)?;
+            write_json_atomic(&self.paths.registry_json_path, &snapshot.registry)?;
+        }
 
         let mut events_buf = String::new();
         for event in &snapshot.events {
@@ -1483,6 +1495,50 @@ impl SqliteStorage {
         }
         tx.commit().map_err(sql_err)?;
         Ok(())
+    }
+
+    /// Compare the complete retained assignment under the SQLite write lock.
+    /// Only the affected task and its runtime projection belong to this write.
+    pub(crate) fn requeue_if_unchanged(
+        &self,
+        expected: &Task,
+        next: &Task,
+        now: &str,
+    ) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let mut conn = self.open()?;
+        let tx = write_transaction(&mut conn)?;
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT payload_json FROM tasks WHERE task_id=?1",
+                [&expected.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let current = raw
+            .as_deref()
+            .map(|s| parse_task_payload(&expected.id, s))
+            .transpose()?;
+        if current.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        let payload =
+            serde_json::to_string(next).map_err(|e| MaccError::Validation(e.to_string()))?;
+        tx.execute(
+            "UPDATE tasks SET state=?2, payload_json=?3, updated_at=?4 WHERE task_id=?1",
+            params![expected.id, next.state, payload, now],
+        )
+        .map_err(sql_err)?;
+        self.upsert_task_runtime_row(&tx, next, now)?;
+        tx.execute(
+            "DELETE FROM jobs WHERE task_id=?1 AND job_type='performer'",
+            [&expected.id],
+        )
+        .map_err(sql_err)?;
+        tx.execute("UPDATE metadata SET value=json_set(value, '$.updated_at', ?1), updated_at=?1 WHERE key='registry_json'", [now]).map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(true)
     }
 
     pub fn set_merge_pending(&self, change: &MergePendingMutation) -> Result<()> {

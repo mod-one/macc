@@ -1,4 +1,4 @@
-use crate::coordinator::model::TaskRegistry;
+use crate::coordinator::model::{Task, TaskRegistry};
 use crate::coordinator::{CoordinatorEventPayload, RuntimeStatus, WorkflowState};
 use crate::coordinator_storage::{
     apply_transition_sqlite_with_event, coordinator_storage_export_sqlite_to_json,
@@ -306,6 +306,66 @@ pub fn coordinator_state_snapshot(
     load_snapshot_view(repo_root, args)
 }
 
+/// Requeue only the retained failure that the recovery caller inspected.
+pub(crate) fn skip_retained_phase(
+    paths: &ProjectPaths,
+    args: &BTreeMap<String, String>,
+    expected: &Task,
+    phase: &str,
+) -> Result<()> {
+    if !matches!(phase, "dev" | "review" | "fix")
+        || expected.workflow_state() != Some(WorkflowState::Blocked)
+        || expected.task_runtime.current_phase.as_deref() != Some(phase)
+        || expected.worktree_path().is_none()
+        || matches!(
+            expected.runtime_status(),
+            RuntimeStatus::Running | RuntimeStatus::Dispatched
+        )
+        || expected
+            .task_runtime
+            .pid
+            .is_some_and(crate::coordinator::helpers::is_pid_running)
+    {
+        return Err(MaccError::Validation(format!(
+            "Cannot skip {phase} for task {}: expected an inactive blocked assignment in that phase (state {}, retained phase {:?})",
+            expected.id, expected.state, expected.task_runtime.current_phase
+        )));
+    }
+    let now = now_iso();
+    let mut next = expected.clone();
+    next.set_workflow_state(WorkflowState::Todo);
+    next.touch_state_changed(&now);
+    reset_runtime_to_idle_typed(&mut next);
+    let storage = CoordinatorStoragePaths::from_project_paths(paths);
+    match resolve_storage_mode(args)? {
+        CoordinatorStorageMode::Json => {
+            let path = &storage.registry_json_path;
+            let _guard = crate::coordinator_storage::lock_json_registry(path)?;
+            let mut registry = TaskRegistry::from_value(&load_registry(path)?)?;
+            let task = registry
+                .find_task_mut(&expected.id)
+                .filter(|current| **current == *expected)
+                .ok_or_else(|| stale_phase_assignment(expected))?;
+            *task = next;
+            registry.updated_at = Some(now);
+            write_registry(path, &registry.to_value()?)
+        }
+        CoordinatorStorageMode::Sqlite | CoordinatorStorageMode::DualWrite => {
+            if !SqliteStorage::new(storage).requeue_if_unchanged(expected, &next, &now)? {
+                return Err(stale_phase_assignment(expected));
+            }
+            maybe_mirror_json(paths, args)
+        }
+    }
+}
+
+fn stale_phase_assignment(task: &Task) -> MaccError {
+    MaccError::Validation(format!(
+        "Task {} changed since the phase was inspected; refresh before recovery",
+        task.id
+    ))
+}
+
 pub fn coordinator_state_save_snapshot(
     repo_root: &Path,
     args: &BTreeMap<String, String>,
@@ -535,6 +595,11 @@ fn load_registry(path: &Path) -> Result<Value> {
 }
 
 fn save_registry(path: &Path, value: &Value) -> Result<()> {
+    let _guard = crate::coordinator_storage::lock_json_registry(path)?;
+    write_registry(path, value)
+}
+
+fn write_registry(path: &Path, value: &Value) -> Result<()> {
     let body = serde_json::to_vec_pretty(value).map_err(|e| {
         MaccError::Validation(format!(
             "Failed to serialize coordinator registry '{}': {}",

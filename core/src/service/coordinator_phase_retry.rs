@@ -3,7 +3,7 @@ use super::{apply_storage_mode_args, parse_retry_phase_args, retry_dev_phase};
 use crate::config::CoordinatorConfig;
 use crate::coordinator::{
     control_plane::CoordinatorLog, engine as coordinator_engine, types::CoordinatorEnvConfig,
-    RuntimeStatus, WorkflowState,
+    WorkflowState,
 };
 use crate::{MaccError, ProjectPaths, Result};
 use std::collections::BTreeMap;
@@ -36,16 +36,7 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     };
 
     if skip {
-        task.state = "todo".to_string();
-        task.task_runtime.status = Some(RuntimeStatus::Idle.as_str().to_string());
-        task.task_runtime.pid = None;
-        task.task_runtime.started_at = None;
-        task.task_runtime.current_phase = None;
-        task.task_runtime.merge_result_pending = Some(false);
-        task.task_runtime.merge_result_file = None;
-        snapshot.registry.updated_at = Some(crate::coordinator::helpers::now_iso_coordinator());
-        engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
-        return Ok(());
+        return crate::coordinator::state::skip_retained_phase(paths, &state_args, task, &phase);
     }
 
     if phase == "dev" {
@@ -170,4 +161,78 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     };
     engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coordinator::state::{
+        coordinator_state_registry_save, coordinator_state_snapshot, skip_retained_phase,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn skip_preserves_delivered_tasks_and_rejects_obsolete_assignments() {
+        for mode in ["sqlite", "json", "dual-write"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = ProjectPaths::from_root(tmp.path());
+            let args = BTreeMap::from([("storage-mode".into(), mode.into())]);
+            let env = CoordinatorEnvConfig {
+                storage_mode: Some(mode.into()),
+                ..Default::default()
+            };
+            let engine = crate::engine::MaccEngine::new(crate::tool::ToolRegistry::new());
+            let skip = |id, phase| {
+                coordinator_retry_phase(
+                    &engine,
+                    &paths,
+                    &Default::default(),
+                    None,
+                    &env,
+                    &["--retry-task", id, "--retry-phase", phase, "--skip"].map(String::from),
+                    None,
+                )
+            };
+            let snapshot = || {
+                coordinator_state_snapshot(tmp.path(), &args)
+                    .unwrap()
+                    .registry
+            };
+            let mut fixture = json!({"tasks":[{"id":"A","state":"blocked","worktree":{"worktree_path":"worker","branch":"task"},
+                "task_runtime":{"current_phase":"review","status":"failed","claim_id":"first"}},
+                {"id":"B","state":"merged","worktree":{"worktree_path":"delivered"},"task_runtime":{"current_phase":"review"}},
+                {"id":"C","state":"blocked","worktree":{"worktree_path":"another"},"task_runtime":{"current_phase":"dev","status":"failed"}}]});
+            coordinator_state_registry_save(tmp.path(), &args, &fixture).unwrap();
+            let original = snapshot();
+            assert!(skip("B", "review").is_err());
+            assert!(skip("A", "fix").is_err());
+            assert_eq!(snapshot().tasks, original.tasks);
+
+            let expected = original.find_task("A").unwrap();
+            fixture["tasks"][0]["task_runtime"]["claim_id"] = json!("second");
+            coordinator_state_registry_save(tmp.path(), &args, &fixture).unwrap();
+            assert!(skip_retained_phase(&paths, &args, expected, "review").is_err());
+
+            skip("C", "dev").unwrap();
+            assert_eq!(snapshot().find_task("C").unwrap().state, "todo");
+            let current = snapshot();
+            let expected = current.find_task("A").unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let client = || {
+                barrier.wait();
+                skip_retained_phase(&paths, &args, expected, "review").is_ok()
+            };
+            std::thread::scope(|scope| {
+                let one = scope.spawn(client);
+                assert_ne!(client(), one.join().unwrap());
+            });
+            let final_state = snapshot();
+            let retained = final_state.find_task("A").unwrap();
+            assert_eq!(retained.state, "todo");
+            assert_eq!(retained.worktree, expected.worktree);
+            assert_eq!(retained.task_runtime.current_phase, None);
+            assert_eq!(final_state.find_task("B"), original.find_task("B"));
+            assert!(skip("A", "review").is_err());
+        }
+    }
 }
