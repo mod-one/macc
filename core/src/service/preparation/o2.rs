@@ -64,35 +64,10 @@ pub(super) fn prepare(paths: &ProjectPaths, plan: &Plan, report: &mut Report) ->
         report.completed.push("Native compaction capabilities verified; per-worktree settings are applied under the runner lease".into());
     }
     if policy.memory.semantic_enabled {
-        if let Some(approval) = &plan.inputs.semantic_approval {
-            crate::o2::semantic::apply_gate(
-                &paths.root,
-                &approval.report_id,
-                &approval.checksum,
-                true,
-                true,
-            )?;
-        }
-        let status = crate::o2::semantic::status(&paths.root, &Default::default())?;
-        if status["approved_event"].is_null() {
-            let (kind, message, data) = if let Some(suite) = &plan.inputs.semantic_suite {
-                let suite = serde_json::from_value(suite.clone())
-                    .map_err(|e| MaccError::Validation(format!("Invalid labelled suite: {e}")))?;
-                let result = crate::o2::semantic::benchmark(&paths.root, suite)?;
-                (
-                    "semantic_review",
-                    "Review the benchmark results below. Only a passing benchmark can be approved.",
-                    result,
-                )
-            } else {
-                ("semantic_suite","Provide the labelled benchmark suite JSON (4–100 cases referencing reviewed memory IDs), or adjust the semantic option in Apply configuration.",serde_json::json!({"access":{},"cases":[{"query":"representative question","relevant_ids":["reviewed-memory-id"]}],"top_k":5}))
-            };
-            report.question = Some(Question {
-                kind: kind.into(),
-                message: message.into(),
-                data,
-            });
-            return Err(MaccError::Validation(message.into()));
+        if let Some(question) = semantic_question(&paths.root, &plan.inputs)? {
+            let error = MaccError::Validation(question.message.clone());
+            report.question = Some(question);
+            return Err(error);
         }
         report
             .completed
@@ -102,6 +77,46 @@ pub(super) fn prepare(paths: &ProjectPaths, plan: &Plan, report: &mut Report) ->
         .completed
         .push("O2 schema and full-text index verified".into());
     Ok(())
+}
+
+fn semantic_question(root: &Path, inputs: &Inputs) -> Result<Option<Question>> {
+    use crate::o2::semantic;
+    let access = Default::default();
+    let status = semantic::inspect(root, &access)?;
+    let available = status.documents;
+    let minimum = status.minimum_benchmark_documents;
+    if available < minimum {
+        return Ok(Some(Question {
+            kind: "semantic_insufficient_memories".into(),
+            message: format!("Eligible reviewed memories: {available}. The semantic benchmark requires at least {minimum}. Disable semantic search for this project to continue Apply, or retry after reviewing more memories."),
+            data: serde_json::json!({"available": available, "minimum": minimum, "path": "memory.semantic_enabled", "value": "false"}),
+        }));
+    }
+    let approved = if let Some(approval) = &inputs.semantic_approval {
+        semantic::apply_gate(root, &approval.report_id, &approval.checksum, true, true)?;
+        semantic::inspect(root, &access)?.approved_event
+    } else {
+        status.approved_event
+    };
+    if approved.is_some() {
+        return Ok(None);
+    }
+    if let Some(suite) = &inputs.semantic_suite {
+        let suite = serde_json::from_value(suite.clone())
+            .map_err(|e| MaccError::Validation(format!("Invalid labelled suite: {e}")))?;
+        return Ok(Some(Question {
+            kind: "semantic_review".into(),
+            message:
+                "Review the benchmark results below. Only a passing benchmark can be approved."
+                    .into(),
+            data: semantic::benchmark(root, suite)?,
+        }));
+    }
+    Ok(Some(Question {
+        kind: "semantic_suite".into(),
+        message: format!("Eligible reviewed memories: {available}. Provide a labelled JSON suite with 4–100 queries referencing reviewed memory IDs."),
+        data: serde_json::json!({"access":{},"cases":[{"query":"representative question","relevant_ids":["reviewed-memory-id"]}],"top_k":5}),
+    }))
 }
 
 pub(super) fn verify(paths: &ProjectPaths, plan: &Plan) -> Result<()> {
@@ -151,8 +166,9 @@ pub(super) fn verify(paths: &ProjectPaths, plan: &Plan) -> Result<()> {
         }
     }
     if p.memory.semantic_enabled
-        && crate::o2::semantic::status(&paths.root, &Default::default())?["approved_event"]
-            .is_null()
+        && crate::o2::semantic::inspect(&paths.root, &Default::default())?
+            .approved_event
+            .is_none()
     {
         return Err(MaccError::Validation(
             "Semantic quality evidence is not current; complete the Apply assistant".into(),

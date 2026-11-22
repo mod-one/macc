@@ -43,6 +43,9 @@ fn orthogonalize(v: &mut [f64], basis: &[Vec<f64>]) {
     }
 }
 impl EmbeddingBackend for Lsa {
+    fn minimum_documents(&self) -> usize {
+        3
+    }
     fn descriptor(&self) -> Descriptor {
         Descriptor {
             id: "local_lsa".into(),
@@ -59,8 +62,11 @@ impl EmbeddingBackend for Lsa {
         p: &backend::EmbeddingLimits,
     ) -> Result<Box<dyn EmbeddingSpace>> {
         let start = std::time::Instant::now();
-        if documents.len() < 3 {
-            return Err(error("LSA requires at least three eligible documents"));
+        if documents.len() < self.minimum_documents() {
+            return Err(error(format!(
+                "LSA requires at least {} eligible documents",
+                self.minimum_documents()
+            )));
         }
         let terms = documents.iter().map(|s| tokens(s)).collect::<Vec<_>>();
         let mut frequency = BTreeMap::<String, usize>::new();

@@ -344,13 +344,18 @@ pub fn allow_network(root: &Path, revision: &str, confirmed: bool) -> Result<()>
     Ok(())
 }
 
-/// Apply an adapter-proposed setting only after the operator reviews it.
-pub fn improve_quality(root: &Path, report: &Report, confirmed: bool) -> Result<()> {
+/// Save the setting offered by the reviewed preparation report.
+pub fn apply_suggested_setting(root: &Path, report: &Report, confirmed: bool) -> Result<()> {
     let question = report
         .question
         .as_ref()
-        .filter(|q| q.kind == "provider_quality")
-        .ok_or_else(|| MaccError::Validation("No pending provider quality suggestion".into()))?;
+        .filter(|q| {
+            matches!(
+                q.kind.as_str(),
+                "provider_quality" | "semantic_insufficient_memories"
+            )
+        })
+        .ok_or_else(|| MaccError::Validation("No pending Apply setting suggestion".into()))?;
     let suggestion: crate::o2::providers::preparation_quality::SettingSuggestion =
         serde_json::from_value(question.data.clone())
             .map_err(|e| MaccError::Validation(e.to_string()))?;

@@ -102,6 +102,55 @@ fn approve(root: &Path, docs: &[Memory]) -> serde_json::Value {
     result
 }
 #[test]
+fn apply_counts_only_eligible_memories_before_requesting_labels() {
+    use crate::service::preparation;
+    let t = crate::o2::tests::root();
+    let root = t.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let view = policy::inspect(root).unwrap();
+    let mut p = view.policy;
+    p.memory.semantic_enabled = true;
+    p.code_intelligence.enabled = false;
+    p.code_intelligence.native_map_enabled = false;
+    policy::update(root, &view.revision, Some(p)).unwrap();
+    let mut records = Vec::new();
+    for title in [
+        "Build instructions",
+        "Release procedure",
+        "Design constraints",
+    ] {
+        let mut proposal = crate::o2::tests::proposal(root, None);
+        proposal.title = title.into();
+        records.push(memory::propose(root, &proposal).unwrap());
+    }
+    let private =
+        memory::propose(root, &crate::o2::tests::proposal(root, Some("private"))).unwrap();
+    crate::o2::tests::activate(root, &private, Some("private"));
+    let mut plan = preparation::preview(&paths).unwrap().unwrap();
+    for count in 0..=records.len() {
+        if count > 0 {
+            crate::o2::tests::activate(root, &records[count - 1], None);
+        }
+        // An old suite must not hide the new corpus diagnosis.
+        plan.inputs.semantic_suite = (count < 3).then(|| serde_json::json!({}));
+        assert!(preparation::execute(&paths, &plan).is_err());
+        let q = preparation::status(root)
+            .unwrap()
+            .unwrap()
+            .question
+            .unwrap();
+        assert!(q
+            .message
+            .contains(&format!("Eligible reviewed memories: {count}.")));
+        if count < 3 {
+            assert_eq!(q.kind, "semantic_insufficient_memories");
+            assert_eq!(q.data["available"], count);
+        } else {
+            assert_eq!(q.kind, "semantic_suite");
+        }
+    }
+}
+#[test]
 fn corpus_local_embeddings_are_deterministic_finite_and_do_not_guess_unknown_words() {
     let (t, docs) = root();
     let p = policy::load(t.path()).unwrap().memory;

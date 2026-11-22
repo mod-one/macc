@@ -127,7 +127,7 @@ fn default_apply_prepares_native_map_and_run_refreshes_current_sources_without_e
 }
 
 #[test]
-fn missing_semantic_evidence_opens_a_question_and_never_reports_ready() {
+fn empty_semantic_corpus_offers_to_disable_only_semantic_search_and_resume_apply() {
     let (_temp, paths) = fixture(false);
     let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
     config.memory.as_mut().unwrap().semantic_enabled = true;
@@ -136,8 +136,26 @@ fn missing_semantic_evidence_opens_a_question_and_never_reports_ready() {
     assert!(crate::apply_plan(&paths, &mut reviewed, false).is_err());
     let report = status(&paths.root).unwrap().unwrap();
     assert_eq!(report.status, "waiting_for_input");
-    assert_eq!(report.question.unwrap().kind, "semantic_suite");
+    let question = report.question.as_ref().unwrap();
+    assert_eq!(question.kind, "semantic_insufficient_memories");
+    assert_eq!(question.data["available"], 0);
+    assert_eq!(question.data["minimum"], 3);
+    assert!(question.message.contains("Eligible reviewed memories: 0."));
     assert!(require_ready(&paths.root).is_err());
+    assert!(apply_suggested_setting(&paths.root, &report, false).is_err());
+    let before = crate::o2::policy::load(&paths.root).unwrap().memory;
+    assert!(before.semantic_enabled);
+    apply_suggested_setting(&paths.root, &report, true).unwrap();
+    let mut expected = before;
+    expected.semantic_enabled = false;
+    assert_eq!(
+        crate::o2::policy::load(&paths.root).unwrap().memory,
+        expected
+    );
+    assert!(apply_suggested_setting(&paths.root, &report, true).is_err());
+    crate::apply_plan(&paths, &mut plan(&paths), false).unwrap();
+    require_ready(&paths.root).unwrap();
+    assert_eq!(status(&paths.root).unwrap().unwrap().status, "ready");
 }
 
 #[test]
@@ -397,7 +415,7 @@ fn reviewed_quality_suggestion_rebuilds_a_partial_receipt_and_preserves_explicit
         message: "Increase budget".into(),
         data: serde_json::json!({"path":"code_intelligence.native_build_timeout_ms","value":"15000"}),
     });
-    assert!(improve_quality(&paths.root, &partial, false).is_err());
+    assert!(apply_suggested_setting(&paths.root, &partial, false).is_err());
     assert_eq!(
         crate::load_canonical_config(&paths.config_path)
             .unwrap()
@@ -406,9 +424,9 @@ fn reviewed_quality_suggestion_rebuilds_a_partial_receipt_and_preserves_explicit
             .native_build_timeout_ms,
         5000
     );
-    improve_quality(&paths.root, &partial, true).unwrap();
+    apply_suggested_setting(&paths.root, &partial, true).unwrap();
     assert!(
-        improve_quality(&paths.root, &partial, true).is_err(),
+        apply_suggested_setting(&paths.root, &partial, true).is_err(),
         "stale suggestions cannot overwrite a newer config"
     );
     let result = crate::apply_plan(&paths, &mut plan(&paths), false).unwrap();

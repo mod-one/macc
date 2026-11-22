@@ -203,6 +203,44 @@ fn failing_semantic_proof_cannot_bypass_the_apply_assistant() {
 }
 
 #[test]
+fn insufficient_memories_offer_disabling_search_instead_of_suite_entry() {
+    let (root, mut state) = state_with_plan(Scope::Project, 1);
+    let paths = state.project_paths.as_ref().unwrap();
+    let mut config = macc_core::load_canonical_config(&paths.config_path).unwrap();
+    let memory = config.memory.get_or_insert_with(Default::default);
+    memory.enabled = true;
+    memory.semantic_enabled = true;
+    std::fs::write(&paths.config_path, config.to_yaml().unwrap()).unwrap();
+    let revision = macc_core::config::transaction::revision(&config).unwrap();
+    state.apply_runtime.assistant.open = true;
+    state.apply_runtime.assistant.report = Some(serde_json::from_value(serde_json::json!({
+        "revision": revision, "status": "waiting_for_input", "completed": [], "accepted_degraded": true,
+        "question": { "kind": "semantic_insufficient_memories", "message": "Eligible reviewed memories: 0.",
+            "data":{"path":"memory.semantic_enabled","value":"false","available":0,"minimum":3}}
+    })).unwrap());
+    let bindings = state.apply_assistant_bindings();
+    assert!(bindings.iter().any(|(key, _)| key.0 == KeyCode::Char('d')));
+    assert!(!bindings.iter().any(|(key, _)| key.0 == KeyCode::Char('s')));
+    state.apply_key(KeyCode::Char('s'));
+    assert!(!state.apply_assistant_editing());
+    assert!(
+        macc_core::o2::policy::load(root.path())
+            .unwrap()
+            .memory
+            .semantic_enabled
+    );
+    state.apply_key(KeyCode::Char('d'));
+    assert!(
+        !macc_core::o2::policy::load(root.path())
+            .unwrap()
+            .memory
+            .semantic_enabled
+    );
+    assert!(state.apply_runtime.resume_after_prepare);
+    assert!(state.apply_runtime.inputs.accept_degraded);
+}
+
+#[test]
 fn apply_confirmation_scrolls_long_preparation_without_writing() {
     let (root, mut state) = state_with_plan(Scope::Project, 1);
     state.attempt_apply();

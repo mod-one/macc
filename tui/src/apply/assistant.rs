@@ -63,9 +63,15 @@ impl AppState {
             .as_ref()
             .and_then(|r| r.question.as_ref())
             .map(|q| q.kind.as_str());
+        let save_suggestion = matches!(
+            (question, key),
+            (Some("provider_quality"), KeyCode::Char('i'))
+                | (Some("semantic_insufficient_memories"), KeyCode::Char('d'))
+        );
+        let allow_suite = matches!(question, Some("semantic_suite" | "semantic_review"));
         let mutating = (mode == &Mode::Confirm && key == KeyCode::Enter)
             || (mode == &Mode::Overview
-                && ((key == KeyCode::Char('i') && question == Some("provider_quality"))
+                && (save_suggestion
                     || (key == KeyCode::Enter && question == Some("network_access"))));
         if mutating {
             if let Err(error) = self.gate_project_mutation() {
@@ -184,16 +190,16 @@ impl AppState {
                 }
             }
             Mode::Overview => match key {
-                KeyCode::Char('i')
-                    if state
-                        .report
-                        .as_ref()
-                        .and_then(|r| r.question.as_ref())
-                        .is_some_and(|q| q.kind == "provider_quality") =>
-                {
+                _ if save_suggestion => {
                     let report = state.report.as_ref().unwrap();
-                    match macc_core::service::preparation::improve_quality(&root, report, true) {
-                        Ok(()) => self.resume_apply_assistant(Default::default()),
+                    let inputs = Inputs {
+                        accept_degraded: report.accepted_degraded,
+                        ..Inputs::default()
+                    };
+                    match macc_core::service::preparation::apply_suggested_setting(
+                        &root, report, true,
+                    ) {
+                        Ok(()) => self.resume_apply_assistant(inputs),
                         Err(e) => state.error = Some(e.to_string()),
                     }
                 }
@@ -201,7 +207,7 @@ impl AppState {
                     state.mode = Mode::Settings;
                     state.scroll = 0;
                 }
-                KeyCode::Char('s') => {
+                KeyCode::Char('s') if allow_suite => {
                     state.mode = Mode::Suite;
                     state.input.clear();
                 }
@@ -255,26 +261,27 @@ impl AppState {
         let state = &self.apply_runtime.assistant;
         let mut rows = match state.mode {
             Mode::Overview => {
-                let quality = state
+                let question = state
                     .report
                     .as_ref()
                     .and_then(|r| r.question.as_ref())
-                    .is_some_and(|q| q.kind == "provider_quality");
-                let mut actions = vec![
-                    (
-                        k::ENTER,
-                        if quality {
-                            "Keep partial coverage and review Apply"
-                        } else {
-                            "Continue / review Apply"
-                        },
-                    ),
-                    (k::ch('c'), "Configure O2"),
-                    (k::ch('s'), "Provide labelled suite"),
-                ];
-                if quality {
-                    actions.push((k::ch('i'), "Confirm suggested budget and review rebuild"));
-                }
+                    .map(|q| q.kind.as_str());
+                let mut actions = match question {
+                    Some("semantic_insufficient_memories") => vec![
+                        (k::ch('d'), "Disable semantic search and continue Apply"),
+                        (k::ENTER, "Check available memories again"),
+                    ],
+                    Some("provider_quality") => vec![
+                        (k::ENTER, "Keep partial coverage and review Apply"),
+                        (k::ch('i'), "Confirm suggested budget and review rebuild"),
+                    ],
+                    Some("semantic_suite" | "semantic_review") => vec![
+                        (k::ENTER, "Continue / review Apply"),
+                        (k::ch('s'), "Provide labelled suite"),
+                    ],
+                    _ => vec![(k::ENTER, "Continue / review Apply")],
+                };
+                actions.push((k::ch('c'), "Configure O2"));
                 actions
             }
             Mode::Settings => vec![
@@ -305,6 +312,9 @@ impl AppState {
             Mode::Overview => {
                 if let Some(report) = &state.report {
                     text.push_str(&format!("Preparation: {}\n", report.status));
+                    if let Some(question) = &report.question {
+                        text.push_str(&format!("{}\n", question.message));
+                    }
                     for warning in &report.warnings {
                         text.push_str(&format!("WARN {warning}\n"));
                     }
@@ -330,16 +340,22 @@ impl AppState {
                     for step in &report.completed {
                         text.push_str(&format!("✓ {step}\n"));
                     }
-                    if let Some(error) = &report.error {
+                    if let Some(error) = report.error.as_ref().filter(|e| {
+                        !report
+                            .question
+                            .as_ref()
+                            .is_some_and(|q| e.ends_with(&q.message))
+                    }) {
                         text.push_str(&format!("\n{error}\n"));
                     }
-                    if let Some(question) = &report.question {
-                        text.push_str(&format!("\n{}\n", question.message));
-                        if question.kind == "semantic_review" {
-                            text.push_str(
-                                &serde_json::to_string_pretty(&question.data).unwrap_or_default(),
-                            );
-                        }
+                    if let Some(question) = report
+                        .question
+                        .as_ref()
+                        .filter(|q| q.kind == "semantic_review")
+                    {
+                        text.push_str(
+                            &serde_json::to_string_pretty(&question.data).unwrap_or_default(),
+                        );
                     }
                 } else {
                     text.push_str(

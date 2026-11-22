@@ -60,8 +60,12 @@ require another preview/confirmation. CLI, TUI and Web execute this same plan.
    compaction settings. Tools
    without native compaction capability retain checkpoint rotation.
 6. Check current semantic quality approval when semantic search is enabled.
-   Missing evidence opens the assistant to collect a human-labelled suite,
-   execute the benchmark and review its measured results. Only an explicit
+   The assistant counts reviewed memories eligible for the project benchmark.
+   Below the backend minimum (three memories for local LSA), it shows the count
+   and offers to turn off project semantic search and continue Apply. Keeping
+   the setting enabled lets the operator retry after reviewing more memories.
+   With enough eligible memories, missing evidence prompts for a human-labelled
+   suite, followed by the benchmark and a review of its results. Only an explicit
    approval of the exact passing report/checksum activates this gate.
 7. Publish `ready` only after all required steps succeed and the configuration
    revision remains current.
@@ -93,9 +97,8 @@ revision and refreshes the reviewed plan. It is not a global network setting.
 Python/uv system prerequisites, unavailable platforms, missing account access and
 unsupported adapter setup cannot be fabricated. Apply reports these as blocked;
 the assistant can update configured executable paths or disable an integration.
-A feature with missing prerequisites is never reported as operational. Likewise,
-semantic search on an empty/unreviewed corpus needs meaningful labelled evidence
-or must remain disabled. Collection for policy trials can run without an approved
+A feature with missing prerequisites is never reported as operational.
+Collection for policy trials can run without an approved
 trial; promotion keeps its separate statistical evidence and review requirements.
 
 ## Scope, credentials and cleanup

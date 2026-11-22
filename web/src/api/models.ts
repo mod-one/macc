@@ -643,6 +643,7 @@ export interface ApiPreparationInputs {
   semantic_approval?: {report_id: string; checksum: string};
 }
 export interface ApiPreparationReport {
+  accepted_degraded?: boolean;
   warnings?: string[];
   output_kind?: string | null;
   run_id?: string;

@@ -21,6 +21,10 @@ pub trait EmbeddingSpace: Send + Sync {
 }
 pub trait EmbeddingBackend: Send + Sync {
     fn descriptor(&self) -> Descriptor;
+    /// Smallest corpus this backend can fit.
+    fn minimum_documents(&self) -> usize {
+        1
+    }
     fn fit(
         &self,
         documents: &[String],

@@ -42,7 +42,7 @@ pub fn apply(
                 let choice=ui.prompt_line("Partial index: [i] increase budget and rebuild, [k] keep partial coverage, [c] configure, [Enter] cancel: ")?;
                 match choice.trim().to_ascii_lowercase().as_str() {
                     "i" => {
-                        improve_quality(&paths.root, report.as_ref().unwrap(), true)?;
+                        apply_suggested_setting(&paths.root, report.as_ref().unwrap(), true)?;
                         inputs.accept_degraded = false;
                     }
                     "k" => inputs.accept_degraded = true,
@@ -80,6 +80,17 @@ pub fn apply(
                     serde_json::from_slice(&bytes)
                         .map_err(|e| MaccError::Validation(e.to_string()))?,
                 );
+                inputs.semantic_approval = None;
+            }
+            Some("semantic_insufficient_memories") => {
+                ui.decision_info(&question.unwrap().message);
+                if !ui.confirm_yes_no(
+                    "Disable semantic search for this project and continue Apply [y/N]? ",
+                )? {
+                    return Err(error);
+                }
+                apply_suggested_setting(&paths.root, report.as_ref().unwrap(), true)?;
+                inputs.semantic_suite = None;
                 inputs.semantic_approval = None;
             }
             Some("semantic_review") => {

@@ -1,5 +1,6 @@
 //! Human-labelled local A/B evidence. No benchmark can activate retrieval by itself.
 use super::*;
+pub(super) const MIN_LABELLED_MEMORIES: usize = 2;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
@@ -113,7 +114,7 @@ pub fn benchmark(root: &Path, suite: Suite) -> Result<serde_json::Value> {
         .iter()
         .flat_map(|c| c.relevant_ids.iter())
         .collect::<std::collections::BTreeSet<_>>();
-    if labels.len() < 2 {
+    if labels.len() < MIN_LABELLED_MEMORIES {
         return Err(error("Benchmark must cover at least two reviewed memories"));
     }
     let budget_started = std::time::Instant::now();

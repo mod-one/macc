@@ -118,17 +118,31 @@ pub fn apply_gate(
     sql(tx.commit())?;
     Ok(serde_json::json!({"enabled":enable,"gate":gate,"report_id":id}))
 }
+#[derive(Serialize)]
+pub(crate) struct Status {
+    configured: bool,
+    backend: Descriptor,
+    corpus: String,
+    pub documents: usize,
+    pub minimum_benchmark_documents: usize,
+    pub approved_event: Option<String>,
+    reports: Vec<serde_json::Value>,
+    notice: &'static str,
+}
+
 pub fn status(root: &Path, access: &Access) -> Result<serde_json::Value> {
+    serde_json::to_value(inspect(root, access)?).map_err(|e| error(e.to_string()))
+}
+
+pub(crate) fn inspect(root: &Path, access: &Access) -> Result<Status> {
     let p = policy::load(root)?.memory;
-    let descriptor = backend::backend(&p.semantic_backend)?.descriptor();
+    let backend = backend::backend(&p.semantic_backend)?;
+    let descriptor = backend.descriptor();
     let pool = prepare_pool(root, access)?;
     let (db, _) = readonly_database(root)?;
-    let key = key(
-        &pool.project,
-        &corpus(&pool.records, access)?,
-        &settings(&p)?,
-        &descriptor.recipe,
-    );
+    let corpus = corpus(&pool.records, access)?;
+    let settings = settings(&p)?;
+    let key = key(&pool.project, &corpus, &settings, &descriptor.recipe);
     let mut q=sql(db.prepare("SELECT record_id,payload_json FROM o2_audit WHERE kind='semantic_benchmark' ORDER BY rowid DESC LIMIT 100"))?;
     let rows = sql(q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?
         .map(sql)
@@ -141,15 +155,22 @@ pub fn status(root: &Path, access: &Access) -> Result<serde_json::Value> {
         {
             let approvable = r.passed
                 && r.benchmark_recipe == BENCHMARK_RECIPE
-                && r.settings == settings(&p)?
+                && r.settings == settings
                 && r.backend.recipe == descriptor.recipe
                 && r.backend.id == descriptor.id
-                && r.corpus == corpus(&pool.records, access)?
+                && r.corpus == corpus
                 && r.canonical == pool.canonical;
             reports.push(serde_json::json!({"approvable":approvable,"checksum":benchmark::checksum(&r)?,"report":r}));
         }
     }
-    Ok(
-        serde_json::json!({"configured":p.semantic_enabled,"backend":descriptor,"corpus":corpus(&pool.records,access)?,"documents":pool.records.len(),"approved_event":enabled(&db,&key)?,"reports":reports,"notice":"Local embeddings require a passing reviewed benchmark for this exact eligible corpus/settings. FTS remains available."}),
-    )
+    Ok(Status {
+        configured: p.semantic_enabled,
+        backend: descriptor,
+        corpus,
+        documents: pool.records.len(),
+        minimum_benchmark_documents: backend.minimum_documents().max(benchmark::MIN_LABELLED_MEMORIES),
+        approved_event: enabled(&db, &key)?,
+        reports,
+        notice: "Local embeddings require a passing reviewed benchmark for this exact eligible corpus/settings. FTS remains available.",
+    })
 }

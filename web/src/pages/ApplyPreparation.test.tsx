@@ -3,8 +3,31 @@ import { expect, it, vi } from 'vitest';
 import ApplyPreparation from './ApplyPreparation';
 import type { ApiPreparationReport } from '../api/models';
 import { allowApplyNetwork } from '../api/client';
+import { o2Action } from '../api/o2';
 vi.mock('../api/client', () => ({allowApplyNetwork: vi.fn()}));
+vi.mock('../api/o2', () => ({o2Action: vi.fn()}));
 const base: ApiPreparationReport = {revision:'current',status:'waiting_for_input',completed:['Schema verified'],error:null,question:null};
+it('offers an explicit project setting change for an insufficient corpus and only resumes after saving', async () => {
+  const report = {...base, accepted_degraded: true, question: {
+    kind: 'semantic_insufficient_memories', message: 'Eligible reviewed memories: 0. The semantic benchmark requires at least 3.',
+    data: {available: 0, minimum: 3, path: 'memory.semantic_enabled', value: 'false'},
+  }};
+  const resume = vi.fn().mockResolvedValue(undefined);
+  render(<ApplyPreparation report={report} busy={false} resume={resume} />);
+  expect(screen.getByText(report.question.message)).toBeInTheDocument();
+  expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  expect(o2Action).not.toHaveBeenCalled();
+  const disable = screen.getByRole('button', {name: /Disable semantic search and continue/});
+  vi.mocked(o2Action).mockRejectedValueOnce(new Error('Configuration revision conflict'));
+  fireEvent.click(disable);
+  expect(await screen.findByRole('alert')).toHaveTextContent('revision conflict');
+  expect(resume).not.toHaveBeenCalled();
+  fireEvent.click(disable);
+  await waitFor(() => expect(resume).toHaveBeenCalledWith({accept_degraded: true}));
+  expect(o2Action).toHaveBeenLastCalledWith('policy_field_apply', {
+    path: 'memory.semantic_enabled', value: 'false', revision: 'current', confirmed: true,
+  });
+});
 it('keeps a failed benchmark blocked and shows its evidence', () => {
   const resume=vi.fn();
   render(<ApplyPreparation report={{...base,question:{kind:'semantic_review',message:'Review proof',data:{approvable:false,report:{id:'failed',passed:false},checksum:'proof'}}}} busy={false} resume={resume} />);

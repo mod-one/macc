@@ -9,6 +9,7 @@ mod tests;
 use super::*;
 pub use backend::{Descriptor, EmbeddingBackend, EmbeddingLimits, EmbeddingSpace, Registration};
 pub use benchmark::{benchmark, Case, CaseResult, Report, Suite};
+pub(crate) use gate::inspect;
 pub use gate::{apply_gate, status};
 use memory::{Access, Hit, Memory, Search};
 use policy::MemoryPolicy;

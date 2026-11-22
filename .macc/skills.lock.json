@@ -4,6 +4,165 @@
   "generated_at": "",
   "skills": [
     {
+      "id": "animate",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "requested_ref": "main",
+        "resolved_ref": "64eb3deb9a5fbfa041faf783e0bc3fd635872e9c",
+        "checksum": null,
+        "subpath": "skills/animate",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "animate",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/81c77c441e3fa3da2a7109406f5ffdd0d38062efbd712b24763ac5e50c89cd49"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/animate/RECIPES.md",
+            "dest": ".codex/skills/animate/RECIPES.md",
+            "digest": "sha256:129cddcba35dedacd307ef2de7f2c71e6d23efd9c1756dde44168241207581f9",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/animate/SKILL.md",
+            "dest": ".codex/skills/animate/SKILL.md",
+            "digest": "sha256:4ce49ea635ec175b45552bae070ea07b2d6aa5367047994250c1c095b71c8585",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "apple-design",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/emilkowalski/skills.git",
+        "requested_ref": "main",
+        "resolved_ref": "64eb3deb9a5fbfa041faf783e0bc3fd635872e9c",
+        "checksum": null,
+        "subpath": "skills/apple-design",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "apple-design",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/81c77c441e3fa3da2a7109406f5ffdd0d38062efbd712b24763ac5e50c89cd49"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/apple-design/SKILL.md",
+            "dest": ".codex/skills/apple-design/SKILL.md",
+            "digest": "sha256:7fbacf928637e136da6d475358d0639667a3637ba772f03f8e815bb4c0b86946",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "macc-auditor",
+      "tool": "agy",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "requested_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "resolved_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "checksum": null,
+        "subpath": "skills/macc-auditor",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "macc-auditor",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/f554aa77dfee321f544a68b1f548a363b44f5b4483b6f793bb09e7c5c7a57a5e"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/macc-auditor/SKILL.md",
+            "dest": ".agents/skills/macc-auditor/SKILL.md",
+            "digest": "sha256:387e5158a8f7d1300f3afd9f375be9f24ff4f2e37d04b39a19d06a032423f09c",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/agents/openai.yaml",
+            "dest": ".agents/skills/macc-auditor/agents/openai.yaml",
+            "digest": "sha256:1384555d4308e6c231d9ac3cba48a24a84b892fbefb031470a17f7fa19bd82f3",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/references/audit-rubric.md",
+            "dest": ".agents/skills/macc-auditor/references/audit-rubric.md",
+            "digest": "sha256:9992841c9bd52e12aa766081dc25deaf8b3cf4f3a31e5ba91f277aee5f5e8aa1",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/references/evidence-guide.md",
+            "dest": ".agents/skills/macc-auditor/references/evidence-guide.md",
+            "digest": "sha256:93bd28a0ea80c001e943e8d3f52bf56002d695b7be142d0892ac8f11cbdc6560",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/references/output-guide.md",
+            "dest": ".agents/skills/macc-auditor/references/output-guide.md",
+            "digest": "sha256:53661014d58e2a5e36ed66ed08db91d6601f96c2ffea6b06b42a5e9c858bc798",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/references/ui-design-audit.md",
+            "dest": ".agents/skills/macc-auditor/references/ui-design-audit.md",
+            "digest": "sha256:7737e49560d44c5a4a5d0b0563b422d6f5b6cc02f7116393e3903d3ce3909a98",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/schemas/audit-report.schema.json",
+            "dest": ".agents/skills/macc-auditor/schemas/audit-report.schema.json",
+            "digest": "sha256:2173430b25ca176ce02dcbeaaf0c740186690427fa98f12eb5274a94cace5524",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/scripts/macc_auditor.py",
+            "dest": ".agents/skills/macc-auditor/scripts/macc_auditor.py",
+            "digest": "sha256:9fbc3486878e47f84bc48359e82ed6e2c107be83d9bb505aab093f64aa0bdbf4",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/templates/audit-report.json",
+            "dest": ".agents/skills/macc-auditor/templates/audit-report.json",
+            "digest": "sha256:3928c703ed4b2431037a31cda3df09425c13c3d2b48ac5889021fab49d32e6c2",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-auditor/templates/implementation-audit.md",
+            "dest": ".agents/skills/macc-auditor/templates/implementation-audit.md",
+            "digest": "sha256:a5243a9a7f266cc30dd5bdb20f149b9a8dd8afbb36977fed5f7217e74fd31641",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
       "id": "macc-auditor",
       "tool": "claude",
       "source": {
@@ -179,6 +338,57 @@
     },
     {
       "id": "macc-performer",
+      "tool": "agy",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "requested_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "resolved_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "checksum": null,
+        "subpath": "skills/macc-performer",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "macc-performer",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/f554aa77dfee321f544a68b1f548a363b44f5b4483b6f793bb09e7c5c7a57a5e"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/macc-performer/SKILL.md",
+            "dest": ".agents/skills/macc-performer/SKILL.md",
+            "digest": "sha256:dc6a5a55e1454c30d8a048ca0b9bc0e7dd05c81c02525b5b1b2c7ac1d1c2d2ae",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-performer/docs/ERRORS.md",
+            "dest": ".agents/skills/macc-performer/docs/ERRORS.md",
+            "digest": "sha256:735580bc0bb4742b4296fb42a97dfb6451cdce042982ffdfe63a528e0ada6c47",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-performer/docs/adr/0000-template.md",
+            "dest": ".agents/skills/macc-performer/docs/adr/0000-template.md",
+            "digest": "sha256:a32dc6256b0c6a96161c0e8bc4d57ac02987699125bcd2218f86436938ec1edf",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-performer/references/decision-protocol.md",
+            "dest": ".agents/skills/macc-performer/references/decision-protocol.md",
+            "digest": "sha256:008a4f471c435146c09af6795523827b7803c55424042075b3a2498376447cad",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "macc-performer",
       "tool": "claude",
       "source": {
         "kind": "git",
@@ -274,6 +484,201 @@
             "src": "skills/macc-performer/references/decision-protocol.md",
             "dest": ".codex/skills/macc-performer/references/decision-protocol.md",
             "digest": "sha256:008a4f471c435146c09af6795523827b7803c55424042075b3a2498376447cad",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "macc-prd-planner",
+      "tool": "agy",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "requested_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "resolved_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "checksum": null,
+        "subpath": "skills/macc-prd-planner",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "macc-prd-planner",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/f554aa77dfee321f544a68b1f548a363b44f5b4483b6f793bb09e7c5c7a57a5e"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/macc-prd-planner/SKILL.md",
+            "dest": ".agents/skills/macc-prd-planner/SKILL.md",
+            "digest": "sha256:38b5f68d8ffb5861ec09e47e522e5ddec5496a21c1692b728a9f8972262e32d4",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/agents/openai.yaml",
+            "dest": ".agents/skills/macc-prd-planner/agents/openai.yaml",
+            "digest": "sha256:baa86edb9570b15a888211916bbb977d027120b10e90a5ddfd5f63364370ed86",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/acceptance-criteria-guide.md",
+            "dest": ".agents/skills/macc-prd-planner/references/acceptance-criteria-guide.md",
+            "digest": "sha256:825ced270f00e5ab9c958e5f4af67878d20e65ee99a9c5dfdb70c6a64c94f682",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/approval-gate-policy.md",
+            "dest": ".agents/skills/macc-prd-planner/references/approval-gate-policy.md",
+            "digest": "sha256:26e72903d68da8a185c9c3ca332e35432cc05500591b558da486f4c3dd333aef",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/decision-management.md",
+            "dest": ".agents/skills/macc-prd-planner/references/decision-management.md",
+            "digest": "sha256:483b80f3016dd9318bd9e0840bfcdaf7c72eff981e8aaef1904e31f3edeb1f0c",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/diagnostic-guide.md",
+            "dest": ".agents/skills/macc-prd-planner/references/diagnostic-guide.md",
+            "digest": "sha256:7c378cf4f87d1b2c8cae50e9a361b94b5086118ef899aad474dac214ebdb5f6f",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/prd-scope-policy.md",
+            "dest": ".agents/skills/macc-prd-planner/references/prd-scope-policy.md",
+            "digest": "sha256:c1bdd34392a6d9ff724a90f1e7f482861d2e1111933f958204335b0911446537",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/task-profile-guide.md",
+            "dest": ".agents/skills/macc-prd-planner/references/task-profile-guide.md",
+            "digest": "sha256:895e4f10a97a1122fa0b2ad2b509466b5ab4dd70da8b95879dc4866b0c695699",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/references/ui-fidelity-policy.md",
+            "dest": ".agents/skills/macc-prd-planner/references/ui-fidelity-policy.md",
+            "digest": "sha256:25c94bcb7c788d30b58b66f491ffa4dc44eca1ad42e55a883662571dbabf8fb7",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/decision-request.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/decision-request.schema.json",
+            "digest": "sha256:95c264415e07340ffdda6a14feefcfd446e3d376b1f11515c30c7046d38e05e3",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/human-approval-gate.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/human-approval-gate.schema.json",
+            "digest": "sha256:0ea44332c71770bf0fb2306416d87868261b083b37077a0ced07e392f173fc3e",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/phase-result.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/phase-result.schema.json",
+            "digest": "sha256:d707bd5aca7d9c283973337990b948095b65a71070b8a45b7e8ec0a822284c28",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/planning-context.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/planning-context.schema.json",
+            "digest": "sha256:4603ca86c94945d7a9173cd3bae7b1fd0419461fa3d2619a0db375c6b8c7a955",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/prd-scope.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/prd-scope.schema.json",
+            "digest": "sha256:474a682eeb7e781bf5ea023cb1e50ea4caddbda8a80b2bd20f552874de3cdf08",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/ui-fidelity-contract.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/ui-fidelity-contract.schema.json",
+            "digest": "sha256:2f43e35ec92eec173e322d7a7913519c254803fee3443c7c0c8a0487b5075c84",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/schemas/ux-review-result.schema.json",
+            "dest": ".agents/skills/macc-prd-planner/schemas/ux-review-result.schema.json",
+            "digest": "sha256:b8fd9f51a97e94afe2dd6a6654b7c9d9dbc4c050c764386338277f4f9c37af57",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/scripts/decision_contract.py",
+            "dest": ".agents/skills/macc-prd-planner/scripts/decision_contract.py",
+            "digest": "sha256:be9d851d611922fc4dce8fbe0e69bf9a474d38bb6a36d06073c5afd902ee1c64",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/scripts/macc_prd.py",
+            "dest": ".agents/skills/macc-prd-planner/scripts/macc_prd.py",
+            "digest": "sha256:055b5b92bbd390ea0deaaadec86b231e9ba75f048cab7596a7143e16c62217f9",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/decision-requests-prd.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/decision-requests-prd.json",
+            "digest": "sha256:cef33b42386b4335859bb448a1ab974d896d4cb5ead120955fda4b34ded7736f",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/design-system-change-task.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/design-system-change-task.json",
+            "digest": "sha256:8f850fe518f597a5fb5ab387a5583030587dcd7e242251ce9b5e25d794284c84",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/feature-prd.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/feature-prd.json",
+            "digest": "sha256:de5018ffba790078a212c7e0e96789f4c746c710127b3b99d1c21aa5e8bd85d7",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/frontend-logic-task.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/frontend-logic-task.json",
+            "digest": "sha256:01966e4670920f60c2f8520f1773ea4a50f4ee51fe5caaae67ce3cf0243ee97e",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/general-task.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/general-task.json",
+            "digest": "sha256:ab48c5912df57fab645e3a491d394f8947a3d5b88be2482d79ae62ecc3660a80",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/human-approval-gate-task.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/human-approval-gate-task.json",
+            "digest": "sha256:904a0f382e830dbc58e0c07b335b160b615640478e11f5f28eebab7bc3495ef1",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/shared-foundation-prd.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/shared-foundation-prd.json",
+            "digest": "sha256:163841e318433435e6303f362d96f4fa7b663a58a86ca81e86a02bc3f7d27232",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/ui-fidelity-task.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/ui-fidelity-task.json",
+            "digest": "sha256:8cf8230fbc810f4908e4151b69e6d94d13a802231c5ec406579b434f60e56ebf",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/ux-review-result.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/ux-review-result.json",
+            "digest": "sha256:684f126e328c4126d9f0214aa73caa47e78ba2d60944a68a209d72e3f9faf462",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-prd-planner/templates/ux-review-task.json",
+            "dest": ".agents/skills/macc-prd-planner/templates/ux-review-task.json",
+            "digest": "sha256:530042b295fadb359089e198f9118235cb64c74b5fdbedfbc5fc590760c3e5e8",
             "owner": "macc"
           }
         ]
@@ -671,6 +1076,45 @@
     },
     {
       "id": "macc-reviewer",
+      "tool": "agy",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "requested_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "resolved_ref": "0b02895952148d213f13902ee5839258a493fa4e",
+        "checksum": null,
+        "subpath": "skills/macc-reviewer",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "macc-reviewer",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/f554aa77dfee321f544a68b1f548a363b44f5b4483b6f793bb09e7c5c7a57a5e"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "skills/macc-reviewer/SKILL.md",
+            "dest": ".agents/skills/macc-reviewer/SKILL.md",
+            "digest": "sha256:f879ea54d9512dd5b8129a007b674abb8aecbb9304c7885f0c3ac252422a829d",
+            "owner": "macc"
+          },
+          {
+            "src": "skills/macc-reviewer/docs/ERRORS.md",
+            "dest": ".agents/skills/macc-reviewer/docs/ERRORS.md",
+            "digest": "sha256:735580bc0bb4742b4296fb42a97dfb6451cdce042982ffdfe63a528e0ada6c47",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "macc-reviewer",
       "tool": "claude",
       "source": {
         "kind": "git",
@@ -742,6 +1186,78 @@
             "src": "skills/macc-reviewer/docs/ERRORS.md",
             "dest": ".codex/skills/macc-reviewer/docs/ERRORS.md",
             "digest": "sha256:735580bc0bb4742b4296fb42a97dfb6451cdce042982ffdfe63a528e0ada6c47",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rust-async-patterns",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/wshobson/agents.git",
+        "requested_ref": "main",
+        "resolved_ref": "42203085cfc5736204bf0f6d436dff7e1da0bf3f",
+        "checksum": null,
+        "subpath": "plugins/systems-programming/skills/rust-async-patterns",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "rust-async-patterns",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/19cd3f978a8d738d171b0fbd39fb0615a0019a7b6e0fa721cac57455f343b89a"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "plugins/systems-programming/skills/rust-async-patterns/SKILL.md",
+            "dest": ".codex/skills/rust-async-patterns/SKILL.md",
+            "digest": "sha256:8e9a951c21bb1ee671dd2e7391b193e8e3d362b95ef29c470915837d73bf87df",
+            "owner": "macc"
+          },
+          {
+            "src": "plugins/systems-programming/skills/rust-async-patterns/references/details.md",
+            "dest": ".codex/skills/rust-async-patterns/references/details.md",
+            "digest": "sha256:cd8a987c59cf704b7a2145e0dea6891b10194e7304b894bd14a5692d9fdfa76d",
+            "owner": "macc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "rust-cli-builder",
+      "tool": "codex",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/davila7/claude-code-templates.git",
+        "requested_ref": "main",
+        "resolved_ref": "619db084fd2e94742710f74680db4168ca2bd470",
+        "checksum": null,
+        "subpath": "cli-tool/components/skills/development/rust-cli-builder",
+        "pinned": true
+      },
+      "package": {
+        "manifest_path": null,
+        "manifest_digest": null,
+        "id": "rust-cli-builder",
+        "version": null
+      },
+      "cache": {
+        "cache_key": "sources-v2/aac5ed16a9861b7781edf6a7362f6890fe2f7de65c83a731785f4cc984ea1a74"
+      },
+      "installed": {
+        "at": "",
+        "targets": [
+          {
+            "src": "cli-tool/components/skills/development/rust-cli-builder/SKILL.md",
+            "dest": ".codex/skills/rust-cli-builder/SKILL.md",
+            "digest": "sha256:2bf3ab3bceab7ffca09d0d2b0679d2d93dbd0445625a0ec88fe044119d86654a",
             "owner": "macc"
           }
         ]
