@@ -23,10 +23,27 @@ The script is a read-only SQLite query. It receives a single named parameter, `:
 
 | Source | Observation supplied to the script |
 | --- | --- |
+| `{"kind":"inputs","fields":{...}}` | Object of up to eight named observations. The script can combine their evidence. Empty fields allow checks against the target, candidate commit or current time alone. |
+| `{"kind":"path_info","path":"export/writer.lock"}` | Object with a `kind` of `missing`, `directory` or `file`. A file also includes its length in `bytes`. |
+| `{"kind":"sha256_file","path":"export/dataset.bin"}` | Lowercase SHA-256 of a regular file up to 64 MiB, computed while streaming it. |
 | `{"kind":"adb_devices"}` | Inventory from the local ADB server on port 5037, including serial, transport state and reported attributes |
 | `{"kind":"json_file","path":"reports/ci.json"}` | Parsed JSON from the retained worktree, or from the project for an unassigned task |
 | `{"kind":"text_file","path":"reports/runner.txt"}` | UTF-8 text from a runner artifact, using the same path rules |
 
-Project artifact paths are relative and cannot traverse symlinks or hidden directories. CI should deliver its report to the retained worktree. The check can validate fields such as candidate SHA, runner identity, environment and age. The report's producer is responsible for its authenticity. An absent file yields a wait. An unreadable file, invalid result, unavailable ADB server or exhausted execution budget yields a verifier error. The runner bounds observation size, SQL instructions, result size and execution time.
+Project artifact paths are relative and cannot traverse symlinks or hidden directories. CI should deliver its report to the retained worktree. The check can validate fields such as candidate SHA, runner identity, environment and age. The report's producer is responsible for its authenticity. Missing JSON, text and digest inputs yield a wait naming the path. Use `path_info` when the script needs to evaluate absence. An unreadable file, invalid result, unavailable ADB server or exhausted execution budget yields a verifier error. The runner bounds observation size, SQL instructions, result size and execution time.
+
+For example, a dataset import can wait for an exact binary export and the release of its writer lock. Set the target to the expected digest from the task and use this source with the [import check](import.sql).
+
+```json
+{
+  "kind": "inputs",
+  "fields": {
+    "digest": {"kind": "sha256_file", "path": "export/dataset.bin"},
+    "lock": {"kind": "path_info", "path": "export/writer.lock"}
+  }
+}
+```
+
+The supervisor chooses the fields and writes the query for each incident. Field names contain 1–64 ASCII letters, digits or underscores. Groups use a single deadline and a 128 KiB limit on their combined JSON. Each field is a single observation. A live system outside the supported inputs can publish evidence to the retained working directory. When it cannot provide observable evidence, its access or action stays pending.
 
 The examples are executed by the regression tests. The [device check](adb.sql) matches the reserved serial and requires an authorized transport. The [CI check](ci.sql) requires a passing result for the candidate commit and target environment, finished within the last hour.

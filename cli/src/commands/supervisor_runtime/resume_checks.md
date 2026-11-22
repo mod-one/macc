@@ -19,11 +19,20 @@ an unrelated build for the intended candidate.
 
 Write the script as a single read-only SQLite SELECT with one parameter :input.
 It receives JSON with target, commit (candidate HEAD), now_unix and observation.
-Choose a runner observation source: {"kind":"adb_devices"} supplies an array of
-{serial,state,attributes}; {"kind":"json_file","path":"..."} or
-{"kind":"text_file","path":"..."} supplies an artifact relative to the retained
-worktree. Use existing runner evidence and actual report fields. A missing file
-waits automatically. Other sources of proof may supply a local report.
+Choose observations from the actual prerequisite. The script defines what satisfies
+it. For a condition with several parts use {"kind":"inputs","fields":{...}}.
+Give up to eight inputs short names (letters, digits and underscores). The script
+reads them by name from observation. An empty fields object supports conditions
+on the candidate commit or current time alone. Fields can use:
+- {"kind":"path_info","path":"..."} for kind (missing, file, directory) and file size in bytes.
+- {"kind":"sha256_file","path":"..."} for a binary artifact's lowercase SHA-256.
+- {"kind":"json_file","path":"..."} or {"kind":"text_file","path":"..."} for evidence from any producer.
+- {"kind":"adb_devices"} for the local device inventory (serial, state, attributes).
+
+Paths are relative to the retained worktree. A missing required content input
+waits. Use path_info when absence itself is evidence, such as a writer releasing
+a lock. Test provenance, identity and freshness wherever the criterion requires
+them. If indispensable information is unavailable, describe the external action.
 Return exactly one row/column containing a JSON object with status
 ready, waiting or error and an actionable nonempty detail (up to 1024 bytes).
 Check the exact target and every part of the prerequisite. For CI include the

@@ -55,19 +55,17 @@ fn observe(
     let candidate = binding::candidate(root, task)?;
     let commit = crate::git::head_commit(&candidate)?;
     let deadline = Instant::now() + Duration::from_secs(3);
-    let Some(observation) = observations::collect(&v.source, &candidate, deadline)? else {
-        return Ok(Outcome {
-            status: Status::Waiting,
-            detail: match &v.source {
-                super::Source::JsonFile { path } | super::Source::TextFile { path } => format!(
+    let observation = match observations::collect(&v.source, &candidate, deadline)? {
+        observations::Reading::Observed(observation) => observation,
+        observations::Reading::Missing(path) => {
+            return Ok(Outcome {
+                status: Status::Waiting,
+                detail: format!(
                     "Supply {path} in the retained working directory for {}",
                     p.target
                 ),
-                super::Source::AdbDevices => {
-                    format!("Make {} available to the local ADB server", p.target)
-                }
-            },
-        });
+            })
+        }
     };
     *digest = Some(dm::digest(&observation));
     verifier::evaluate(

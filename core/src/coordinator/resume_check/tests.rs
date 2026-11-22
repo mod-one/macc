@@ -54,6 +54,23 @@ struct Project {
 }
 impl Project {
     fn new() -> Self {
+        let proposal = Proposal {
+            task_id: "CI".into(),
+            phase: "dev".into(),
+            category: Category::TechnicalCondition,
+            target: "staging".into(),
+            criterion: "Candidate passes staging CI".into(),
+            decision: None,
+            verifier: Some(Verifier {
+                source: Source::JsonFile {
+                    path: "reports/ci.json".into(),
+                },
+                script: CI.into(),
+            }),
+        };
+        Self::with_proposal(proposal)
+    }
+    fn with_proposal(proposal: Proposal) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-b", "main"]);
@@ -70,27 +87,13 @@ impl Project {
                 "base",
             ],
         );
-        let graph = json!({"tasks":[{"id":"CI","state":"todo","blocked_on_external":{"reason":"CI evidence missing","clears_when":"Candidate passes staging CI","tracking_id":"receipt"}},
+        let graph = json!({"tasks":[{"id":proposal.task_id,"state":"todo","blocked_on_external":{"reason":"Waiting on prerequisite","clears_when":proposal.criterion,"tracking_id":"receipt"}},
                                  {"id":"OTHER","state":"blocked"}]});
         fs::write(root.join("prd.json"), graph.to_string()).unwrap();
         let mut reg = TaskRegistry::from_value(&graph).unwrap();
         crate::coordinator::task_selector::reconcile_task_blocks(&mut reg, "2026-01-01T00:00:00Z");
         state::coordinator_state_registry_save(root, &Default::default(), &reg.to_value().unwrap())
             .unwrap();
-        let proposal = Proposal {
-            task_id: "CI".into(),
-            phase: "dev".into(),
-            category: Category::TechnicalCondition,
-            target: "staging".into(),
-            criterion: "Candidate passes staging CI".into(),
-            decision: None,
-            verifier: Some(Verifier {
-                source: Source::JsonFile {
-                    path: "reports/ci.json".into(),
-                },
-                script: CI.into(),
-            }),
-        };
         Self { dir, proposal }
     }
     fn root(&self) -> &Path {
@@ -267,11 +270,126 @@ fn adb_host_inventory_is_framed_and_checked_on_the_runner() {
         let inventory = "unrelated\tdevice model:Other\nreserved\tunauthorized usb:1-3\n";
         write!(stream, "OKAY{:04x}{inventory}", inventory.len()).unwrap();
     });
-    let inventory = observations::adb_devices(address, deadline()).unwrap();
+    let inventory = adb::inventory(address, deadline()).unwrap();
     responder.join().unwrap();
     assert_eq!(inventory[0]["attributes"]["model"], "Other");
     assert_eq!(
         evaluate(ADB, &json!({"target":"reserved","observation":inventory})).status,
         Status::Waiting
     );
+}
+
+#[test]
+fn restart_checks_the_dataset_and_writer_lock_without_a_domain_handler() {
+    use sha2::{Digest, Sha256};
+    let data = b"sample dataset\x00\xff";
+    let expected = format!("{:x}", Sha256::digest(data));
+    let p = Project::with_proposal(Proposal {
+        task_id: "IMPORT".into(),
+        phase: "dev".into(),
+        category: Category::TechnicalCondition,
+        criterion: format!("Dataset {expected} is available and its writer has released the lock"),
+        target: expected,
+        decision: None,
+        verifier: Some(Verifier {
+            source: serde_json::from_value(json!({"kind":"inputs","fields":{
+                "digest":{"kind":"sha256_file","path":"export/dataset.bin"},
+                "lock":{"kind":"path_info","path":"export/writer.lock"}
+            }}))
+            .unwrap(),
+            script: include_str!("../../../../docs/resume-checks/import.sql").into(),
+        }),
+    });
+    p.install();
+    let dir = p.root().join("export");
+    let file = dir.join("dataset.bin");
+    let lock = dir.join("writer.lock");
+    let missing = p.replay();
+    assert_eq!(outcome(&missing).status, Status::Waiting);
+    assert!(outcome(&missing).detail.contains("export/dataset.bin"));
+    fs::create_dir(&dir).unwrap();
+    fs::write(&file, b"incomplete").unwrap();
+    assert_eq!(outcome(&p.replay()).status, Status::Waiting);
+    fs::write(lock.as_path(), b"").unwrap();
+    fs::write(&file, data).unwrap();
+    let locked = p.replay();
+    assert_eq!(outcome(&locked).status, Status::Waiting);
+    assert!(outcome(&locked).detail.contains("lock"));
+    fs::remove_file(lock).unwrap();
+    let ready = p.replay();
+    assert_eq!(outcome(&ready).status, Status::Ready);
+    assert_eq!(ready.state, "todo");
+    assert!(ready.external_block_is_cleared());
+    assert_eq!(p.tasks()[1].state, "blocked");
+}
+
+#[test]
+fn input_groups_validate_names_paths_deadlines_and_total_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let collect = |fields: Value, until| {
+        let source: Source =
+            serde_json::from_value(json!({"kind":"inputs","fields":fields})).unwrap();
+        observations::collect(&source, dir.path(), until)
+    };
+    for fields in [
+        json!({"a.b":{"kind":"path_info","path":"a"}}),
+        json!({"a":{"kind":"inputs","fields":{}}}),
+        json!({"a":{"kind":"sha256_file","path":"../data"}}),
+        Value::Object(
+            (0..9)
+                .map(|i| (i.to_string(), json!({"kind":"path_info","path":"f"})))
+                .collect(),
+        ),
+    ] {
+        assert!(collect(fields, deadline()).is_err());
+    }
+    assert!(collect(json!({}), Instant::now()).is_err());
+    fs::write(dir.path().join("sample"), "x".repeat(70 * 1024)).unwrap();
+    assert!(collect(
+        json!({"a":{"kind":"text_file","path":"sample"},"b":{"kind":"text_file","path":"sample"}}),
+        deadline()
+    )
+    .is_err());
+    let observations::Reading::Observed(value) = collect(
+        json!({
+            "empty":{"kind":"path_info","path":"absent"},
+            "sample":{"kind":"path_info","path":"sample"}
+        }),
+        deadline(),
+    )
+    .unwrap() else {
+        panic!("expected metadata");
+    };
+    assert_eq!(value["empty"], json!({"kind":"missing"}));
+    assert_eq!(value["sample"], json!({"kind":"file","bytes":70*1024}));
+    fs::write(dir.path().join("invalid"), "[").unwrap();
+    assert!(collect(
+        json!({"bad":{"kind":"json_file","path":"invalid"}}),
+        deadline()
+    )
+    .is_err());
+}
+
+#[test]
+fn a_custom_time_window_can_run_without_an_artifact_or_device() {
+    for (offset, expected) in [(86400, Status::Waiting), (-86400, Status::Ready)] {
+        let start = chrono::Utc::now().timestamp() + offset;
+        let p = Project::with_proposal(Proposal {
+            task_id: "MAINTENANCE".into(),
+            phase: "dev".into(),
+            category: Category::TechnicalCondition,
+            target: start.to_string(),
+            criterion: format!("The maintenance window opens at Unix timestamp {start}"),
+            decision: None,
+            verifier: Some(Verifier {
+                source: Source::Inputs { fields: Default::default() },
+                script: "SELECT CASE WHEN (:input ->> '$.now_unix') >= CAST(:input ->> '$.target' AS INTEGER)
+                    THEN json_object('status','ready','detail','The maintenance window is open')
+                    ELSE json_object('status','waiting','detail','Wait for the scheduled window') END".into(),
+            }),
+        });
+        p.install();
+        assert_eq!(outcome(&p.replay()).status, expected);
+        assert_eq!(p.tasks()[1].state, "blocked");
+    }
 }

@@ -1,4 +1,5 @@
 //! Version-bound, supervisor-authored observations for retained task phases.
+mod adb;
 mod binding;
 mod observations;
 mod packets;
@@ -38,8 +39,21 @@ impl Category {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Source {
     AdbDevices,
-    JsonFile { path: String },
-    TextFile { path: String },
+    JsonFile {
+        path: String,
+    },
+    TextFile {
+        path: String,
+    },
+    PathInfo {
+        path: String,
+    },
+    Sha256File {
+        path: String,
+    },
+    Inputs {
+        fields: std::collections::BTreeMap<String, Source>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
