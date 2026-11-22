@@ -1,20 +1,21 @@
 version: v1
 tools:
   enabled:
+  - agy
   - claude
   - codex
   config:
     agy:
       context:
         protect: true
-      model: Gemini 3.5 Flash (Medium)
+      model: Gemini 4 Neon (Low)
       model_tiers:
         heavy:
-          model: Gemini 3.5 Flash (High)
+          model: Gemini 4 Neon (Medium)
         mini:
-          model: Gemini 3.5 Flash (Low)
+          model: Gemini 4 Hydrogen (Low)
         standard:
-          model: Gemini 3.5 Flash (Medium)
+          model: Gemini 4 Neon (Low)
       sandbox: true
     claude:
       context:
@@ -27,10 +28,10 @@ tools:
           effort: High
           model: opus
         mini:
-          effort: Medium
-          model: haiku
+          effort: Low
+          model: opus
         standard:
-          effort: Medium
+          effort: High
           model: sonnet
       permissions: safe
     codex:
@@ -40,26 +41,27 @@ tools:
       features:
         shell_snapshot: false
         undo: true
-      model: gpt-5.3-codex
+      model: gpt-6.2-sol
       model_reasoning_effort: medium
       model_tiers:
         heavy:
-          effort: high
-          model: gpt-5.5
+          effort: xhigh
+          model: gpt-6.2-sol
         mini:
           effort: low
-          model: gpt-5.4
+          model: gpt-6.1-terra
         standard:
           effort: medium
-          model: gpt-5.5
+          model: gpt-6.2-sol
       profiles:
         deep-review:
           approval_policy: never
-          model: gpt-5.5
+          model: gpt-6.2-sol
           model_reasoning_effort: medium
       rules_enabled: true
       sandbox_mode: workspace-write
       skills:
+      - animate
       - apple-design
       - macc-auditor
       - macc-performer
@@ -82,16 +84,31 @@ selections:
   - macc-reviewer
 automation:
   coordinator:
-    coordinator_tool: claude
-    reference_branch: adt/web
+    decisions:
+      enabled: true
+      human_question_min_risk: never_ask
+      max_context_bytes: 131072
+      max_request_bytes: 65536
+      trust_mode: local_trust
+      mandatory_human_triggers:
+      - production
+      - irreversible
+      approval_reuse: exact_revision
+      approval_manifests: {}
+    coordinator_tool: codex
+    reference_branch: client/new_tui
     tool_priority:
-    - agy
+    - codex
+    - claude
     max_parallel_per_tool:
       agy: 1
-    max_dispatch: 1
-    max_parallel: 1
-    merge_ai_fix: true
-    destructive_actions: double_confirm
+      claude: 1
+      codex: 2
+    max_dispatch: 0
+    max_parallel: 2
+    merge_hook_timeout_seconds: 120
+    ghost_heartbeat_grace_seconds: 90
+    max_review_cycles: 4
     phases:
       testing:
         enabled: false
@@ -99,9 +116,28 @@ automation:
       review:
         enabled: true
         mode: required
+  supervisor:
+    tool: codex
+    model: gpt-6.2-sol
+    effort: medium
+    intervention_timeout_seconds: 3600
+    max_repair_rounds: 3
+    repair_enabled: true
+    tests_enabled: false
+    ai_verification_enabled: true
+    auto_restart: true
+    validation_timeout_seconds: 3600
+    validation_commands: []
+    retain_repair_branches: false
+    watchdog_interval_seconds: 30
+    max_restart_attempts: 3
+    log_analysis_window_seconds: 300
+    crash_debounce_checks: 3
+    report_output_path: .macc/log/supervisor/report.json
+    events_log_path: .macc/log/coordinator/events.jsonl
 settings:
   quiet: false
-  debug: true
+  debug: false
   offline: false
 mcp_templates:
 - id: brave-search
@@ -135,3 +171,87 @@ mcp_templates:
   - --dir
   - ./notes
   auth_notes: No secrets required; reads from the checked-in notes directory.
+memory:
+  semantic_enabled: true
+  semantic_backend: local_lsa
+  semantic_dimensions: 8
+  semantic_candidates: 128
+  semantic_vocabulary: 256
+  semantic_weight: 100
+  semantic_min_similarity: 0.15
+  semantic_max_ms: 1000
+  semantic_max_bytes: 8388608
+  semantic_min_recall_gain: 0.05
+  enabled: true
+  phase_extraction_enabled: false
+  mcp_enabled: false
+  agent_proposals_allowed: true
+  mcp_output_tokens: 1000
+  mcp_input_bytes: 65536
+  mcp_max_proposals_per_session: 20
+  max_body_chars: 1200
+  search_limit: 20
+  min_confidence: 0.6
+  provider_note_ttl_days: 14
+  provider_note_probe_limit: 2
+  symbol_check_limit: 50
+  ranking_task_weight: 100
+  ranking_reference_weight: 30
+  ranking_authority_weight: 40
+  ranking_confidence_weight: 10
+  ranking_evidence_weight: 15
+  ranking_length_penalty: 20
+  ranking_duplicate_penalty: 80
+context_engine:
+  tuning_enabled: false
+  tuning_min_pairs: 20
+  tuning_alpha: 0.01
+  tuning_min_cost_reduction: 0.05
+  tuning_max_latency_regression: 0.1
+  enabled: true
+  push_memory_limit_tokens: 1200
+  pull_limit_tokens: 2000
+  output_reduction: true
+  max_output_bytes: 65536
+adaptive_compaction:
+  enabled: false
+  configure_native_auto: false
+  native_token_threshold: 0
+  warning_ratio: 0.55
+  action_ratio: 0.7
+  guard_ratio: 0.85
+  min_turns: 3
+  max_compactions_per_session: 2
+code_intelligence:
+  native_map_enabled: true
+  native_incremental: true
+  native_rust: true
+  native_python: true
+  native_typescript: true
+  native_tsx: true
+  native_corpus_max_bytes: 16777216
+  native_index_max_bytes: 16777216
+  native_symbols_per_file: 1000
+  native_parse_timeout_ms: 1000
+  native_build_timeout_ms: 60000
+  enabled: true
+  routing: native_only
+  max_files: 10000
+  max_file_bytes: 262144
+  query_limit: 20
+  output_tokens: 2000
+  serena_enabled: false
+  serena_python: python3
+  serena_uv: uv
+  serena_timeout_seconds: 60
+  serena_install_timeout_seconds: 600
+  serena_memory_mb: 2048
+  serena_corpus_max_bytes: 33554432
+  graphify_enabled: false
+  graphify_python: python3
+  graphify_uv: uv
+  graphify_timeout_seconds: 120
+  graphify_install_timeout_seconds: 600
+  graphify_memory_mb: 2048
+  graphify_index_max_bytes: 33554432
+  graphify_corpus_max_bytes: 268435456
