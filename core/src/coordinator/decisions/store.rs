@@ -32,6 +32,30 @@ pub struct Store {
     pub(super) db: Connection,
 }
 impl Store {
+    pub(super) fn open_read_only(root: &Path, path: &Path) -> crate::Result<Self> {
+        let db = sql(rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ))?;
+        let v: i64 = sql(db.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
+        if v != 1 {
+            return Err(error("Unsupported decision store schema"));
+        }
+        let project_id = sql(db.query_row(
+            "SELECT value FROM metadata WHERE key='project_id'",
+            [],
+            |r| r.get(0),
+        ))?;
+        let store = Store {
+            root: root.into(),
+            path: path.into(),
+            project_id,
+            db,
+        };
+        store.verify()?;
+        Ok(store)
+    }
+
     pub(super) fn mutation_lock(&self) -> crate::Result<crate::fs_lock::AdvisoryLock> {
         crate::fs_lock::AdvisoryLock::acquire(
             &self.path.with_file_name("mutation.lock"),

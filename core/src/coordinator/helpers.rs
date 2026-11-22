@@ -1101,26 +1101,29 @@ pub fn append_structured_event_record(
         "info"
     };
 
-    let project_paths = crate::ProjectPaths::from_root(repo_root);
-    let storage_paths =
-        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let mut worker_id = String::new();
     let mut tool = String::new();
     let mut run_id_val = run_id;
 
-    if let Ok(registry) =
-        crate::coordinator_storage::SqliteStorage::new(storage_paths).load_registry()
-    {
-        if let Some(task) = registry.tasks.iter().find(|t| t.id == task_id) {
-            worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
-            tool = task
-                .tool
-                .clone()
-                .or_else(|| task.task_runtime.tool.clone())
-                .unwrap_or_default();
-            if let Some(ref r_id) = task.task_runtime.run_id {
-                if !r_id.is_empty() {
-                    run_id_val = r_id.clone();
+    if !task_id.is_empty() && task_id != "-" {
+        let paths = crate::ProjectPaths::from_root(repo_root);
+        if let Ok(registry) = crate::coordinator_storage::CoordinatorReader::for_project(&paths)
+            .and_then(|reader| reader.registry())
+        {
+            if let Some(task) = registry.find_task(task_id) {
+                worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
+                tool = task
+                    .tool
+                    .clone()
+                    .or_else(|| task.task_runtime.tool.clone())
+                    .unwrap_or_default();
+                if let Some(id) = task
+                    .task_runtime
+                    .run_id
+                    .as_ref()
+                    .filter(|id| !id.is_empty())
+                {
+                    run_id_val = id.clone();
                 }
             }
         }

@@ -2,10 +2,7 @@ use super::{store::*, *};
 use crate::{config::CanonicalConfig, coordinator::model::TaskRegistry, ProjectPaths, Result};
 use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
+use std::{collections::BTreeSet, path::Path};
 
 pub fn policy(root: &Path) -> Result<Policy> {
     let path = ProjectPaths::from_root(root).config_path;
@@ -26,10 +23,8 @@ pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 pub fn registry(root: &Path) -> Result<TaskRegistry> {
-    TaskRegistry::from_value(&crate::coordinator::state::coordinator_state_registry_load(
-        root,
-        &BTreeMap::new(),
-    )?)
+    crate::coordinator_storage::CoordinatorReader::for_project(&ProjectPaths::from_root(root))?
+        .registry()
 }
 pub fn active_plan(root: &Path) -> Result<(Store, Plan)> {
     let config = crate::load_canonical_config(&ProjectPaths::from_root(root).config_path)?;
@@ -52,6 +47,36 @@ pub fn active_plan(root: &Path) -> Result<(Store, Plan)> {
     store.import_planner_requests(&plan, &policy(root)?)?;
     let plan = store.plan(&plan.id)?;
     Ok((store, plan))
+}
+
+/// Read an existing active plan without importing requests or preparing storage.
+pub(crate) fn read_active_plan(root: &Path) -> Result<(Store, Plan)> {
+    let (store, plan) =
+        stored_plan_for_display(root)?.ok_or_else(|| error("No stored plan for the active PRD"))?;
+    if store.projection_diff(root, &plan)?["changed"] == true {
+        return Err(error("Active PRD differs from its stored decision plan"));
+    }
+    Ok((store, plan))
+}
+
+fn stored_plan_for_display(root: &Path) -> Result<Option<(Store, Plan)>> {
+    let directory = crate::persistent::directory(root)?;
+    let path = directory.join("control.sqlite");
+    crate::persistent::no_symlink(&directory)?;
+    crate::persistent::no_symlink(&path)?;
+    if !path.try_exists().map_err(|e| error(e.to_string()))? {
+        return Ok(None);
+    }
+    let config = crate::load_canonical_config(&ProjectPaths::from_root(root).config_path)?;
+    let cfg = config.automation.coordinator.as_ref();
+    let source = crate::prd_queue::current(root, cfg).path;
+    let reference = crate::config::CoordinatorConfigResolved::resolve(cfg).reference_branch;
+    let store = Store::open_read_only(root, &path)?;
+    let plan = store
+        .plans()?
+        .into_iter()
+        .find(|p| p.source == source && p.reference_branch == reference);
+    Ok(plan.map(|plan| (store, plan)))
 }
 
 /// Inspection remains available when a projection has drifted or the queue
@@ -158,9 +183,54 @@ pub fn snapshot(root: &Path) -> Result<Value> {
     }
     let (store, plan) = inspect_plan(root)?;
     let projection_error = active_plan(root).err().map(|e| e.to_string());
-    Ok(
-        json!({"enabled":true,"policy":p,"projection_error":projection_error,"plan":plan,"decisions":store.applicable_decisions(&plan)?,"events":store.scoped_history(&plan)?,"operations":store.operations(&plan.id)?,"delivery":store.delivery_status(&plan,&p)?,"approval_broker_available":super::secure::broker_available(&p),"approval_tickets":store.approval_tickets()?.into_iter().filter(|t|store.operator_in_scope(&plan,&t.intent).is_ok()).collect::<Vec<_>>(),"pending_approvals":crate::coordinator::approval::current_pending_approvals(root,&registry(root)?),"operator_identity":crate::service::coordinator_workflow::operator_identity(root),"reference_directions":store.reference_directions(&plan)?,"artifacts":store.artifacts(&plan.id)?,"analytics":store.decision_analytics(&plan)?,"similar_requests":store.similar_requests(&plan,&p)?}),
-    )
+    snapshot_for_plan(root, &p, &store, &plan, projection_error)
+}
+
+/// Periodic clients inspect existing authority without registering a plan or importing decisions.
+pub fn poll_snapshot(root: &Path) -> Result<Value> {
+    let p = policy(root)?;
+    if p.enabled {
+        if let Some((store, plan)) = stored_plan_for_display(root)? {
+            let projection_error = match store.projection_diff(root, &plan) {
+                Ok(diff) if diff["changed"] == true => {
+                    Some("Active PRD differs from its stored decision plan".into())
+                }
+                Err(err) => Some(err.to_string()),
+                _ => None,
+            };
+            return snapshot_for_plan(root, &p, &store, &plan, projection_error);
+        }
+    }
+    Ok(json!({"enabled":p.enabled,"policy":p,"decisions":[],"events":[],"plan":null}))
+}
+
+fn snapshot_for_plan(
+    root: &Path,
+    p: &Policy,
+    store: &Store,
+    plan: &Plan,
+    projection_error: Option<String>,
+) -> Result<Value> {
+    Ok(json!({
+        "enabled": true,
+        "policy": p,
+        "projection_error": projection_error,
+        "plan": plan,
+        "decisions": store.applicable_decisions(plan)?,
+        "events": store.scoped_history(plan)?,
+        "operations": store.operations(&plan.id)?,
+        "delivery": store.delivery_status(plan, p)?,
+        "approval_broker_available": super::secure::broker_available(p),
+        "approval_tickets": store.approval_tickets()?.into_iter()
+            .filter(|ticket| store.operator_in_scope(plan, &ticket.intent).is_ok())
+            .collect::<Vec<_>>(),
+        "pending_approvals": crate::coordinator::approval::current_pending_approvals(root, &registry(root)?),
+        "operator_identity": crate::service::coordinator_workflow::operator_identity(root),
+        "reference_directions": store.reference_directions(plan)?,
+        "artifacts": store.artifacts(&plan.id)?,
+        "analytics": store.decision_analytics(plan)?,
+        "similar_requests": store.similar_requests(plan, p)?,
+    }))
 }
 
 impl Store {

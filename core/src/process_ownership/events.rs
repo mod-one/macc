@@ -1,5 +1,6 @@
 use crate::coordinator::helpers::{
     append_coordinator_event_with_severity, ensure_coordinator_run_id, now_iso_coordinator,
+    write_structured_event_jsonl,
 };
 use crate::process_ownership::{ClientIdentity, ProcessHandle};
 use serde_json::{Map, Value};
@@ -30,15 +31,33 @@ impl OwnershipEventBroadcaster {
         bump_ownership_change_seq();
         let message = serialize_message(handle, payload_fields.clone());
         let raw_event = build_raw_event(event_type, &message, &payload_fields);
-        if let Err(err) = append_coordinator_event_with_severity(
-            repo_root,
-            event_type,
-            "-",
-            "ownership",
-            "info",
-            &message,
-            "info",
-        ) {
+        // The coordinator JSONL record is appended below in every mode.
+        // Mirror to SQLite only when the project uses that backend.
+        let paths = crate::ProjectPaths::from_root(repo_root);
+        let result =
+            crate::coordinator_storage::CoordinatorReader::for_project(&paths).and_then(|reader| {
+                if reader.mode == crate::coordinator_storage::CoordinatorStorageMode::Json {
+                    write_structured_event_jsonl(
+                        repo_root,
+                        event_type,
+                        "-",
+                        "ownership",
+                        &message,
+                        "info",
+                    )
+                } else {
+                    append_coordinator_event_with_severity(
+                        repo_root,
+                        event_type,
+                        "-",
+                        "ownership",
+                        "info",
+                        &message,
+                        "info",
+                    )
+                }
+            });
+        if let Err(err) = result {
             tracing::warn!(
                 event_type = event_type,
                 process_kind = ?handle.kind,

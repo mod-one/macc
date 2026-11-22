@@ -229,7 +229,7 @@ impl Center {
             if let Some(root) = root {
                 let (tx, rx) = mpsc::channel();
                 std::thread::spawn(move || {
-                    let _ = tx.send(dm::snapshot(&root).map_err(|e| e.to_string()));
+                    let _ = tx.send(dm::poll_snapshot(&root).map_err(|e| e.to_string()));
                 });
                 self.rx = Some(rx);
                 self.last = Some(Instant::now());

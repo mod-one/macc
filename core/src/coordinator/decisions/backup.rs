@@ -15,29 +15,6 @@ pub struct ControlSnapshot {
 fn bytes(path: &Path) -> crate::Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| error(e.to_string()))
 }
-fn readonly(root: &Path, path: &Path) -> crate::Result<Store> {
-    let db = sql(rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ))?;
-    let v: i64 = sql(db.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
-    if v != 1 {
-        return Err(error("Unsupported decision backup schema"));
-    }
-    let project_id = sql(db.query_row(
-        "SELECT value FROM metadata WHERE key='project_id'",
-        [],
-        |r| r.get(0),
-    ))?;
-    let store = Store {
-        root: root.into(),
-        path: path.into(),
-        project_id,
-        db,
-    };
-    store.verify()?;
-    Ok(store)
-}
 pub fn capture_backup(root: &Path, directory: &Path) -> crate::Result<Option<ControlSnapshot>> {
     if crate::git::git_common_dir(root).is_err() {
         return Ok(None);
@@ -53,7 +30,7 @@ pub fn capture_backup(root: &Path, directory: &Path) -> crate::Result<Option<Con
     sql(store
         .db
         .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()]))?;
-    let snapshot = readonly(root, &destination)?;
+    let snapshot = Store::open_read_only(root, &destination)?;
     let data = bytes(&destination)?;
     if crate::security::scan_bytes(
         "state/control.sqlite",
@@ -92,7 +69,7 @@ pub(crate) fn validated_snapshot(
     {
         return Err(error("Decision backup identity/root/checksum mismatch; foreign evidence cannot restore authority"));
     }
-    let snapshot = readonly(root, source)?;
+    let snapshot = Store::open_read_only(root, source)?;
     if snapshot.project_id != meta.project_id || snapshot.state_digest()? != meta.state_digest {
         return Err(error("Decision backup project identity mismatch"));
     }
@@ -144,7 +121,7 @@ pub fn restore_backup(root: &Path, source: &Path, meta: &ControlSnapshot) -> cra
         "decision backup recovery",
     )?;
     validate_backup(root, source, meta)?;
-    let snapshot = readonly(root, source)?;
+    let snapshot = Store::open_read_only(root, source)?;
     let exists = location.exists();
     let mut current = Store::open(root)?;
     let _lock = current.mutation_lock()?;

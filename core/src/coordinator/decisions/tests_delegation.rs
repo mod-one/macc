@@ -280,6 +280,9 @@ fn never_ask_cannot_supply_required_pull_request_reviews() {
         &Default::default(),
     )
     .unwrap();
+    let view = poll_snapshot(root).unwrap();
+    assert_eq!(view["pending_approvals"][0]["task_id"], "G");
+    assert_eq!(view["pending_approvals"][0]["auto_prompt"], false);
     assert_eq!(pending.len(), 1);
     let gate = &pending[0];
     assert_eq!(gate.task_id, "G");

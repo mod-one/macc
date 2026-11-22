@@ -1,7 +1,9 @@
+mod reader;
 use crate::coordinator::model::{ResourceLock, Task, TaskRegistry};
 use crate::coordinator::{CoordinatorCursor, CoordinatorEventPayload, CoordinatorEventRecord};
 use crate::{MaccError, ProjectPaths, Result};
 use chrono::Utc;
+pub use reader::CoordinatorReader;
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -469,12 +471,23 @@ impl Drop for PooledConnection {
 
 #[derive(Debug, Clone)]
 pub struct SqliteStorage {
+    read_only: bool,
     pub paths: CoordinatorStoragePaths,
 }
 
 impl SqliteStorage {
     pub fn new(paths: CoordinatorStoragePaths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            read_only: false,
+        }
+    }
+
+    pub fn read_only(paths: CoordinatorStoragePaths) -> Self {
+        Self {
+            paths,
+            read_only: true,
+        }
     }
 
     pub fn has_snapshot_data(&self) -> Result<bool> {
@@ -725,6 +738,19 @@ impl SqliteStorage {
     /// A connection to the coordinator database, reused across calls on the
     /// same thread when the database file is still the same one.
     pub fn open(&self) -> Result<PooledConnection> {
+        if self.read_only {
+            let path = self.paths.sqlite_path.clone();
+            let conn =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(sql_err)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(sql_err)?;
+            return Ok(PooledConnection {
+                conn: Some(conn),
+                path,
+                identity: None,
+            });
+        }
         ensure_parent_dir(&self.paths.sqlite_path)?;
         let path = self.paths.sqlite_path.clone();
         if let Some(file) = database_file_identity(&path) {
@@ -766,7 +792,7 @@ impl SqliteStorage {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(sql_err)?;
-        if version >= SQLITE_SCHEMA_VERSION {
+        if self.read_only || version >= SQLITE_SCHEMA_VERSION {
             return Ok(());
         }
         conn.execute_batch(

@@ -1,6 +1,4 @@
-use crate::coordinator_storage::{
-    CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
-};
+use crate::coordinator_storage::CoordinatorReader;
 use crate::process_ownership::{ClientIdentity, OwnershipRecord, OwnershipStatus, ProcessHandle};
 use crate::service::process_ownership::{
     ProcessOwnershipGuard, ProcessViewerGuard, RegisteredProcessGuard,
@@ -915,14 +913,7 @@ pub trait Engine {
         &self,
         project_paths: &ProjectPaths,
     ) -> Result<CoordinatorStatusSnapshot> {
-        let paths = CoordinatorStoragePaths::from_project_paths(project_paths);
-        let sqlite = SqliteStorage::new(paths.clone());
-        let registry = if sqlite.has_snapshot_data()? {
-            sqlite.load_registry()?
-        } else {
-            JsonStorage::new(paths).load_snapshot()?.registry
-        };
-
+        let registry = CoordinatorReader::for_project(project_paths)?.registry()?;
         let mut counts = CoordinatorStatusSnapshot::default();
         let (total, todo, active, blocked, merged) = registry.counts();
         counts.total = total;
@@ -935,12 +926,7 @@ pub trait Engine {
         // running. If a coordinator is alive the pause file is a stale artifact
         // from a previous crash/error that was never cleaned up, and showing it
         // would mislead the operator.
-        let coordinator_alive = sqlite
-            .get_active_coordinator_run()
-            .ok()
-            .flatten()
-            .map(|run| crate::doctor::is_pid_alive_pub(run.pid as u32))
-            .unwrap_or(false);
+        let coordinator_alive = check_coordinator_running_via_storage(project_paths);
 
         if !coordinator_alive {
             if let Some(pause) =
@@ -960,14 +946,7 @@ pub trait Engine {
         &self,
         project_paths: &ProjectPaths,
     ) -> Result<Vec<CoordinatorEvent>> {
-        let paths = CoordinatorStoragePaths::from_project_paths(project_paths);
-        let sqlite = SqliteStorage::new(paths.clone());
-        let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
-            sqlite.load_snapshot()?
-        } else {
-            JsonStorage::new(paths).load_snapshot()?
-        };
-
+        let snapshot = CoordinatorReader::for_project(project_paths)?.snapshot()?;
         let mut out = Vec::with_capacity(snapshot.events.len());
         for record in snapshot.events {
             out.push(CoordinatorEvent::from_record(record));
@@ -1796,7 +1775,7 @@ impl CoordinatorEvent {
 fn check_coordinator_running_via_storage(paths: &ProjectPaths) -> bool {
     use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-    let storage = SqliteStorage::new(storage_paths);
+    let storage = SqliteStorage::read_only(storage_paths);
     match storage.get_active_coordinator_run() {
         Ok(Some(run)) => crate::doctor::is_pid_alive_pub(run.pid as u32),
         _ => false,

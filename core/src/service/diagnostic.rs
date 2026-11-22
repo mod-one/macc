@@ -1,8 +1,6 @@
 use crate::coordinator::state_runtime;
 use crate::coordinator::CoordinatorEventRecord;
-use crate::coordinator_storage::{
-    CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
-};
+use crate::coordinator_storage::CoordinatorReader;
 use crate::{ProjectPaths, Result};
 use chrono::{DateTime, Utc};
 
@@ -27,12 +25,14 @@ pub struct FailureReport {
 }
 
 pub fn analyze_last_failure(paths: &ProjectPaths) -> Result<Option<FailureReport>> {
-    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-    let sqlite = SqliteStorage::new(storage_paths.clone());
-    let since = sqlite
-        .get_latest_coordinator_run()?
-        .and_then(|run| parse_timestamp(&run.started_at));
-    analyze_failure(paths, since, storage_paths, sqlite)
+    let reader = CoordinatorReader::for_project(paths)?;
+    let since = if reader.sqlite.paths.sqlite_path.exists() {
+        reader.sqlite.get_latest_coordinator_run()?
+    } else {
+        None
+    }
+    .and_then(|run| parse_timestamp(&run.started_at));
+    analyze_failure(paths, since, &reader)
 }
 
 /// Analyze only failures emitted during the managed command being polled.
@@ -42,19 +42,17 @@ pub fn analyze_last_failure_since(
     paths: &ProjectPaths,
     started_at: &str,
 ) -> Result<Option<FailureReport>> {
-    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-    let sqlite = SqliteStorage::new(storage_paths.clone());
+    let reader = CoordinatorReader::for_project(paths)?;
     let Some(started_at) = parse_timestamp(started_at) else {
         return Ok(None);
     };
-    analyze_failure(paths, Some(started_at), storage_paths, sqlite)
+    analyze_failure(paths, Some(started_at), &reader)
 }
 
 fn analyze_failure(
     paths: &ProjectPaths,
     since: Option<DateTime<Utc>>,
-    storage_paths: CoordinatorStoragePaths,
-    sqlite: SqliteStorage,
+    reader: &CoordinatorReader,
 ) -> Result<Option<FailureReport>> {
     if let Some(pause) = state_runtime::read_coordinator_pause_file(&paths.root)? {
         if timestamp_is_in_scope(&pause.updated_at, since.as_ref()) {
@@ -74,7 +72,7 @@ fn analyze_failure(
         }
     }
 
-    let report = if sqlite.has_snapshot_data()? {
+    let report = if reader.uses_sqlite() {
         // Newest first, stopping at the first blocking failure. Heartbeats
         // are never failures and are most of the log.
         let mut found = None;
@@ -82,7 +80,7 @@ fn analyze_failure(
             skip_heartbeats: true,
             ..Default::default()
         };
-        sqlite.scan_events_newest_first(query, |event| {
+        reader.sqlite.scan_events_newest_first(query, |event| {
             found = report_from_event(&event, since.as_ref());
             if found.is_some() {
                 std::ops::ControlFlow::Break(())
@@ -92,7 +90,7 @@ fn analyze_failure(
         })?;
         found
     } else {
-        let snapshot = JsonStorage::new(storage_paths).load_snapshot()?;
+        let snapshot = reader.snapshot()?;
         report_from_events(&snapshot.events, since.as_ref())
     };
     if let Some(report) = report {

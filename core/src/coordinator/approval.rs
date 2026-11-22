@@ -426,7 +426,7 @@ pub fn reconcile_human_gates_for_project(
     registry: &mut TaskRegistry,
     now: &str,
 ) -> Result<Vec<HumanGateTransition>> {
-    let transitions = evaluate_human_gates_for_project(repo_root, registry, now)?;
+    let transitions = evaluate_human_gates_for_project(repo_root, registry, now, false)?;
     for t in &transitions {
         let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
             repo_root, t.event, &t.task_id, "approval", t.event, &t.detail, t.severity,
@@ -441,22 +441,37 @@ fn evaluate_human_gates_for_project(
     repo_root: &std::path::Path,
     registry: &mut TaskRegistry,
     now: &str,
+    read_only: bool,
 ) -> Result<Vec<HumanGateTransition>> {
     if !registry.tasks.iter().any(|t| t.is_human_approval_gate()) {
         return Ok(Vec::new());
     }
     let paths = crate::ProjectPaths::from_root(repo_root);
-    let storage = crate::coordinator_storage::SqliteStorage::new(
-        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths),
-    );
-    let p = crate::coordinator::decisions::policy(repo_root)?;
-    let ledger = if p.enabled {
-        crate::coordinator::decisions::approval_ledger_for_project(repo_root, registry)?
+    use crate::coordinator::decisions;
+    use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
+    let p = decisions::policy(repo_root)?;
+    let (ledger, delegated) = if p.enabled {
+        let (store, plan) = if read_only {
+            decisions::read_active_plan(repo_root)?
+        } else {
+            decisions::active_plan(repo_root)?
+        };
+        (
+            store.verified_approvals(repo_root, &plan)?,
+            decisions::verified_delegated_gates(repo_root, registry, &store, &plan, &p)?,
+        )
     } else {
-        storage.gate_decisions_by_task()?
+        let paths = CoordinatorStoragePaths::from_project_paths(&paths);
+        let ledger = if !read_only {
+            SqliteStorage::new(paths).gate_decisions_by_task()?
+        } else if paths.sqlite_path.exists() {
+            SqliteStorage::read_only(paths).gate_decisions_by_task()?
+        } else {
+            Default::default()
+        };
+        (ledger, Default::default())
     };
     let branch = reference_branch(repo_root);
-    let delegated = crate::coordinator::decisions::verified_delegated_gates(repo_root, registry)?;
     Ok(reconcile_gates(
         registry,
         now,
@@ -479,7 +494,7 @@ pub fn current_pending_approvals(
     }
     let mut current = registry.clone();
     let now = crate::coordinator::helpers::now_iso_coordinator();
-    if evaluate_human_gates_for_project(repo_root, &mut current, &now).is_err() {
+    if evaluate_human_gates_for_project(repo_root, &mut current, &now, true).is_err() {
         return project_pending_approvals(repo_root, registry);
     }
     project_pending_approvals(repo_root, &current)

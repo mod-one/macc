@@ -6,7 +6,10 @@ pub fn load(paths: Option<&ProjectPaths>) -> Result<Vec<ThrottledToolInfo>, Stri
     let Some(paths) = paths else {
         return Ok(Vec::new());
     };
-    let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(paths));
+    let storage = SqliteStorage::read_only(CoordinatorStoragePaths::from_project_paths(paths));
+    if !storage.paths.sqlite_path.exists() {
+        return Ok(Vec::new());
+    }
     let now = chrono::Utc::now().timestamp();
     Ok(storage
         .load_throttle_registry()

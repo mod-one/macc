@@ -57,12 +57,16 @@ fn valid(decision: &Decision, task: &Task, plan: &Plan, policy: &Policy, revisio
                 && r.conditions.is_empty()
         })
 }
-pub(crate) fn verified(root: &Path, registry: &TaskRegistry) -> crate::Result<BTreeSet<String>> {
-    let p = policy(root)?;
+pub(crate) fn verified(
+    root: &Path,
+    registry: &TaskRegistry,
+    store: &Store,
+    plan: &Plan,
+    p: &Policy,
+) -> crate::Result<BTreeSet<String>> {
     if !p.enabled || p.human_question_min_risk != Consultation::NeverAsk {
         return Ok(BTreeSet::new());
     }
-    let (store, plan) = active_plan(root)?;
     let decisions = store.decisions(&plan.id)?;
     let mut allowed = BTreeSet::new();
     for task in registry.tasks.iter().filter(|t| t.is_human_approval_gate()) {
@@ -82,11 +86,11 @@ pub(crate) fn verified(root: &Path, registry: &TaskRegistry) -> crate::Result<BT
         if proof["origin"] == "delegated_autonomous"
             && proof["subject_revision"] == revision
             && proof["subject_task"] == subject
-            && proof["policy_digest"] == digest(&p)
-            && human_veto(&store, &plan, task, root, &revision)?.is_none()
+            && proof["policy_digest"] == digest(p)
+            && human_veto(store, plan, task, root, &revision)?.is_none()
             && decisions
                 .iter()
-                .any(|d| proof["decision_id"] == d.id && valid(d, task, &plan, &p, &revision))
+                .any(|d| proof["decision_id"] == d.id && valid(d, task, plan, p, &revision))
         {
             allowed.insert(task.id.clone());
         }

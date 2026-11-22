@@ -17,7 +17,8 @@ use macc_core::catalog::{Agent, McpEntry, Skill};
 use macc_core::config::{CanonicalConfig, CoordinatorConfig};
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator_storage::{
-    CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
+    CoordinatorReader, CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths,
+    JsonStorage, SqliteStorage,
 };
 use macc_core::doctor::ToolCheck;
 use macc_core::engine::CoordinatorEvent;
@@ -849,12 +850,8 @@ impl AppState {
         &self,
         paths: &ProjectPaths,
     ) -> macc_core::Result<Vec<CoordinatorEvent>> {
-        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(paths));
-        if !sqlite.has_snapshot_data()? {
-            return self.engine.get_coordinator_events(paths);
-        }
-        Ok(sqlite
-            .load_recent_events(Self::COORDINATOR_EVENTS_WINDOW)?
+        Ok(CoordinatorReader::for_project(paths)?
+            .recent_events(Self::COORDINATOR_EVENTS_WINDOW)?
             .into_iter()
             .map(CoordinatorEvent::from_record)
             .collect())
@@ -869,23 +866,9 @@ impl AppState {
             .project_paths
             .as_ref()
             .ok_or_else(|| "No project loaded.".to_string())?;
-        let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-        match SqliteStorage::new(storage_paths.clone()).load_registry() {
-            Ok(registry) => Ok(registry),
-            Err(err) if self.allow_legacy_json_fallback() => JsonStorage::new(storage_paths)
-                .load_snapshot()
-                .map(|snapshot| snapshot.registry)
-                .map_err(|json_err| {
-                    format!(
-                        "failed to load coordinator registry (sqlite={}, json={})",
-                        err, json_err
-                    )
-                }),
-            Err(err) => Err(format!(
-                "failed to load coordinator registry from sqlite: {}",
-                err
-            )),
-        }
+        CoordinatorReader::for_project(paths)
+            .and_then(|reader| reader.registry())
+            .map_err(|e| e.to_string())
     }
 
     pub fn load_coordinator_storage_snapshot(&self) -> Result<CoordinatorSnapshot, String> {
@@ -1100,7 +1083,6 @@ impl AppState {
         let include_status = self.coordinator_poller.status_due();
         let request = crate::coordinator_poll::PollRequest {
             paths,
-            legacy_json_fallback: self.allow_legacy_json_fallback(),
             events_window: Self::COORDINATOR_EVENTS_WINDOW,
             include_status,
         };
@@ -1117,19 +1099,12 @@ impl AppState {
             self.apply_coordinator_status(status);
             self.sync_approval_window();
         }
-        let events = match result.events {
-            Some(events) => events.map(|records| {
-                records
-                    .into_iter()
-                    .map(CoordinatorEvent::from_record)
-                    .collect()
-            }),
-            // No coordinator database: read through the engine.
-            None => match self.project_paths.clone() {
-                Some(paths) => self.engine.get_coordinator_events(&paths),
-                None => Ok(Vec::new()),
-            },
-        };
+        let events = result.events.map(|records| {
+            records
+                .into_iter()
+                .map(CoordinatorEvent::from_record)
+                .collect()
+        });
         self.apply_coordinator_events(events);
     }
 
@@ -1147,23 +1122,12 @@ impl AppState {
         let Some(paths) = self.project_paths.as_ref() else {
             return;
         };
-        // Never create coordinator storage just to look for gates.
-        let storage =
-            macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
-        if !storage.sqlite_path.exists() && !storage.registry_json_path.exists() {
-            return;
-        }
-        if let Ok(pending) = self.engine.coordinator_execute_command(
+        if let Ok(pending) = macc_core::service::coordinator_workflow::coordinator_list_approvals(
             paths,
-            CoordinatorCommand::ListApprovals,
-            CoordinatorCommandRequest {
-                canonical: None,
-                coordinator_cfg: None,
-                env_cfg: &CoordinatorEnvConfig::default(),
-                logger: None,
-            },
+            None,
+            &self.coordinator_env_cfg(),
         ) {
-            self.coordinator_pending_approvals = pending.pending_approvals.unwrap_or_default();
+            self.coordinator_pending_approvals = pending;
         }
         self.sync_approval_window();
     }
@@ -7864,6 +7828,62 @@ mod tests {
             missing_roles: vec!["PRODUCT_OWNER".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn automatic_approval_refresh_uses_json_in_never_ask() {
+        let dir = tempdir().unwrap();
+        let paths = ProjectPaths::from_root(dir.path());
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&paths.root)
+            .status()
+            .unwrap()
+            .success());
+        let storage = CoordinatorStoragePaths::from_project_paths(&paths);
+        fs::create_dir_all(storage.registry_json_path.parent().unwrap()).unwrap();
+        let mut config = CanonicalConfig::default();
+        let coordinator = config
+            .automation
+            .coordinator
+            .get_or_insert_with(Default::default);
+        coordinator.storage_mode = Some("json".into());
+        coordinator.decisions = Some(macc_core::coordinator::decisions::Policy {
+            enabled: true,
+            human_question_min_risk: macc_core::coordinator::decisions::Consultation::NeverAsk,
+            ..Default::default()
+        });
+        fs::write(&paths.config_path, config.to_yaml().unwrap()).unwrap();
+        fs::write(&storage.registry_json_path, serde_json::json!({"tasks":[
+            {"id":"A","state":"merged"},
+            {"id":"G","state":"waiting_approval","gate":{"kind":"human_approval","subject_task":"A","evidence_type":"pull_request_review","required_approvers":[{"role":"OWNER","count":1}]}}
+        ]}).to_string()).unwrap();
+        let mut state = AppState::with_engine(Arc::new(NoopEngine::default()));
+        state.project_paths = Some(paths.clone());
+        for _ in 0..2 {
+            state.approvals_last_refresh = Some(Instant::now() - APPROVALS_REFRESH_INTERVAL);
+            state.tick();
+            assert_eq!(state.awaiting_approvals().count(), 1);
+            assert_eq!(state.coordinator_pending_approvals[0].task_id, "G");
+            assert!(!state.coordinator_pending_approvals[0].auto_prompt);
+            assert!(state.approval_window.is_none());
+            state.coordinator_pending_approvals.clear();
+            state.refresh_coordinator_snapshot();
+            assert_eq!(state.awaiting_approvals().count(), 1);
+            assert!(!storage.sqlite_path.exists());
+            assert!(!paths.root.join(".macc/persistent/control.sqlite").exists());
+        }
+        assert!(
+            macc_core::coordinator::decisions::poll_snapshot(&paths.root).unwrap()["plan"]
+                .is_null()
+        );
+        assert!(!paths.root.join(".macc/persistent/control.sqlite").exists());
+        // A stale SQLite registry must not shadow a configured JSON registry.
+        SqliteStorage::new(storage.clone())
+            .save_snapshot(&CoordinatorSnapshot::empty())
+            .unwrap();
+        state.refresh_coordinator_snapshot();
+        assert_eq!(state.awaiting_approvals().count(), 1);
     }
 
     #[test]

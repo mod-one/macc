@@ -8,9 +8,7 @@
 
 use macc_core::coordinator::model::TaskRegistry;
 use macc_core::coordinator::CoordinatorEventRecord;
-use macc_core::coordinator_storage::{
-    CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
-};
+use macc_core::coordinator_storage::CoordinatorReader;
 use macc_core::service::coordinator_workflow::CoordinatorStatus;
 use macc_core::ProjectPaths;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
@@ -22,16 +20,13 @@ pub const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// What a poll reads.
 pub struct PollRequest {
     pub paths: ProjectPaths,
-    pub legacy_json_fallback: bool,
     pub events_window: usize,
     pub include_status: bool,
 }
 
-/// What a poll read. `events` is `None` when the project has no coordinator
-/// database: the UI then reads events through the engine.
 pub struct PollResult {
     pub registry: Result<TaskRegistry, String>,
-    pub events: Option<macc_core::Result<Vec<CoordinatorEventRecord>>>,
+    pub events: macc_core::Result<Vec<CoordinatorEventRecord>>,
     pub status: Option<macc_core::Result<CoordinatorStatus>>,
 }
 
@@ -91,28 +86,12 @@ impl CoordinatorPoller {
 }
 
 fn poll(request: &PollRequest) -> PollResult {
-    let storage_paths = CoordinatorStoragePaths::from_project_paths(&request.paths);
-    let sqlite = SqliteStorage::new(storage_paths.clone());
-    let registry = match sqlite.load_registry() {
-        Ok(registry) => Ok(registry),
-        Err(err) if request.legacy_json_fallback => JsonStorage::new(storage_paths)
-            .load_snapshot()
-            .map(|snapshot| snapshot.registry)
-            .map_err(|json_err| {
-                format!(
-                    "failed to load coordinator registry (sqlite={}, json={})",
-                    err, json_err
-                )
-            }),
-        Err(err) => Err(format!(
-            "failed to load coordinator registry from sqlite: {}",
-            err
-        )),
-    };
-    let events = match sqlite.has_snapshot_data() {
-        Ok(true) => Some(sqlite.load_recent_events(request.events_window)),
-        Ok(false) => None,
-        Err(err) => Some(Err(err)),
+    let (registry, events) = match CoordinatorReader::for_project(&request.paths) {
+        Ok(reader) => (
+            reader.registry().map_err(|e| e.to_string()),
+            reader.recent_events(request.events_window),
+        ),
+        Err(err) => (Err(err.to_string()), Err(err)),
     };
     // The engine's status call is this same function; it is called directly
     // because the engine handle is not shareable with a worker thread.

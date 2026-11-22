@@ -1614,18 +1614,9 @@ pub fn coordinator_stop(paths: &ProjectPaths, reason: &str) -> Result<()> {
 }
 
 pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus> {
-    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-    let sqlite = SqliteStorage::new(storage_paths.clone());
-    let has_sqlite_data = sqlite.has_snapshot_data()?;
-    // Clients poll this every few seconds: read the registry and the one event
-    // it needs, never the whole event log.
-    let (registry, json_events) = if has_sqlite_data {
-        (sqlite.load_registry()?, Vec::new())
-    } else {
-        let snapshot = JsonStorage::new(storage_paths).load_snapshot()?;
-        (snapshot.registry, snapshot.events)
-    };
-
+    let reader = crate::coordinator_storage::CoordinatorReader::for_project(paths)?;
+    let sqlite = &reader.sqlite;
+    let registry = reader.registry()?;
     let mut status = CoordinatorStatus::default();
     let (total, todo, active, blocked, merged) = registry.counts();
     status.total = total;
@@ -1661,25 +1652,30 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
     }
 
     // The persistent tool registry remains authoritative after a task switches tools.
-    status.throttled_tools = sqlite
-        .load_throttle_registry()?
-        .into_values()
-        .filter(|entry| entry.throttled_until > chrono::Utc::now().timestamp() as u64)
-        .filter_map(|entry| {
-            chrono::DateTime::from_timestamp(entry.throttled_until as i64, 0).map(|until| {
-                ThrottledToolStatus {
-                    tool_id: entry.tool_id,
-                    throttled_until: until.to_rfc3339(),
-                    consecutive_count: entry.consecutive_429_count as usize,
-                }
-            })
+    status.throttled_tools = if sqlite.paths.sqlite_path.exists() {
+        sqlite.load_throttle_registry()?
+    } else {
+        Default::default()
+    }
+    .into_values()
+    .filter(|entry| entry.throttled_until > chrono::Utc::now().timestamp() as u64)
+    .filter_map(|entry| {
+        chrono::DateTime::from_timestamp(entry.throttled_until as i64, 0).map(|until| {
+            ThrottledToolStatus {
+                tool_id: entry.tool_id,
+                throttled_until: until.to_rfc3339(),
+                consecutive_count: entry.consecutive_429_count as usize,
+            }
         })
-        .collect();
+    })
+    .collect();
 
     // Surface the most recent run's status and stop reason so clients can show
     // *why* a run ended (normal completion vs error) once it is no longer live.
-    status.last_run_summary =
-        crate::service::run_summary::load_project_run_summary(paths, &sqlite, &registry)?;
+    if sqlite.paths.sqlite_path.exists() {
+        status.last_run_summary =
+            crate::service::run_summary::load_project_run_summary(paths, sqlite, &registry)?;
+    }
     if let Some(summary) = &status.last_run_summary {
         status.last_run_status = Some(summary.status.clone());
         status.last_run_stop_reason = summary
@@ -1691,7 +1687,7 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
         crate::coordinator::approval::current_pending_approvals(&paths.root, &registry);
 
     // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
-    let concurrency_event = if has_sqlite_data {
+    let concurrency_event = if reader.uses_sqlite() {
         let mut latest = None;
         let query = crate::coordinator_storage::EventQuery {
             event_type: Some("concurrency_adjusted"),
@@ -1703,7 +1699,9 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
         })?;
         latest
     } else {
-        json_events
+        reader
+            .snapshot()?
+            .events
             .into_iter()
             .rev()
             .find(|e| e.event_type == "concurrency_adjusted")
@@ -2405,11 +2403,9 @@ pub fn coordinator_list_approvals(
     coordinator_cfg: Option<&CoordinatorConfig>,
     env_cfg: &CoordinatorEnvConfig,
 ) -> Result<Vec<crate::coordinator::approval::PendingApproval>> {
-    let mut state_args = BTreeMap::new();
-    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
-    let value =
-        crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
-    let registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+    let registry =
+        crate::coordinator_storage::CoordinatorReader::configured(paths, coordinator_cfg, env_cfg)?
+            .registry()?;
     Ok(crate::coordinator::approval::current_pending_approvals(
         &paths.root,
         &registry,

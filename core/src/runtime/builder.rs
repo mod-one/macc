@@ -1,7 +1,5 @@
 use super::snapshot::*;
-use crate::coordinator_storage::{
-    CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
-};
+use crate::coordinator_storage::CoordinatorReader;
 use crate::{ProjectPaths, Result};
 use chrono::Utc;
 
@@ -9,25 +7,10 @@ pub struct RuntimeSnapshotBuilder;
 
 impl RuntimeSnapshotBuilder {
     pub fn build(paths: &ProjectPaths) -> Result<RuntimeSnapshot> {
-        let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-        let sqlite = SqliteStorage::new(storage_paths.clone());
-        let snapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
-            // Recent events come from the events log below, not from storage.
-            sqlite.load_snapshot_without_events()
-        } else {
-            JsonStorage::new(storage_paths.clone()).load_snapshot()
-        };
-
-        let (queue, workers, tasks, throttled_tools, mut coordinator) = match &snapshot {
-            Ok(s) => build_from_snapshot(s),
-            Err(_) => (
-                QueueSummary::default(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                CoordinatorStatus::default(),
-            ),
-        };
+        let reader = CoordinatorReader::for_project(paths)?;
+        let registry = reader.registry()?;
+        let (queue, workers, tasks, throttled_tools, mut coordinator) =
+            build_from_registry(&registry);
 
         // Spec §6.3 / §4.5: populate CoordinatorStatus from the pause file and the
         // active coordinator_runs row so the snapshot faithfully reflects live state.
@@ -43,7 +26,7 @@ impl RuntimeSnapshotBuilder {
         }
 
         // Check the coordinator_runs table for an active run.
-        let sqlite = SqliteStorage::new(storage_paths);
+        let sqlite = &reader.sqlite;
         if let Ok(Some(run)) = sqlite.get_latest_coordinator_run() {
             if matches!(run.status.as_str(), "running" | "draining") {
                 coordinator.running = true;
@@ -51,25 +34,18 @@ impl RuntimeSnapshotBuilder {
                 coordinator.epoch = Some(run.epoch);
             }
         }
-        if let Ok(snapshot) = &snapshot {
-            coordinator.last_run_summary = crate::service::run_summary::load_project_run_summary(
-                paths,
-                &sqlite,
-                &snapshot.registry,
-            )
-            .unwrap_or(None);
-            if coordinator
-                .last_run_summary
-                .as_ref()
-                .is_some_and(|summary| summary.status == "crashed")
-            {
-                coordinator.running = false;
-            }
-            coordinator.pending_approvals = crate::coordinator::approval::current_pending_approvals(
-                &paths.root,
-                &snapshot.registry,
-            );
+        coordinator.last_run_summary =
+            crate::service::run_summary::load_project_run_summary(paths, sqlite, &registry)
+                .unwrap_or(None);
+        if coordinator
+            .last_run_summary
+            .as_ref()
+            .is_some_and(|summary| summary.status == "crashed")
+        {
+            coordinator.running = false;
         }
+        coordinator.pending_approvals =
+            crate::coordinator::approval::current_pending_approvals(&paths.root, &registry);
 
         let recent_events = load_recent_events(paths);
         let git = build_git_summary(paths);
@@ -112,8 +88,8 @@ impl RuntimeSnapshotBuilder {
     }
 }
 
-fn build_from_snapshot(
-    snapshot: &crate::coordinator_storage::CoordinatorSnapshot,
+fn build_from_registry(
+    registry: &crate::coordinator::model::TaskRegistry,
 ) -> (
     QueueSummary,
     Vec<WorkerRuntime>,
@@ -129,7 +105,7 @@ fn build_from_snapshot(
 
     let now_iso = Utc::now().to_rfc3339();
 
-    for task in &snapshot.registry.tasks {
+    for task in &registry.tasks {
         let state = task.state.to_ascii_lowercase();
         queue.total += 1;
         match state.as_str() {
