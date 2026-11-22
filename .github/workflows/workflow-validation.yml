@@ -1,0 +1,23 @@
+name: Validate workflows
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every GitHub Actions workflow
+        # actionlint 1.7.7
+        run: |
+          docker run --rm --volume "$PWD:/repo:ro" --workdir /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+
+      - name: Check release versions and mismatch handling
+        run: |
+          make check-version
+          bash scripts/tests/check-version.sh

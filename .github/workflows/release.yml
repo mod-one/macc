@@ -34,57 +34,7 @@ jobs:
 
       - name: Verify release tag matches workspace, web, and changelog versions
         shell: bash
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          read_manifest_version() {
-            local manifest_path=$1
-            python3 - "$manifest_path" <<'PY2'
-from pathlib import Path
-import sys
-import tomllib
-manifest = Path(sys.argv[1])
-with manifest.open('rb') as fh:
-    data = tomllib.load(fh)
-if 'package' in data:
-    version = data['package']['version']
-    if isinstance(version, dict) and version.get('workspace') is True:
-        with Path('Cargo.toml').open('rb') as wfh:
-            wdata = tomllib.load(wfh)
-        version = wdata['workspace']['package']['version']
-else:
-    version = data['workspace']['package']['version']
-print(version)
-PY2
-          }
-
-          ws_version=$(read_manifest_version Cargo.toml)
-          adapters_ws_version=$(read_manifest_version adapters/Cargo.toml)
-          core_version=$(read_manifest_version core/Cargo.toml)
-          cli_version=$(read_manifest_version cli/Cargo.toml)
-          tui_version=$(read_manifest_version tui/Cargo.toml)
-          registry_version=$(read_manifest_version registry/Cargo.toml)
-          web_version=$(python3 -c "import json; print(json.load(open('web/package.json'))['version'])")
-
-          for pair in \
-            "Cargo.toml:$ws_version" \
-            "adapters/Cargo.toml:$adapters_ws_version" \
-            "core/Cargo.toml:$core_version" \
-            "cli/Cargo.toml:$cli_version" \
-            "tui/Cargo.toml:$tui_version" \
-            "registry/Cargo.toml:$registry_version" \
-            "web/package.json:$web_version"; do
-            name="${pair%%:*}"
-            ver="${pair#*:}"
-            if [[ "$tag_version" != "$ver" ]]; then
-              echo "release tag version ($tag_version) does not match $name version ($ver)" >&2
-              exit 1
-            fi
-          done
-
-          if ! grep -Eq "^## \[${tag_version//./\\.}\]" CHANGELOG.md; then
-            echo "CHANGELOG.md is missing a '## [$tag_version]' section" >&2
-            exit 1
-          fi
+        run: python3 scripts/check-version.py "$GITHUB_REF_NAME"
 
       - name: Format check
         run: make fmt-check

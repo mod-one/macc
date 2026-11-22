@@ -65,18 +65,7 @@ check-generic:
 	@./scripts/check-ui-tool-transparency.sh
 
 check-version:
-	@python3 -c 'import json, pathlib, re, sys, tomllib; \
-ws = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; \
-aws = tomllib.loads(pathlib.Path("adapters/Cargo.toml").read_text())["workspace"]["package"]["version"]; \
-web = json.loads(pathlib.Path("web/package.json").read_text())["version"]; \
-changelog = pathlib.Path("CHANGELOG.md").read_text(); \
-expected = sys.argv[1].lstrip("v") if len(sys.argv) > 1 and sys.argv[1] else ws; \
-errors = []; \
-ws != expected and errors.append(f"Cargo.toml ({ws}) != {expected}"); \
-aws != expected and errors.append(f"adapters/Cargo.toml ({aws}) != {expected}"); \
-web != expected and errors.append(f"web/package.json ({web}) != {expected}"); \
-not re.search(rf"^## \[{re.escape(expected)}\]", changelog, re.M) and errors.append(f"CHANGELOG.md missing ## [{expected}]"); \
-sys.exit("\n".join(errors)) if errors else print(f"Version check OK: {expected}")' "$(TAG_VERSION)"
+	@python3 scripts/check-version.py "$${TAG_VERSION:-}"
 
 release-bump:
 	@./scripts/bump-version.sh "$(VERSION)"
