@@ -683,3 +683,109 @@ fn revoked_evidence_disclosure_cannot_be_rolled_back_to_an_earlier_valid_permiss
     drop(s);
     assert!(Store::open(tmp.path()).is_err());
 }
+
+#[test]
+fn resume_check_observes_intervention_and_restores_only_retained_fix() {
+    use crate::coordinator::{delivery_evidence, resume_check as checks, state};
+    let (tmp, mut store, plan, mut registry, policy) = fixture();
+    let root = tmp.path();
+    let graph = &root.join("prd.json");
+    std::fs::write(root.join(".gitignore"), ".macc/\nreports/\n").unwrap();
+    git(root, &["add", "prd.json", ".gitignore"]);
+    git(root, &["commit", "-m", "candidate"]);
+    let worker = root.join(".macc/worktree/worker-01");
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "ai/test/worker-01",
+            worker.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(worker.join(".macc")).unwrap();
+    std::fs::write(worker.join(".macc/worktree.json"),json!({"id":"worker-01","slug":"worker-01","tool":"test","base":"main","branch":"ai/test/worker-01"}).to_string()).unwrap();
+    std::fs::write(worker.join("unmerged.txt"), "retained fix").unwrap();
+    let mut request = physical_request("observed");
+    let criterion = "Expected serial is authorized on this runner";
+    request.intervention.as_mut().unwrap().expected_result = criterion.into();
+    let d = store
+        .submit(&plan, request, "agent:A", "agent", &policy)
+        .unwrap();
+    let task = registry.find_task_mut("A").unwrap();
+    let wt = task.ensure_worktree();
+    wt.worktree_path = Some(worker.to_string_lossy().into());
+    wt.branch = Some("ai/test/worker-01".into());
+    wt.base_branch = Some("main".into());
+    task.task_runtime.current_phase = Some("review".into());
+    task.task_runtime
+        .extra
+        .insert("suspended_phase".into(), json!({"phase":"fix"}));
+    sync(root, graph, &mut registry).unwrap();
+    // A performer can record the native decision as its own E903 prerequisite.
+    registry
+        .find_task_mut("A")
+        .unwrap()
+        .task_runtime
+        .last_error_origin = Some("precondition".into());
+    state::coordinator_state_registry_save(
+        root,
+        &Default::default(),
+        &registry.to_value().unwrap(),
+    )
+    .unwrap();
+    let dossier = checks::Proposal {
+        task_id: "A".into(),
+        phase: "fix".into(),
+        category: checks::Category::TechnicalCondition,
+        target: "reserved-serial".into(),
+        criterion: criterion.into(),
+        decision: Some(DecisionRef {
+            id: d.id.clone(),
+            version: d.version,
+        }),
+        verifier: Some(checks::Verifier {
+            source: checks::Source::JsonFile {
+                path: "reports/devices.json".into(),
+            },
+            script: include_str!("../../../../docs/resume-checks/adb.sql").into(),
+        }),
+    };
+    let config = crate::load_canonical_config(root.join(".macc/macc.yaml")).unwrap();
+    let cfg = config.automation.coordinator.as_ref();
+    let diagnosed = checks::DiagnosisSnapshot::capture(root, cfg, &registry.tasks);
+    let mut wrong_revision = dossier.clone();
+    wrong_revision.decision.as_mut().unwrap().version += 1;
+    assert!(diagnosed.register(root, cfg, &[wrong_revision]).is_err());
+    diagnosed.register(root, cfg, &[dossier]).unwrap();
+    std::fs::create_dir_all(worker.join("reports")).unwrap();
+    std::fs::write(
+        worker.join("reports/devices.json"),
+        json!([{"serial":"reserved-serial","state":"device"}]).to_string(),
+    )
+    .unwrap();
+    delivery_evidence::reconcile_before_dispatch(root, graph, cfg, &Default::default(), None)
+        .unwrap();
+    let reg = TaskRegistry::from_value(
+        &state::coordinator_state_registry_load(root, &Default::default()).unwrap(),
+    )
+    .unwrap();
+    let t = reg.find_task("A").unwrap();
+    assert_eq!(
+        t.state, "changes_requested",
+        "{:?}",
+        t.task_runtime.resume_check
+    );
+    assert_eq!(t.task_runtime.current_phase.as_deref(), Some("fix"));
+    assert_eq!(
+        std::fs::read_to_string(worker.join("unmerged.txt")).unwrap(),
+        "retained fix"
+    );
+    assert!(t.task_runtime.gate_verdict.is_none());
+    let resolution = store.decision(&d.id).unwrap().resolution.unwrap();
+    assert_eq!(resolution.origin, "resume_verifier");
+    assert_eq!(resolution.answered_version, Some(d.version));
+    assert!(resolution.fields.is_empty());
+    store.verify().unwrap();
+}

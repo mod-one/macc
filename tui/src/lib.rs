@@ -35,6 +35,7 @@ mod observations;
 mod overview_view;
 mod preview;
 mod preview_view;
+mod resume_check;
 mod tools_view;
 mod workbench;
 use command_palette::*;

@@ -51,23 +51,38 @@ pub(crate) fn reconcile(
     }
 }
 
+fn has_interrupted_invocation(task: &Task) -> bool {
+    let rt = &task.task_runtime;
+    rt.current_phase.as_deref() != Some("merge")
+        && rt.extra.contains_key("decision_wait")
+        && (rt.last_error_origin.as_deref() == Some("decisions")
+            || (rt.last_error_origin.as_deref() == Some("precondition")
+                && rt.extra.contains_key("suspended_phase")
+                && super::phase_diagnostics::decision_wait_id(task).is_some()))
+}
+
+/// Native invocation pins identify the interrupted phase when current_phase still names its predecessor.
+fn interrupted_phase(task: &Task) -> Option<&str> {
+    let rt = &task.task_runtime;
+    has_interrupted_invocation(task).then_some(())?;
+    rt.extra
+        .get("suspended_phase")
+        .or_else(|| rt.extra.get("decision_context"))
+        .and_then(|v| v["phase"].as_str())
+        .filter(|p| matches!(*p, "dev" | "test" | "fix" | "review"))
+}
+
+pub(crate) fn retained_phase(task: &Task) -> &str {
+    interrupted_phase(task)
+        .or(task.task_runtime.current_phase.as_deref())
+        .unwrap_or("dev")
+}
+
 /// A repaired validation/publication failure must not restart implementation.
 pub fn resume_state(root: &std::path::Path, task: &mut Task) -> WorkflowState {
-    // Older interrupted phases left current_phase at the previous completed
-    // phase. The native invocation pin identifies the interrupted phase.
-    if task.task_runtime.extra.contains_key("decision_wait")
-        && task.task_runtime.last_error_origin.as_deref() == Some("decisions")
-        && task.task_runtime.current_phase.as_deref() != Some("merge")
-    {
-        if let Some(phase) = task
-            .task_runtime
-            .extra
-            .get("suspended_phase")
-            .or_else(|| task.task_runtime.extra.get("decision_context"))
-            .and_then(|v| v["phase"].as_str())
-            .filter(|p| matches!(*p, "dev" | "test" | "fix" | "review"))
-        {
-            task.task_runtime.current_phase = Some(phase.into());
+    if has_interrupted_invocation(task) {
+        if let Some(phase) = interrupted_phase(task) {
+            task.task_runtime.current_phase = Some(phase.to_owned());
         }
         if let Some(receipt) = task.task_runtime.extra.remove("suspended_phase") {
             task.task_runtime

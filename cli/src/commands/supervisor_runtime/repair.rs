@@ -12,6 +12,9 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnosis {
+    /// Issued by MACC after binding a supervisor script to a stopped task.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub resume_check_ids: std::collections::BTreeMap<String, String>,
     /// Optional absolute provider reset time, copied into the durable wait policy.
     #[serde(default)]
     pub retry_at: Option<String>,
@@ -39,6 +42,16 @@ pub struct Diagnosis {
     #[serde(default)]
     pub restart_only: bool,
 }
+impl Diagnosis {
+    pub fn waiting_for_checks(&self) -> bool {
+        !self.task_ids.is_empty()
+            && self
+                .task_ids
+                .iter()
+                .all(|id| self.resume_check_ids.contains_key(id))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Verification {
     verified: bool,
@@ -88,6 +101,7 @@ pub async fn diagnose(
     worktree: &Path,
     dir: &Path,
     incident: &Incident,
+    config: Option<&macc_core::config::CoordinatorConfig>,
 ) -> Result<Diagnosis> {
     let evidence =
         serde_json::to_string_pretty(incident).map_err(|e| MaccError::Validation(e.to_string()))?;
@@ -109,21 +123,27 @@ pub async fn diagnose(
     let recovery_evidence = macc_core::session_store::checkpoints::recovery::diagnostics(root)?;
     let prompt = format!("{prompt}\nStructured checkpoint recovery evidence: {recovery_evidence:?}. MACC-CHECKPOINT-CONTEXT-DRIFT is an execution-context problem, separate from eventual device acceptance evidence. Contract changes require explicit reviewed reconciliation; never approve them by editing runtime files.\nOnly incident task IDs belong in task_ids. Put other tasks mentioned as context in related_task_ids; they cannot authorize any repair or task-state change.");
     let prompt = format!("{prompt}\nA {code} diagnostic is a decision prompt byte-budget prerequisite. Its required_bytes, budget_bytes and section sizes are authoritative runtime evidence. Do not repair application source or fabricate acceptance to solve it. Review the configured limit or request a MACC projection correction; never silently override a user-configured cap. The default for new policies is 131072 bytes. Large prerequisite/plan sources have pinned, scoped context-source reads; applicable decisions must retain their exact wording.",code=macc_core::coordinator::decisions::CONTEXT_BUDGET_CODE);
+    let prompt = format!("{prompt}\n{}", include_str!("resume_checks.md"));
     remove_response(&worktree.join(".macc/supervisor-diagnosis.json"))?;
     // A retried incident diagnoses in a slot that already holds repair work.
+    let bindings = macc_core::coordinator::resume_check::DiagnosisSnapshot::capture(
+        root,
+        config,
+        &incident.tasks,
+    );
     let before = super::workspace::snapshot(worktree)?;
     agent.run(worktree, &prompt, dir, "diagnosis").await?;
-    let mut diagnosis: Diagnosis = read_json(&worktree.join(".macc/supervisor-diagnosis.json"))?;
-    scope_diagnosis(&mut diagnosis, incident);
     if super::workspace::snapshot(worktree)? != before {
         return Err(MaccError::Validation(
             "Diagnosis modified source; analysis worktree retained for inspection".into(),
         ));
     }
-    Ok(diagnosis)
+    let response: super::resume_checks::Response =
+        read_json(&worktree.join(".macc/supervisor-diagnosis.json"))?;
+    response.bind(&bindings, root, config, incident)
 }
 
-fn scope_diagnosis(diagnosis: &mut Diagnosis, incident: &Incident) {
+pub(super) fn scope_diagnosis(diagnosis: &mut Diagnosis, incident: &Incident) {
     diagnosis.task_ids.retain(|id| {
         if incident.tasks.iter().any(|t| t.id == *id) {
             return true;

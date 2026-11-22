@@ -44,7 +44,11 @@ fn worker(task: &LiveTaskRow) -> TaskRow {
         }
     };
     let phase = task.phase.compact_label();
-    let mut label = task.status_label();
+    let mut label = if task.workflow_state == macc_core::coordinator::WorkflowState::Blocked {
+        "BLOCKED".into()
+    } else {
+        task.status_label()
+    };
     if !phase.is_empty() {
         label.push(' ');
         label.push_str(phase);

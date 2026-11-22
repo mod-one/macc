@@ -218,3 +218,104 @@ fn attached_supervisor_cancels_an_active_diagnosis_on_operator_force_stop() {
     assert!(dir.join("report.json").exists());
     assert!(dir.join("diagnosis-prompt.txt").exists());
 }
+
+#[test]
+fn supervisor_registers_new_script_without_repair_or_operator_approval() {
+    let temp = fixture(false);
+    let root = temp.path();
+    let block =
+        json!({"reason":"CI delivery is pending","clears_when":"Candidate passes staging CI"});
+    let prd = json!({"tasks":[{"id":"ROOT","blocked_on_external":block}]});
+    std::fs::write(root.join("prd.json"), prd.to_string()).unwrap();
+    git(root, &["add", "prd.json"]);
+    git(root, &["commit", "-qm", "declare CI prerequisite"]);
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(
+        &ProjectPaths::from_root(root),
+    ));
+    let mut snapshot = db.load_snapshot().unwrap();
+    let task = snapshot.registry.find_task_mut("ROOT").unwrap();
+    task.blocked_on_external = Some(serde_json::from_value(block).unwrap());
+    task.task_runtime.set_last_error_details(
+        "E904",
+        "external_precondition",
+        "CI delivery is pending",
+    );
+    db.save_snapshot(&snapshot).unwrap();
+    let config = macc_core::load_canonical_config(root.join(".macc/macc.yaml")).unwrap();
+    let startup = || {
+        macc_core::coordinator::delivery_evidence::reconcile_before_dispatch(
+            root,
+            &root.join("prd.json"),
+            config.automation.coordinator.as_ref(),
+            &Default::default(),
+            None,
+        )
+        .unwrap();
+    };
+    startup();
+    let response = json!({"summary":"Waiting for the staging CI report","repairable":false,"task_ids":["ROOT"],"resume_checks":[{
+        "task_id":"ROOT","category":"technical_condition","target":"staging","criterion":"Candidate passes staging CI","phase":"dev",
+        "verifier":{"source":{"kind":"json_file","path":"reports/ci.json"},"script":include_str!("../../../docs/resume-checks/ci.sql")}
+    }]});
+    std::fs::write(root.join(".macc/fake-agent.sh"),format!("#!/bin/sh\nset -eu\ncat > .macc/supervisor-diagnosis.json <<'RESPONSE'\n{response}\nRESPONSE\n")).unwrap();
+    let supervisor = start(root);
+    wait_for(|| {
+        report(root).is_some_and(|r| {
+            matches!(
+                r["intervention"]["status"].as_str(),
+                Some("waiting_condition" | "escalated")
+            )
+        })
+    });
+    let r = report(root).unwrap();
+    assert_eq!(
+        r["intervention"]["status"], "waiting_condition",
+        "{}",
+        r["intervention"]["detail"]
+    );
+    assert_eq!(r["intervention"]["diagnosis"]["requires_human"], false);
+    let registry = db.load_registry().unwrap();
+    let task = registry.find_task("ROOT").unwrap();
+    let check = task.task_runtime.resume_check.as_ref().unwrap();
+    assert_eq!(
+        r["intervention"]["diagnosis"]["resume_check_ids"]["ROOT"],
+        check.id
+    );
+    assert_eq!(task.state, "blocked");
+    assert!(check.checked_at.is_none());
+    assert_eq!(
+        std::fs::read_to_string(root.join("defect.txt")).unwrap(),
+        "broken\n"
+    );
+    drop(supervisor);
+    startup();
+    let waiting = db.load_registry().unwrap();
+    let task = waiting.find_task("ROOT").unwrap();
+    assert_eq!(task.state, "blocked");
+    assert_eq!(
+        task.task_runtime
+            .resume_check
+            .as_ref()
+            .unwrap()
+            .last
+            .as_ref()
+            .unwrap()
+            .status,
+        macc_core::coordinator::resume_check::Status::Waiting
+    );
+    std::fs::create_dir_all(root.join("reports")).unwrap();
+    std::fs::write(
+        root.join("reports/ci.json"),
+        json!({
+            "commit":macc_core::git::head_commit(root).unwrap(), "environment":"staging",
+            "finished_at":chrono::Utc::now().timestamp(), "result":"passed",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    startup();
+    let released = db.load_registry().unwrap();
+    let task = released.find_task("ROOT").unwrap();
+    assert_eq!(task.state, "todo", "{:?}", task.task_runtime.resume_check);
+    assert!(task.external_block_is_cleared());
+}

@@ -33,7 +33,7 @@ fn state_with_worker_and_intervention() -> (tempfile::TempDir, AppState) {
         merged: 0,
         approved: 0,
         throttled_tools: vec![],
-        active_tasks: vec![LiveTaskRow {
+        task_rows: vec![LiveTaskRow {
             health: TaskHealth::Healthy,
             worker_id: "worker-01".into(),
             task_id: "BOOT-DOC".into(),
@@ -128,11 +128,7 @@ fn supervisor_selection_changes_detail_and_disables_worker_commands() {
     handle_key(&mut s, KeyCode::Down);
     assert_eq!(s.selected_live_task().unwrap().task_id, "BOOT-DOC");
     assert!(text(&render(&s, 120, 36)).contains("SELECTED TASK DETAIL"));
-    s.coordinator_snapshot
-        .as_mut()
-        .unwrap()
-        .active_tasks
-        .clear();
+    s.coordinator_snapshot.as_mut().unwrap().task_rows.clear();
     assert!(text(&render(&s, 120, 36)).contains("SUPERVISOR TASK DETAIL"));
     s.observations.latest.as_mut().unwrap().intervention = None;
     assert!(text(&render(&s, 120, 36)).contains("SELECTED TASK DETAIL"));
@@ -147,4 +143,29 @@ fn stopped_run_is_visible_until_work_resumes_or_the_queue_is_resolved() {
     assert!(next_step_text(&state, 150).contains("BOOT-VERIFY"));
     state.coordinator_snapshot.as_mut().unwrap().blocked = 0;
     assert!(state.unresolved_run().is_none());
+}
+
+#[test]
+fn blocked_check_is_selectable_without_counting_as_active_or_enabling_retry() {
+    let (project, mut s) = fixture();
+    navigation::Destination::Live.open(&mut s);
+    let registry = serde_json::json!({"tasks":[{"id":"CHECKED","state":"blocked","task_runtime":{"resume_check":{
+        "id":"example","category":"technical_condition","phase":"test","criterion":"Report for this commit",
+        "last":{"status":"waiting","detail":"Publish staging report"},"checked_at":"2026-01-01T00:00:00Z"
+    }}}]});
+    macc_core::coordinator::state::coordinator_state_registry_save(
+        project.path(),
+        &Default::default(),
+        &registry,
+    )
+    .unwrap();
+    s.refresh_coordinator_snapshot();
+    let snapshot = s.coordinator_snapshot.as_ref().unwrap();
+    assert_eq!((snapshot.active, snapshot.blocked), (0, 1));
+    assert_eq!(s.selected_live_task().unwrap().task_id, "CHECKED");
+    assert!(text(&render(&s, 140, 40)).contains("Publish staging report"));
+    let commands = command_catalog::active(&s);
+    assert!(commands
+        .iter()
+        .any(|c| c.action == command_catalog::Action::RetryTask && !c.enabled));
 }

@@ -1,0 +1,277 @@
+use super::*;
+use crate::coordinator::{
+    model::{Task, TaskRegistry},
+    state,
+    types::CoordinatorEnvConfig,
+};
+use serde_json::{json, Value};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
+
+const CI: &str = include_str!("../../../../docs/resume-checks/ci.sql");
+const ADB: &str = include_str!("../../../../docs/resume-checks/adb.sql");
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(3)
+}
+fn evaluate(script: &str, input: &Value) -> Outcome {
+    verifier::evaluate(script, input, deadline()).unwrap()
+}
+#[test]
+fn novel_scripts_check_identity_freshness_and_transport_state() {
+    let mut input = json!({"target":"reserved","observation":[{"serial":"other","state":"device"},{"serial":"reserved","state":"unauthorized"}]});
+    assert_eq!(evaluate(ADB, &input).status, Status::Waiting);
+    input["observation"][1]["state"] = json!("device");
+    assert_eq!(evaluate(ADB, &input).status, Status::Ready);
+    let mut ci = json!({"target":"stage","commit":"abc","now_unix":7200,"observation":{"commit":"abc","environment":"stage","finished_at":7200,"result":"passed"}});
+    assert_eq!(evaluate(CI, &ci).status, Status::Ready);
+    for (key, value) in [
+        ("commit", json!("old")),
+        ("environment", json!("other")),
+        ("finished_at", json!(3599)),
+        ("finished_at", json!(7201)),
+        ("finished_at", json!("7200")),
+        ("result", json!("failed")),
+    ] {
+        let original = ci["observation"][key].clone();
+        ci["observation"][key] = value;
+        assert_eq!(evaluate(CI, &ci).status, Status::Waiting, "{key}");
+        ci["observation"][key] = original;
+    }
+}
+#[test]
+fn invalid_or_unbounded_scripts_do_not_return_ready() {
+    for sql in ["SELECT :input; SELECT 1","ATTACH ':memory:' AS other","SELECT load_extension(:input)","SELECT :input UNION ALL SELECT :input","SELECT json_object('status','ready','unknown',:input)","WITH RECURSIVE seq(i) AS (SELECT length(:input) UNION ALL SELECT i+1 FROM seq) SELECT max(i) FROM seq"]{
+        assert!(verifier::evaluate(sql,&json!({}),deadline()).is_err(),"{sql}");
+    }
+    assert!(verifier::evaluate(ADB, &json!({}), Instant::now()).is_err());
+}
+struct Project {
+    dir: tempfile::TempDir,
+    proposal: Proposal,
+}
+impl Project {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-b", "main"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let graph = json!({"tasks":[{"id":"CI","state":"todo","blocked_on_external":{"reason":"CI evidence missing","clears_when":"Candidate passes staging CI","tracking_id":"receipt"}},
+                                 {"id":"OTHER","state":"blocked"}]});
+        fs::write(root.join("prd.json"), graph.to_string()).unwrap();
+        let mut reg = TaskRegistry::from_value(&graph).unwrap();
+        crate::coordinator::task_selector::reconcile_task_blocks(&mut reg, "2026-01-01T00:00:00Z");
+        state::coordinator_state_registry_save(root, &Default::default(), &reg.to_value().unwrap())
+            .unwrap();
+        let proposal = Proposal {
+            task_id: "CI".into(),
+            phase: "dev".into(),
+            category: Category::TechnicalCondition,
+            target: "staging".into(),
+            criterion: "Candidate passes staging CI".into(),
+            decision: None,
+            verifier: Some(Verifier {
+                source: Source::JsonFile {
+                    path: "reports/ci.json".into(),
+                },
+                script: CI.into(),
+            }),
+        };
+        Self { dir, proposal }
+    }
+    fn root(&self) -> &Path {
+        self.dir.path()
+    }
+    fn tasks(&self) -> Vec<Task> {
+        TaskRegistry::from_value(
+            &state::coordinator_state_registry_load(self.root(), &Default::default()).unwrap(),
+        )
+        .unwrap()
+        .tasks
+    }
+    fn install(&self) -> String {
+        DiagnosisSnapshot::capture(self.root(), None, &self.tasks())
+            .register(self.root(), None, std::slice::from_ref(&self.proposal))
+            .unwrap()
+            .remove(0)
+    }
+    fn replay(&self) -> Task {
+        replay_at_startup(
+            self.root(),
+            &self.root().join("prd.json"),
+            None,
+            &CoordinatorEnvConfig::default(),
+        )
+        .unwrap();
+        self.tasks().remove(0)
+    }
+    fn report(&self, commit: &str) {
+        fs::create_dir_all(self.root().join("reports")).unwrap();
+        fs::write(self.root().join("reports/ci.json"),json!({"commit":commit,"environment":"staging","finished_at":chrono::Utc::now().timestamp(),"result":"passed"}).to_string()).unwrap()
+    }
+}
+fn git(root: &Path, args: &[&str]) {
+    let result = crate::git::run_git_output_mapped(root, args, "resume check fixture").unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+fn outcome(task: &Task) -> &Outcome {
+    task.task_runtime
+        .resume_check
+        .as_ref()
+        .unwrap()
+        .last
+        .as_ref()
+        .unwrap()
+}
+#[test]
+fn restart_rechecks_only_the_bound_task_and_preserves_audit() {
+    let p = Project::new();
+    let id = p.install();
+    let task = p.replay();
+    assert_eq!(task.state, "blocked");
+    assert_eq!(outcome(&task).status, Status::Waiting);
+    assert!(waiting_check(p.root(), &p.root().join("prd.json"), &task).is_some());
+    assert_eq!(p.install(), id);
+    p.report("old-commit");
+    assert_eq!(outcome(&p.replay()).status, Status::Waiting);
+    p.report(&crate::git::head_commit(p.root()).unwrap());
+    let ready = p.replay();
+    assert_eq!(outcome(&ready).status, Status::Ready);
+    assert_eq!(ready.state, "todo");
+    assert_eq!(p.tasks()[1].state, "blocked");
+    assert!(ready.external_block_is_cleared());
+    assert!(waiting_check(p.root(), &p.root().join("prd.json"), &ready).is_none());
+    let mut changed = ready.clone();
+    changed.blocked_on_external.as_mut().unwrap().clears_when = "Also requires a signature".into();
+    assert!(!changed.external_block_is_cleared());
+    assert_eq!(
+        p.replay().task_runtime.resume_check,
+        ready.task_runtime.resume_check
+    );
+}
+#[test]
+fn changed_packet_candidate_or_prd_keeps_the_block() {
+    for change in ["packet", "candidate", "prd"] {
+        let p = Project::new();
+        let id = p.install();
+        match change {
+            "packet" => fs::write(
+                p.root().join(format!(
+                    ".macc/state/resume-checks/{}.json",
+                    id.strip_prefix("sha256:").unwrap()
+                )),
+                "{}",
+            )
+            .unwrap(),
+            "candidate" => git(
+                p.root(),
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.org",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "new base",
+                ],
+            ),
+            _ => {
+                let path = p.root().join("prd.json");
+                let mut prd: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                prd["tasks"][0]["title"] = json!("Revised requirement");
+                fs::write(path, prd.to_string()).unwrap();
+            }
+        }
+        p.report(&crate::git::head_commit(p.root()).unwrap());
+        let task = p.replay();
+        assert_eq!(task.state, "blocked", "{change}");
+        assert_eq!(outcome(&task).status, Status::Error, "{change}");
+    }
+}
+#[test]
+fn passive_classification_does_not_release_or_run_a_script() {
+    let mut p = Project::new();
+    for category in [
+        Category::HumanApproval,
+        Category::ReviewCorrection,
+        Category::ExternalAction,
+    ] {
+        p.proposal.category = category;
+        assert!(DiagnosisSnapshot::capture(p.root(), None, &p.tasks())
+            .register(p.root(), None, std::slice::from_ref(&p.proposal))
+            .is_err());
+        let verifier = p.proposal.verifier.take();
+        p.install();
+        let t = p.replay();
+        assert_eq!(t.state, "blocked");
+        assert!(t.task_runtime.resume_check.unwrap().checked_at.is_none());
+        p.proposal.verifier = verifier;
+    }
+}
+
+#[test]
+fn changing_commit_during_diagnosis_prevents_registration() {
+    let p = Project::new();
+    let snapshot = DiagnosisSnapshot::capture(p.root(), None, &p.tasks());
+    git(
+        p.root(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "changed during diagnosis",
+        ],
+    );
+    assert!(snapshot
+        .register(p.root(), None, &[p.proposal.clone()])
+        .is_err());
+    assert!(p.tasks()[0].task_runtime.resume_check.is_none());
+}
+
+#[test]
+fn adb_host_inventory_is_framed_and_checked_on_the_runner() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    let server = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = server.local_addr().unwrap();
+    let responder = std::thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut request = [0; 18];
+        stream.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"000ehost:devices-l");
+        let inventory = "unrelated\tdevice model:Other\nreserved\tunauthorized usb:1-3\n";
+        write!(stream, "OKAY{:04x}{inventory}", inventory.len()).unwrap();
+    });
+    let inventory = observations::adb_devices(address, deadline()).unwrap();
+    responder.join().unwrap();
+    assert_eq!(inventory[0]["attributes"]["model"], "Other");
+    assert_eq!(
+        evaluate(ADB, &json!({"target":"reserved","observation":inventory})).status,
+        Status::Waiting
+    );
+}

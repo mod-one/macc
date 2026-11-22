@@ -2623,7 +2623,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
     Ok(())
 }
 
-fn apply_storage_mode_args(
+pub(crate) fn apply_storage_mode_args(
     args: &mut BTreeMap<String, String>,
     env_cfg: &CoordinatorEnvConfig,
     coordinator_cfg: Option<&CoordinatorConfig>,

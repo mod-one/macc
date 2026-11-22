@@ -1861,6 +1861,7 @@ mod tests {
         let task = registry.find_task_mut("FLEET-WINDOW").unwrap();
         task.task_runtime.external_block_resolution =
             Some(crate::coordinator::model::ExternalBlockResolution {
+                block_digest: None,
                 evidence: "window report 2026-09-06".to_string(),
                 resolved_at: "2026-09-06T10:00:00Z".to_string(),
                 block_reason: "fleet observation has not run".to_string(),

@@ -263,6 +263,9 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     if report.status == "recovered" {
         return None;
     }
+    if report.status == "waiting_condition" {
+        return Some("Supply the outstanding condition, then run `macc coordinator run`. MACC will check each target and resume its retained phase when ready.".into());
+    }
     if report.status == "repair_integrated" {
         return Some("Repair integrated and retained work reconciled. Automatic restart is disabled; start `macc coordinator run` when ready.".into());
     }
@@ -582,7 +585,9 @@ pub fn restore_previous(
     let text = std::fs::read_to_string(paths.root.join(".macc/log/supervisor/latest.json")).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     let report: Intervention = serde_json::from_value(value.get("intervention")?.clone()).ok()?;
-    if report.incident.id != incident.id || report.status != "escalated" {
+    if report.incident.id != incident.id
+        || !matches!(report.status.as_str(), "escalated" | "waiting_condition")
+    {
         return None;
     }
     let mut diagnosis = report.diagnosis?;

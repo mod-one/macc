@@ -115,6 +115,7 @@ pub(crate) fn apply(
     if let Some(block) = task.blocked_on_external.as_ref() {
         task.task_runtime.external_block_resolution =
             Some(crate::coordinator::model::ExternalBlockResolution {
+                block_digest: None,
                 evidence: evidence.to_string(),
                 resolved_at: crate::coordinator::helpers::now_iso_coordinator(),
                 block_reason: block.reason.clone(),

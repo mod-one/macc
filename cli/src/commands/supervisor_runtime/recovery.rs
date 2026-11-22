@@ -48,6 +48,16 @@ pub(super) async fn intervene(
         report.diagnosis = Some(diagnosis);
         return Err(MaccError::Validation(detail));
     }
+    if let Some(diagnosis) = super::resume_checks::recorded_wait(
+        &paths.root,
+        canonical.automation.coordinator.as_ref(),
+        &report.incident,
+    ) {
+        report.status = "waiting_condition".into();
+        report.detail = diagnosis.summary.clone();
+        report.diagnosis = Some(diagnosis);
+        return Ok(());
+    }
     if let Some(diagnosis) =
         super::external_verification::pending_diagnosis(&paths.root, &report.incident)?
     {
@@ -114,7 +124,7 @@ pub(super) async fn intervene(
             super::checkpoint_recovery::preview(paths, &report.incident, dir)
         };
         if let Err(error) = &checkpoint_recovery {
-            report.diagnosis = Some(repair::Diagnosis {
+            report.diagnosis = Some(repair::Diagnosis {resume_check_ids:Default::default(),
                 summary: format!("MACC-CHECKPOINT-CONTEXT-DRIFT: retained checkpoint recovery was refused: {error}"),
                 repairable: false, requires_human: true, restart_only: false,
                 task_ids: report.incident.tasks.iter().filter(|t| incident::repair_candidate(t)).map(|t|t.id.clone()).collect(),
@@ -128,6 +138,7 @@ pub(super) async fn intervene(
             if !restart_allowed {
                 let message = format!("{}: native checkpoint recovery validated, but the restart budget for this unchanged work and decision binding is exhausted. Evidence: checkpoint-recovery.json. No checkpoint was reconciled and retained work is preserved; inspect the recurring refresh before explicitly retrying.", super::checkpoint_recovery::RESTART_LIMIT);
                 report.diagnosis = Some(repair::Diagnosis {
+                    resume_check_ids: Default::default(),
                     summary: message.clone(),
                     repairable: false,
                     requires_human: false,
@@ -182,7 +193,15 @@ pub(super) async fn intervene(
     let mut diagnosis = if let Some(cached) = report.diagnosis.clone() {
         cached
     } else {
-        repair::diagnose(&agent, &paths.root, &worktree, dir, &report.incident).await?
+        repair::diagnose(
+            &agent,
+            &paths.root,
+            &worktree,
+            dir,
+            &report.incident,
+            canonical.automation.coordinator.as_ref(),
+        )
+        .await?
     };
     super::policy::enrich(
         &mut diagnosis,
@@ -192,6 +211,10 @@ pub(super) async fn intervene(
     report.detail = diagnosis.summary.clone();
     report.diagnosis = Some(diagnosis.clone());
     super::product_findings::publish(paths, report, &diagnosis)?;
+    if !diagnosis.macc_repair_required && diagnosis.waiting_for_checks() {
+        report.status = "waiting_condition".into();
+        return Ok(());
+    }
     super::product_findings::ensure_application_repair(&diagnosis)?;
     if diagnosis.restart_only && !diagnosis.requires_human {
         if !config.auto_restart {

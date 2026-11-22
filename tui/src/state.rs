@@ -104,7 +104,7 @@ pub struct CoordinatorTaskSnapshot {
     pub blocked: usize,
     pub merged: usize,
     pub approved: usize,
-    pub active_tasks: Vec<macc_core::coordinator::view_model::LiveTaskRow>,
+    pub task_rows: Vec<macc_core::coordinator::view_model::LiveTaskRow>,
     /// RL-TUI-007: tools currently throttled due to rate-limiting.
     pub throttled_tools: Vec<ThrottledToolInfo>,
 }
@@ -928,7 +928,7 @@ impl AppState {
             blocked: 0,
             merged: 0,
             approved: 0,
-            active_tasks: Vec::new(),
+            task_rows: Vec::new(),
             throttled_tools: Vec::new(),
         };
         snapshot.throttled_tools = crate::tool_cooldowns::load(self.project_paths.as_ref())?;
@@ -962,28 +962,26 @@ impl AppState {
                     | "queued"
             ) && !(state == "claimed" && runtime_status == "phase_done");
 
+            let has_blocked_check = state == "blocked" && task.task_runtime.resume_check.is_some();
+            if is_live_active || has_blocked_check {
+                let (model, effort) = self
+                    .working_copy
+                    .as_ref()
+                    .map(|config| {
+                        macc_core::coordinator::execution_labels::resolve(task, config, specs)
+                    })
+                    .unwrap_or_else(|| ("-".into(), "-".into()));
+                let mut row = macc_core::coordinator::view_model::LiveTaskRow::from_task(
+                    task,
+                    Utc::now(),
+                    model,
+                );
+                row.effort = effort;
+                snapshot.task_rows.push(row);
+            }
             match state.as_str() {
                 "todo" => snapshot.todo += 1,
-                "claimed" | "in_progress" | "testing" | "reviewing" | "pr_open"
-                | "changes_requested" | "queued"
-                    if is_live_active =>
-                {
-                    let (model, effort) = self
-                        .working_copy
-                        .as_ref()
-                        .map(|config| {
-                            macc_core::coordinator::execution_labels::resolve(task, config, specs)
-                        })
-                        .unwrap_or_else(|| ("-".into(), "-".into()));
-                    snapshot.active += 1;
-                    let mut row = macc_core::coordinator::view_model::LiveTaskRow::from_task(
-                        task,
-                        Utc::now(),
-                        model,
-                    );
-                    row.effort = effort;
-                    snapshot.active_tasks.push(row);
-                }
+                _ if is_live_active => snapshot.active += 1,
                 "claimed" => {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.
                     // Keep it out of live-active rendering to avoid a misleading "still running" signal.
@@ -6018,11 +6016,11 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         }
     }
 
-    pub fn filtered_active_tasks(&self) -> Vec<macc_core::coordinator::view_model::LiveTaskRow> {
+    pub fn filtered_live_tasks(&self) -> Vec<macc_core::coordinator::view_model::LiveTaskRow> {
         let Some(ref snap) = self.coordinator_snapshot else {
             return Vec::new();
         };
-        snap.active_tasks
+        snap.task_rows
             .iter()
             .filter(|task| {
                 let msg = task.current_message.as_deref().unwrap_or("");
@@ -6058,14 +6056,14 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     }
 
     pub fn selected_live_task(&self) -> Option<macc_core::coordinator::view_model::LiveTaskRow> {
-        let tasks = self.filtered_active_tasks();
+        let tasks = self.filtered_live_tasks();
         let row = self.live_row_index(tasks.len())?;
         let worker = row.checked_sub(usize::from(self.live_supervisor().is_some()))?;
         tasks.into_iter().nth(worker)
     }
 
     fn move_live_selection(&mut self, forward: bool) {
-        let workers = self.filtered_active_tasks().len();
+        let workers = self.filtered_live_tasks().len();
         let Some(row) = self.live_row_index(workers) else {
             return;
         };
@@ -7866,7 +7864,7 @@ mod tests {
         );
         assert_eq!((snapshot.merged, snapshot.approved), (1, 1));
         assert_eq!(snapshot.blocked, 1);
-        assert!(snapshot.active_tasks.is_empty());
+        assert!(snapshot.task_rows.is_empty());
     }
 
     #[test]

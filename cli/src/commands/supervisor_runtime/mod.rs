@@ -14,6 +14,7 @@ mod repair_changes;
 mod repair_evidence;
 mod report;
 mod restart_observation;
+mod resume_checks;
 mod review_protocol_recovery;
 mod shutdown;
 mod task_requeue;
@@ -263,7 +264,9 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                     .await
                     {
                         Ok(()) => {
-                            ledger.completed.push(report.incident.id.clone());
+                            if report.status != "waiting_condition" {
+                                ledger.completed.push(report.incident.id.clone());
+                            }
                             if report.restart_only {
                                 *ledger.restarts.entry(fingerprint.clone()).or_default() += 1;
                             }

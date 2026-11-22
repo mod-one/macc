@@ -20,6 +20,8 @@ attaches. Both daemons detach from the launching terminal. Closing the terminal
 or disconnecting SSH does not stop them. `macc coordinator stop` stops the
 attached supervisor too. Standalone `macc supervisor start --daemon` is supported.
 
+See [resuming a blocked task](resume-checks/README.md) for supervisor-authored readiness checks and coordinator restart behavior.
+
 ## Intervention contract
 
 1. Wait for the failed runtime to exit; stop recorded orphan performer groups.

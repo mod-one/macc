@@ -20,7 +20,7 @@ pub fn reconcile_before_dispatch(
         env,
         logger,
     )?;
-    Ok(())
+    crate::coordinator::resume_check::replay_at_startup(root, prd, config, env)
 }
 
 /// Link a verified no-change completion to the commit already published on its base.

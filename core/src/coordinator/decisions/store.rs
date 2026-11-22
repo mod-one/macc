@@ -208,7 +208,8 @@ impl Store {
                 "decision.revoked"
                 | "decision.superseded"
                 | "decision.lifecycle"
-                | "decision.source_repaired" => {
+                | "decision.source_repaired"
+                | "decision.condition_observed" => {
                     let d: Decision = serde_json::from_value(value["decision"].clone())
                         .map_err(|e| error(e.to_string()))?;
                     decisions.insert(d.id.clone(), d);

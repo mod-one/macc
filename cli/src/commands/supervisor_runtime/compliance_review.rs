@@ -30,6 +30,7 @@ pub(super) fn diagnosis(root: &std::path::Path, incident: &Incident) -> Result<O
         blocks.push(block);
     }
     Ok(Some(Diagnosis {
+        resume_check_ids: Default::default(),
         summary: format!(
             "DM_COMPLIANCE: {}",
             blocks

@@ -110,7 +110,7 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
     let body_chunks = workbench::live_panes(live_chunks[2], state.coordinator_log_pane_visible);
 
     // Pane 1: LIVE TASKS Table
-    let filtered_tasks = state.filtered_active_tasks();
+    let filtered_tasks = state.filtered_live_tasks();
     let snapshot_total = state
         .coordinator_snapshot
         .as_ref()
@@ -172,6 +172,14 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
             Span::styled("   Title: ", Style::default().fg(theme.muted)),
             Span::styled(title, Style::default()),
         ]));
+        if let Some(check) = full_task
+            .as_ref()
+            .and_then(|t| t.task_runtime.resume_check.as_deref())
+        {
+            detail_lines.push(crate::resume_check::line(
+                check, theme.good, theme.warn, theme.bad,
+            ));
+        }
         detail_lines.push(Line::from(vec![
             Span::styled("Worktree:   ", Style::default().fg(theme.muted)),
             Span::styled(worktree, Style::default()),
@@ -328,6 +336,18 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect) {
                         Style::default().fg(theme.muted),
                     ),
                 ]));
+                if let Some(check) = summary.task_id.as_deref().and_then(|id| {
+                    state
+                        .coordinator_registry_for_render()?
+                        .find_task(id)?
+                        .task_runtime
+                        .resume_check
+                        .clone()
+                }) {
+                    logs_lines.push(crate::resume_check::line(
+                        &check, theme.good, theme.warn, theme.bad,
+                    ));
+                }
                 if let Some(reason) = summary
                     .recent_runs
                     .iter()

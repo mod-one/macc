@@ -415,6 +415,8 @@ pub struct ExternalTaskBlock {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ExternalBlockResolution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_digest: Option<String>,
     pub evidence: String,
     pub resolved_at: String,
     pub block_reason: String,
@@ -644,7 +646,10 @@ pub struct TaskRuntime {
     /// Verdict produced by a task declared with `gate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_verdict: Option<GateVerdict>,
-    /// Operator evidence that clears the current external block declaration.
+    /// Locally registered supervisor check and its latest runner observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_check: Option<Box<super::resume_check::CheckRef>>,
+    /// Evidence that clears the current external block declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_block_resolution: Option<ExternalBlockResolution>,
     /// Approval ledger of a `human_approval` gate. Only the CLI approve /
@@ -1137,6 +1142,10 @@ impl Task {
             .is_some_and(|resolution| {
                 resolution.tracking_id == block.tracking_id
                     && resolution.block_reason == block.reason
+                    && resolution
+                        .block_digest
+                        .as_ref()
+                        .is_none_or(|digest| *digest == super::decisions::digest(block))
             })
     }
 

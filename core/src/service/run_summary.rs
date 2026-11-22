@@ -83,7 +83,13 @@ pub fn load_latest_run_summary(
     let severity = severity_for(latest, blocked_task.is_some(), registry);
     let headline = headline_for(latest, blocked_task, dependent_task_ids.len());
     let next_action = blocked_task
-        .and_then(|task| waits.next_action(task))
+        .and_then(|task| {
+            task.task_runtime
+                .resume_check
+                .as_deref()
+                .and_then(|check| check.next_action(&task.id))
+                .or_else(|| waits.next_action(task))
+        })
         .unwrap_or_else(|| next_action_for(latest, blocked_task, error_code.as_deref()));
     let signature = outcome_signature(latest);
     let repeated_count = runs

@@ -65,6 +65,18 @@ pub fn repair_candidate(task: &Task) -> bool {
         && task.blocked_on_external.is_none()
 }
 
+/// An explicit PRD prerequisite may be diagnosed for a resume check without becoming repairable.
+pub fn diagnostic_candidate(task: &Task) -> bool {
+    repair_candidate(task)
+        || (task.state == "blocked"
+            && !task.is_human_approval_gate()
+            && task.task_runtime.last_error_code.as_deref() == Some("E904")
+            && task
+                .blocked_on_external
+                .as_ref()
+                .is_some_and(|b| b.source == crate::coordinator::model::ExternalBlockSource::Prd))
+}
+
 pub fn inspect(paths: &ProjectPaths) -> Result<Option<Incident>> {
     inspect_with_config(paths, None)
 }
@@ -105,7 +117,7 @@ pub fn inspect_with_config(
         .iter()
         .filter(|task| !waits.is_consumer(task))
         .map(|task| waits.reported_task(task))
-        .filter(|task| repair_candidate(task))
+        .filter(|task| diagnostic_candidate(task))
         .map(|task| task.into_owned())
         .collect();
     // A terminal block consisting only of protected gates is an operator decision.

@@ -272,7 +272,12 @@ pub(super) fn commands(s: &AppState) -> Vec<Command> {
         add(Up, "Previous row", A::Previous);
         add(Down, "Next row", A::Next);
     }
-    let selected = screen == Screen::CoordinatorLive && s.selected_live_task().is_some();
+    let live_task = (screen == Screen::CoordinatorLive)
+        .then(|| s.selected_live_task())
+        .flatten();
+    let selected = live_task.is_some();
+    let blocked = live_task
+        .is_some_and(|t| t.workflow_state == macc_core::coordinator::WorkflowState::Blocked);
     let control = s.coordinator_ownership.is_owner
         || !s
             .coordinator_ownership
@@ -282,7 +287,7 @@ pub(super) fn commands(s: &AppState) -> Vec<Command> {
     cs.extend(evidence);
     for c in &mut cs {
         c.enabled = match c.action {
-            A::StopTask | A::RetryTask => selected && control,
+            A::StopTask | A::RetryTask => selected && control && !blocked,
             A::Diff | A::Explain => selected,
             A::OpenInboxRow => {
                 crate::inbox::count(s) > 0 || s.inbox_section == crate::inbox::Section::Decisions
@@ -330,6 +335,9 @@ pub(super) fn commands(s: &AppState) -> Vec<Command> {
             A::Run if s.is_coordinator_running() => "A coordinator is already running.",
             A::Run | A::Reconcile | A::Recover | A::Resume | A::StopRun | A::Sync => {
                 "Request ownership to control this run."
+            }
+            A::StopTask | A::RetryTask if blocked => {
+                "Inspect the outstanding prerequisite in the selected task detail."
             }
             A::StopTask | A::RetryTask if !control => "Request ownership to control a task.",
             A::StopTask | A::RetryTask | A::Diff | A::Explain => "Select a coordinator task.",

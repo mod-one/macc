@@ -8,7 +8,7 @@ pub(super) fn diagnosis(incident: &Incident) -> Option<Diagnosis> {
     let tasks: Vec<_> = incident
         .tasks
         .iter()
-        .filter(|t| incident::repair_candidate(t))
+        .filter(|t| incident::diagnostic_candidate(t))
         .collect();
     if tasks.is_empty() {
         return None;
@@ -30,7 +30,7 @@ pub(super) fn diagnosis(incident: &Incident) -> Option<Diagnosis> {
         prerequisites.push(format!("Independently verify the selected assistance for {} (decisions {}), or explicitly reconcile that selection. Diagnostic report {} is complete; feature acceptance and release remain withheld.",task.id,delivery.unverified_decisions.join(", "),delivery.report_path));
         ids.push(task.id.clone());
     }
-    Some(Diagnosis {summary:"Diagnostic reports delivered; external intervention verification remains pending. No application repair or blind restart is appropriate.".into(),repairable:false,requires_human:true,restart_only:false,task_ids:ids,external_prerequisites:prerequisites,retry_at:None,unavailable_tool:None,related_task_ids:Vec::new(),macc_findings:Vec::new(),macc_repair_required:false})
+    Some(Diagnosis {resume_check_ids:Default::default(),summary:"Diagnostic reports delivered; external intervention verification remains pending. No application repair or blind restart is appropriate.".into(),repairable:false,requires_human:true,restart_only:false,task_ids:ids,external_prerequisites:prerequisites,retry_at:None,unavailable_tool:None,related_task_ids:Vec::new(),macc_findings:Vec::new(),macc_repair_required:false})
 }
 #[cfg(test)]
 mod tests {
@@ -94,13 +94,20 @@ pub(super) fn pending_diagnosis(
         };
         // A stopped external prerequisite gets a diagnosis: it may be a
         // project defect. A real human decision still cannot be repaired away.
-        if wait.status == "blocked_external" {
+        if wait.status == "blocked_external"
+            || (wait.status == "pending_human"
+                && macc_core::coordinator::decisions::Store::open(root)?
+                    .decision(&wait.id)?
+                    .request
+                    .kind
+                    == "intervention")
+        {
             return Ok(None);
         }
         prerequisites.push(format!("{} v{} ({}): {}. Open Decisions; answer or revise this exact request. Retained task work is preserved.",wait.id,wait.version,wait.status,wait.question));
         ids.push(task.id.clone());
     }
-    Ok(Some(Diagnosis{summary:"DM_PENDING: native human decision required; source repair and unchanged retries cannot answer it.".into(),repairable:false,requires_human:true,restart_only:false,task_ids:ids,external_prerequisites:prerequisites,retry_at:None,unavailable_tool:None,related_task_ids:vec![],macc_findings:vec![],macc_repair_required:false}))
+    Ok(Some(Diagnosis{resume_check_ids:Default::default(),summary:"DM_PENDING: native human decision required; source repair and unchanged retries cannot answer it.".into(),repairable:false,requires_human:true,restart_only:false,task_ids:ids,external_prerequisites:prerequisites,retry_at:None,unavailable_tool:None,related_task_ids:vec![],macc_findings:vec![],macc_repair_required:false}))
 }
 
 /// Capture exact decision revisions before any source mutation; never clear an

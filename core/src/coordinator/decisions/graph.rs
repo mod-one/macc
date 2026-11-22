@@ -40,7 +40,7 @@ pub(super) fn task<'a>(graph: &'a Value, id: &str) -> crate::Result<&'a Value> {
         .find(|t| t["id"].as_str() == Some(id))
         .ok_or_else(|| error(format!("Unknown task '{id}'")))
 }
-pub(super) fn contract(task: &Value) -> Value {
+pub(crate) fn contract(task: &Value) -> Value {
     let mut v = task.clone();
     if let Some(o) = v.as_object_mut() {
         for key in [

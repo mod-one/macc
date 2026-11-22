@@ -148,7 +148,11 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
         .is_some_and(|s| {
             !matches!(
                 s,
-                "recovered" | "repair_integrated" | "escalated" | "interrupted"
+                "recovered"
+                    | "repair_integrated"
+                    | "escalated"
+                    | "interrupted"
+                    | "waiting_condition"
             )
         })
     {
