@@ -3,7 +3,7 @@ use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -77,46 +77,8 @@ pub struct SavedSessionMeta {
     pub archived_session_count: usize,
 }
 
-fn user_sessions_dir() -> Result<PathBuf> {
-    let home = crate::find_user_home().ok_or(MaccError::HomeDirNotFound)?;
-    Ok(home.join(".macc").join("sessions"))
-}
-
-fn project_slug(repo_root: &Path) -> String {
-    let name = repo_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    sanitized
-}
-
-fn project_sessions_dir(repo_root: &Path) -> Result<PathBuf> {
-    let base = user_sessions_dir()?;
-    Ok(base.join(project_slug(repo_root)))
-}
-
-fn snapshot_path(repo_root: &Path, name: &str) -> Result<PathBuf> {
-    let dir = project_sessions_dir(repo_root)?;
-    Ok(dir.join(format!("{}.json", name)))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionSnapshot {
-    saved_at: String,
-    project_root: String,
-    name: String,
-    tools: Value,
-}
+mod snapshots;
+use snapshots::SnapshotStore;
 
 /// Save current tool-sessions.json to user-level storage.
 ///
@@ -166,53 +128,7 @@ pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessio
         .cloned()
         .unwrap_or(Value::Object(Map::new()));
 
-    // Count sessions
-    let (mut active_count, mut archived_count, mut tool_count) = (0usize, 0usize, 0usize);
-    if let Some(tools) = tools_obj.as_object() {
-        for (_tool_id, tool_val) in tools {
-            tool_count += 1;
-            if let Some(sessions) = tool_val.get("sessions").and_then(Value::as_object) {
-                active_count += sessions.len();
-            }
-            if let Some(archived) = tool_val.get("archived").and_then(Value::as_object) {
-                archived_count += archived.len();
-            }
-        }
-    }
-
-    let snapshot = SessionSnapshot {
-        saved_at: now.clone(),
-        project_root: repo_root.to_string_lossy().to_string(),
-        name: snapshot_name.clone(),
-        tools: tools_obj,
-    };
-
-    let dest = snapshot_path(repo_root, &snapshot_name)?;
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-            path: parent.to_string_lossy().into(),
-            action: "create sessions snapshot directory".into(),
-            source: e,
-        })?;
-    }
-
-    let body = serde_json::to_string_pretty(&snapshot).map_err(|e| {
-        MaccError::Validation(format!("Failed to serialize session snapshot: {}", e))
-    })?;
-    fs::write(&dest, format!("{}\n", body)).map_err(|e| MaccError::Io {
-        path: dest.to_string_lossy().into(),
-        action: "write session snapshot".into(),
-        source: e,
-    })?;
-
-    Ok(SavedSessionMeta {
-        name: snapshot_name,
-        saved_at: now,
-        project_root: repo_root.to_string_lossy().to_string(),
-        tool_count,
-        active_session_count: active_count,
-        archived_session_count: archived_count,
-    })
+    SnapshotStore::open(repo_root)?.save(snapshot_name, now, tools_obj)
 }
 
 /// Restore sessions from a saved snapshot into the current tool-sessions.json.
@@ -226,49 +142,9 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
         return Err(MaccError::Validation("SQLite session authority is active; use session-store rollback before restoring legacy JSON snapshots".into()));
     }
 
-    let src = snapshot_path(repo_root, name)?;
-    if !src.exists() {
-        return Err(MaccError::Validation(format!(
-            "Session snapshot '{}' not found at '{}'",
-            name,
-            src.display()
-        )));
-    }
-
-    let snap_raw = fs::read_to_string(&src).map_err(|e| MaccError::Io {
-        path: src.to_string_lossy().into(),
-        action: "read session snapshot".into(),
-        source: e,
-    })?;
-    let snapshot: SessionSnapshot = serde_json::from_str(&snap_raw).map_err(|e| {
-        MaccError::Validation(format!(
-            "Failed to parse session snapshot '{}': {}",
-            src.display(),
-            e
-        ))
-    })?;
-
-    // Count what we'd restore
+    let snapshot = SnapshotStore::open(repo_root)?.read(name)?;
+    let meta = snapshot.metadata();
     let snap_tools = snapshot.tools.as_object().cloned().unwrap_or_default();
-    let (mut active_count, mut archived_count, mut tool_count) = (0usize, 0usize, 0usize);
-    for (_tool_id, tool_val) in &snap_tools {
-        tool_count += 1;
-        if let Some(sessions) = tool_val.get("sessions").and_then(Value::as_object) {
-            active_count += sessions.len();
-        }
-        if let Some(archived) = tool_val.get("archived").and_then(Value::as_object) {
-            archived_count += archived.len();
-        }
-    }
-
-    let meta = SavedSessionMeta {
-        name: snapshot.name.clone(),
-        saved_at: snapshot.saved_at.clone(),
-        project_root: snapshot.project_root.clone(),
-        tool_count,
-        active_session_count: active_count,
-        archived_session_count: archived_count,
-    };
 
     if dry_run {
         return Ok(meta);
@@ -393,60 +269,13 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
 
 /// List all saved session snapshots for the current project.
 pub fn list_saved_sessions(repo_root: &Path) -> Result<Vec<SavedSessionMeta>> {
-    let dir = project_sessions_dir(repo_root)?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut results = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| MaccError::Io {
-        path: dir.to_string_lossy().into(),
-        action: "list session snapshots".into(),
-        source: e,
-    })?;
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
+    match SnapshotStore::open(repo_root) {
+        Ok(store) => store.list(),
+        Err(MaccError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Vec::new())
         }
-        let raw = match fs::read_to_string(&path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let snapshot: SessionSnapshot = match serde_json::from_str(&raw) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let snap_tools = snapshot.tools.as_object().cloned().unwrap_or_default();
-        let (mut active_count, mut archived_count, mut tool_count) = (0usize, 0usize, 0usize);
-        for (_tool_id, tool_val) in &snap_tools {
-            tool_count += 1;
-            if let Some(sessions) = tool_val.get("sessions").and_then(Value::as_object) {
-                active_count += sessions.len();
-            }
-            if let Some(archived) = tool_val.get("archived").and_then(Value::as_object) {
-                archived_count += archived.len();
-            }
-        }
-
-        results.push(SavedSessionMeta {
-            name: snapshot.name,
-            saved_at: snapshot.saved_at,
-            project_root: snapshot.project_root,
-            tool_count,
-            active_session_count: active_count,
-            archived_session_count: archived_count,
-        });
+        Err(error) => Err(error),
     }
-
-    results.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
-    Ok(results)
 }
 
 /// Metadata for a released session.
@@ -684,25 +513,13 @@ pub fn reset_stale_active_sessions(repo_root: &Path, _lease_ttl_seconds: u64) ->
 
 /// Delete a saved session snapshot.
 pub fn delete_saved_session(repo_root: &Path, name: &str) -> Result<()> {
-    let path = snapshot_path(repo_root, name)?;
-    if !path.exists() {
-        return Err(MaccError::Validation(format!(
-            "Session snapshot '{}' not found at '{}'",
-            name,
-            path.display()
-        )));
-    }
-    fs::remove_file(&path).map_err(|e| MaccError::Io {
-        path: path.to_string_lossy().into(),
-        action: "delete session snapshot".into(),
-        source: e,
-    })?;
-    Ok(())
+    SnapshotStore::open(repo_root)?.delete(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// A killed holder used to leave the mkdir-based lock directory behind,
     /// deadlocking every later session operation after an 8-second stall.
@@ -857,12 +674,15 @@ mod tests {
         assert_eq!(meta.archived_session_count, 0);
 
         // Verify snapshot file exists
-        let snap = snapshot_path(&root, "test-snap").expect("snap path");
+        let snap = SnapshotStore::open(&root)
+            .unwrap()
+            .path("test-snap")
+            .expect("snap path");
         assert!(snap.exists(), "snapshot file should exist");
 
         // Verify content round-trips
         let raw = fs::read_to_string(&snap).unwrap();
-        let parsed: SessionSnapshot = serde_json::from_str(&raw).unwrap();
+        let parsed: snapshots::SessionSnapshot = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed.name, "test-snap");
         assert_eq!(
             parsed.tools["claude"]["sessions"]
@@ -927,7 +747,10 @@ mod tests {
         seed_sessions_file(&root);
         save_sessions(&root, Some("to-delete")).expect("save");
 
-        let snap = snapshot_path(&root, "to-delete").expect("path");
+        let snap = SnapshotStore::open(&root)
+            .unwrap()
+            .path("to-delete")
+            .expect("path");
         assert!(snap.exists());
 
         delete_saved_session(&root, "to-delete").expect("delete");
@@ -1063,13 +886,6 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn project_slug_sanitizes() {
-        let p = Path::new("/home/user/my project (test)");
-        let slug = project_slug(p);
-        assert_eq!(slug, "my_project__test_");
     }
 
     #[test]
