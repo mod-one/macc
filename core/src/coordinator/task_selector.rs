@@ -81,61 +81,10 @@ pub fn dispatch_block_reason_typed(
     registry: &TaskRegistry,
     config: &TaskSelectorConfig,
 ) -> Option<DispatchBlockReason> {
-    let active_tasks: Vec<&Task> = registry
-        .tasks
-        .iter()
-        .filter(|task| task.is_active())
-        .collect();
-
-    if let Some(task_id) = active_tasks
-        .iter()
-        .find(|task| task.priority_rank() == 0)
-        .map(|task| task.id.clone())
-    {
-        return Some(DispatchBlockReason::ActivePriorityZero { task_id });
+    match next_dispatch(registry, config) {
+        NextDispatch::Blocked(reason) => Some(reason),
+        _ => None,
     }
-
-    if active_tasks.is_empty() {
-        return None;
-    }
-
-    let satisfied_ids = effective_dependency_ids(registry, config.external_merged_ids.iter());
-    let resource_locks = &registry.resource_locks;
-
-    for task in &registry.tasks {
-        if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
-            continue;
-        }
-        if task.has_worktree_attached()
-            && resume_worktree_for(task, config.max_same_worktree_retries).is_none()
-        {
-            continue;
-        }
-        if task.id.is_empty() || task.priority_rank() != 0 {
-            continue;
-        }
-        if !task
-            .dependencies
-            .iter()
-            .all(|id| satisfied_ids.contains(id))
-        {
-            continue;
-        }
-        if !resources_available(task, resource_locks) {
-            continue;
-        }
-        if pick_tool(task, config, &HashMap::new()).is_none() {
-            continue;
-        }
-        // (throttle filtering is intentionally skipped in the block-reason
-        // check — we need to know whether the task *could* dispatch, not
-        // whether it can right now.)
-        return Some(DispatchBlockReason::ReadyPriorityZeroBlocked {
-            task_id: task.id.clone(),
-        });
-    }
-
-    None
 }
 
 pub fn select_next_ready_task(
@@ -150,16 +99,32 @@ pub fn select_next_ready_task_typed(
     registry: &TaskRegistry,
     config: &TaskSelectorConfig,
 ) -> Option<SelectedTask> {
+    match next_dispatch(registry, config) {
+        NextDispatch::Ready(task) => Some(task),
+        _ => None,
+    }
+}
+
+enum NextDispatch {
+    Ready(SelectedTask),
+    Blocked(DispatchBlockReason),
+    Idle,
+}
+
+fn next_dispatch(registry: &TaskRegistry, config: &TaskSelectorConfig) -> NextDispatch {
     let active_tasks: Vec<&Task> = registry
         .tasks
         .iter()
         .filter(|task| task.is_active())
         .collect();
-    if dispatch_block_reason_typed(registry, config).is_some() {
-        return None;
+    if let Some(task) = active_tasks.iter().find(|task| task.priority_rank() == 0) {
+        return NextDispatch::Blocked(DispatchBlockReason::ActivePriorityZero {
+            task_id: task.id.clone(),
+        });
     }
+    let has_active_tasks = !active_tasks.is_empty();
     if config.max_parallel > 0 && active_tasks.len() >= config.max_parallel {
-        return None;
+        return NextDispatch::Idle;
     }
 
     let satisfied_ids = effective_dependency_ids(registry, config.external_merged_ids.iter());
@@ -217,8 +182,16 @@ pub fn select_next_ready_task_typed(
             continue;
         };
 
+        // Reserve the next exclusive slot only after every dispatch check passes.
+        let priority = task.priority_rank();
+        if priority == 0 && has_active_tasks {
+            return NextDispatch::Blocked(DispatchBlockReason::ReadyPriorityZeroBlocked {
+                task_id: task.id.clone(),
+            });
+        }
+
         candidates.push((
-            task.priority_rank(),
+            priority,
             task.category().unwrap_or("zzz").to_string(),
             task.id.clone(),
             SelectedTask {
@@ -236,7 +209,9 @@ pub fn select_next_ready_task_typed(
     candidates
         .into_iter()
         .next()
-        .map(|(_, _, _, selected)| selected)
+        .map_or(NextDispatch::Idle, |(_, _, _, task)| {
+            NextDispatch::Ready(task)
+        })
 }
 
 /// Return the worktree a parked task should resume in, or `None` when the task
@@ -1111,6 +1086,34 @@ mod tests {
             now: now.to_string(),
             ..TaskSelectorConfig::default()
         }
+    }
+
+    #[test]
+    fn delayed_p0_reserves_exclusive_dispatch_only_when_its_delay_expires() {
+        let mut registry = json!({"tasks": [
+            {"id":"RUN", "state":"claimed", "priority":"2"},
+            {"id":"FREE", "state":"todo", "priority":"1"},
+            {"id":"P0", "state":"todo", "priority":"0",
+             "task_runtime":{"delayed_until":"2026-03-18T12:05:00Z"}}
+        ]});
+        let before = cfg_with_now("2026-03-18T12:04:59Z");
+        assert_eq!(dispatch_block_reason(&registry, &before), None);
+        assert_eq!(
+            select_next_ready_task(&registry, &before).unwrap().id,
+            "FREE"
+        );
+
+        let due = cfg_with_now("2026-03-18T12:05:00Z");
+        assert_eq!(
+            dispatch_block_reason(&registry, &due),
+            Some(DispatchBlockReason::ReadyPriorityZeroBlocked {
+                task_id: "P0".into()
+            })
+        );
+        assert!(select_next_ready_task(&registry, &due).is_none());
+
+        registry["tasks"][0]["state"] = json!("merged");
+        assert_eq!(select_next_ready_task(&registry, &due).unwrap().id, "P0");
     }
 
     #[test]
