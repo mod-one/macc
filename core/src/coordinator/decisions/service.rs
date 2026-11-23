@@ -1059,7 +1059,7 @@ impl Store {
             [id],
             |r| r.get::<_, String>(0),
         ))?)?;
-        if decision.version != version || decision.status != "pending_human" {
+        if decision.version != version || !decision.accepts_human_response() {
             return Err(error(
                 "Request changed or was answered elsewhere; refresh before submitting",
             ));

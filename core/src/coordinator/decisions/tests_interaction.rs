@@ -17,39 +17,50 @@ fn physical_request(key: &str) -> Request {
 }
 #[test]
 fn performer_can_request_essential_physical_action_and_receives_exact_human_result() {
-    let (_tmp, mut s, plan, _, mut p) = fixture();
-    p.human_question_min_risk = Consultation::Critical;
-    let d = s
-        .submit(&plan, physical_request("phone"), "agent:A", "agent", &p)
-        .unwrap();
-    assert_eq!(d.status, "pending_human");
-    assert!(d.resolution.is_none());
-    assert!(s.context(&plan, "A", "wait", "dev", &p).is_err());
-    assert!(s.context(&plan, "B", "dependent", "dev", &p).is_err());
-    assert!(s.context(&plan, "C", "independent", "dev", &p).is_ok());
-    let mut input = AnswerInput {
-        text: "Connected and unlocked. Output follows.".into(),
-        ..Default::default()
-    };
-    assert!(s
-        .answer_details(&d.id, d.version, &input, "Human", &p)
-        .is_err());
-    input.fields.insert("performed".into(), "yes".into());
-    input.fields.insert(
-        "result".into(),
-        "List of devices attached\nABC-é\tunauthorized".into(),
-    );
-    let answered = s
-        .answer_details(&d.id, d.version, &input, "Human", &p)
-        .unwrap();
-    assert_eq!(answered.status, "resolved");
-    let context = s
-        .context(&s.plan(&plan.id).unwrap(), "A", "resume", "dev", &p)
-        .unwrap();
-    assert!(context.render().contains("ABC-é"));
-    assert!(context.render().contains("unauthorized"));
-    assert!(context.render().contains("kind intervention"));
-    s.verify().unwrap();
+    for (mode, expected_status) in [
+        (Consultation::Critical, "pending_human"),
+        (Consultation::NeverAsk, "blocked_external"),
+    ] {
+        let (_tmp, mut s, plan, _, mut p) = fixture();
+        p.human_question_min_risk = mode;
+        let d = s
+            .submit(&plan, physical_request("phone"), "agent:A", "agent", &p)
+            .unwrap();
+        assert_eq!(d.status, expected_status);
+        assert!(d.resolution.is_none());
+        assert!(s.context(&plan, "A", "wait", "dev", &p).is_err());
+        assert!(s.context(&plan, "B", "dependent", "dev", &p).is_err());
+        assert!(s.context(&plan, "C", "independent", "dev", &p).is_ok());
+        let mut input = AnswerInput {
+            text: "Connected and unlocked. Output follows.".into(),
+            ..Default::default()
+        };
+        assert!(s
+            .answer_details(&d.id, d.version, &input, "Human", &p)
+            .is_err());
+        input.fields.insert("performed".into(), "yes".into());
+        input.fields.insert(
+            "result".into(),
+            "List of devices attached\nABC-é\tunauthorized".into(),
+        );
+        assert!(s
+            .answer_details(&d.id, d.version + 1, &input, "Human", &p)
+            .is_err());
+        let answered = s
+            .answer_details(&d.id, d.version, &input, "Human", &p)
+            .unwrap();
+        assert_eq!(answered.status, "resolved");
+        let resolution = answered.resolution.as_ref().unwrap();
+        assert_eq!(resolution.actor, "Human");
+        assert_eq!(resolution.answered_version, Some(d.version));
+        let context = s
+            .context(&s.plan(&plan.id).unwrap(), "A", "resume", "dev", &p)
+            .unwrap();
+        assert!(context.render().contains("ABC-é"));
+        assert!(context.render().contains("unauthorized"));
+        assert!(context.render().contains("kind intervention"));
+        s.verify().unwrap();
+    }
 }
 #[test]
 fn never_ask_does_not_fabricate_a_physical_action_and_can_return_to_consultation() {

@@ -18,8 +18,8 @@ it('deferring preserves the draft and never submits',async()=>{
     render(<DecisionCenter/>);await screen.findByRole('dialog');fireEvent.change(screen.getByLabelText('Answer / conditions / remarks'),{target:{value:'Brouillon à conserver'}});fireEvent.click(screen.getByRole('button',{name:'Decide later'}));expect(screen.queryByRole('dialog')).not.toBeInTheDocument();expect(api.mutate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button',{name:'Decisions, 1 pending'}));expect(screen.getByLabelText('Answer / conditions / remarks')).toHaveValue('Brouillon à conserver');expect(sessionStorage.getItem('macc.decisionDrafts')).toContain('Brouillon à conserver');
 });
-it('never_ask offers read-only inspection without automatic answer popup',async()=>{
-    api.get.mockResolvedValue(snapshot('never_ask'));render(<DecisionCenter/>);await screen.findByRole('button',{name:'Decisions, 1 pending'});expect(screen.queryByRole('dialog')).not.toBeInTheDocument();fireEvent.click(screen.getByRole('button',{name:'Decisions, 1 pending'}));expect(await screen.findByText(/Full autonomy is active/)).toBeInTheDocument();expect(screen.queryByRole('button',{name:'Send answer'})).not.toBeInTheDocument();expect(api.mutate).not.toHaveBeenCalled();
+it('never_ask allows an answer only after manual opening',async()=>{
+    api.get.mockResolvedValue(snapshot('never_ask'));render(<DecisionCenter/>);await screen.findByRole('button',{name:'Decisions, 1 pending'});expect(screen.queryByRole('dialog')).not.toBeInTheDocument();fireEvent.click(screen.getByRole('button',{name:'Decisions, 1 pending'}));expect(await screen.findByText(/Full autonomy is active/)).toBeInTheDocument();expect(screen.getByRole('button',{name:'Send answer'})).toBeInTheDocument();expect(api.mutate).not.toHaveBeenCalled();
 });
 it('does not steal focus when another input is being edited',async()=>{
     const input=document.createElement('input');document.body.append(input);input.focus();try{await act(async()=>{render(<DecisionCenter/>);});expect(screen.queryByRole('dialog')).not.toBeInTheDocument();expect(document.activeElement).toBe(input);}finally{input.remove();}
@@ -99,7 +99,7 @@ it('offers an explicit current-version review while preserving an older draft',a
 it('closes after a durably recorded choice and shows a short receipt',async()=>{
  const initial=snapshot();api.get.mockResolvedValue(initial);render(<DecisionCenter/>);await screen.findByRole('dialog');
  fireEvent.click(screen.getByRole('radio',{name:/Conserver SQLite/}));
- const recorded=snapshot();recorded.decisions[0].status='resolved';recorded.decisions[0].resolution={text:'Conserver SQLite',selected_option_id:'sqlite',actor:'operator',origin:'human_local_trust',recorded_at:'2026-11-07T12:00:00Z',advisory:false};
+ const recorded=snapshot();recorded.decisions[0].status='resolved';recorded.decisions[0].version=2;recorded.decisions[0].resolution={answered_version:1,text:'Conserver SQLite',selected_option_id:'sqlite',actor:'operator',origin:'human_local_trust',recorded_at:'2026-11-07T12:00:00Z',advisory:false};
  api.get.mockResolvedValue(recorded);api.mutate.mockResolvedValue(recorded.decisions[0]);
  fireEvent.click(screen.getByRole('button',{name:'Send answer'}));await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
  expect(screen.getByRole('status')).toHaveTextContent('Response sent.');
@@ -126,7 +126,11 @@ it('never_ask shows an explicit external block without asking or pretending it w
  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();expect(api.mutate).not.toHaveBeenCalled();
  fireEvent.click(screen.getByRole('button',{name:'Decisions, 0 pending'}));
  expect(await screen.findByText('Blocked: prerequisite unavailable')).toBeInTheDocument();
- expect(screen.queryByRole('button',{name:'Send answer'})).not.toBeInTheDocument();expect(screen.queryByText('Recorded response')).not.toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'Send answer'})).toBeInTheDocument();expect(screen.queryByText('Recorded response')).not.toBeInTheDocument();
+ fireEvent.change(screen.getByLabelText(/Actual observed result/),{target:{value:'Device connected'}});
+ fireEvent.click(screen.getByLabelText('I performed the requested action'));
+ fireEvent.click(screen.getByRole('button',{name:'Send answer'}));
+ await waitFor(()=>expect(api.mutate).toHaveBeenCalledWith(expect.objectContaining({action:'answer',id:decision.id,version:1,fields:expect.objectContaining({performed:'yes',result:'Device connected'})})));
 });
 
 it('opens the chosen external decision from the Inbox in never_ask', async () => {

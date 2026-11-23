@@ -29,6 +29,11 @@ fn intervention() -> Center {
 #[test]
 fn action_result_is_a_visible_form_and_missing_schema_field_gets_focus_before_send() {
     let mut c = intervention();
+    c.snapshot.as_mut().unwrap()["policy"]["human_question_min_risk"] = "never_ask".into();
+    let mut external = c.current.clone().unwrap();
+    external.status = "blocked_external".into();
+    c.snapshot.as_mut().unwrap()["decisions"] = json!([external]);
+    c.show_exact(external);
     let fields = c.form_fields();
     let performed = fields.iter().position(|f| f.id == "performed").unwrap();
     assert!(c.controls()[c.focus] == Control::Field(performed));

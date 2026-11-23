@@ -159,7 +159,7 @@ impl Center {
             }
         } else {
             if let Some(d) = &self.current {
-                let pending = d.status == "pending_human";
+                let pending = self.can_respond(d);
                 if d.status == "blocked_external" {
                     summary.push_str("BLOCKED: external intervention or supervisor recovery required. Work is preserved.\n\n");
                 }
@@ -251,11 +251,7 @@ impl Center {
                 summary
                     .push_str("No pending questions. More opens history and project directions.");
             }
-            if self
-                .current
-                .as_ref()
-                .is_some_and(|d| d.status == "pending_human")
-            {
+            if self.current.as_ref().is_some_and(|d| self.can_respond(d)) {
                 summary.push_str(&self.response_overview());
             }
             summary.push_str(&self.delivery_overview());
@@ -370,11 +366,7 @@ impl Center {
                     }
                 }
                 _ => {
-                    if self
-                        .current
-                        .as_ref()
-                        .is_some_and(|d| d.status != "pending_human")
-                    {
+                    if self.current.as_ref().is_some_and(|d| !self.can_respond(d)) {
                         caption = if self
                             .current
                             .as_ref()
@@ -409,10 +401,7 @@ impl Center {
         }
         if !self.quick_menu
             && !self.actions.open
-            && self
-                .current
-                .as_ref()
-                .is_some_and(|d| d.status == "pending_human")
+            && self.current.as_ref().is_some_and(|d| self.can_respond(d))
         {
             let steps = self.controls();
             let editable = |c: &Control| {
@@ -516,11 +505,7 @@ impl Center {
             (Control::Send, "Send"),
             (
                 Control::Later,
-                if self
-                    .current
-                    .as_ref()
-                    .is_some_and(|d| d.status != "pending_human")
-                {
+                if self.current.as_ref().is_some_and(|d| !self.can_respond(d)) {
                     "Close"
                 } else {
                     "Later"

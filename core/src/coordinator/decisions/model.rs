@@ -338,6 +338,15 @@ pub struct Decision {
     pub investigation: Option<InvestigationReport>,
 }
 
+impl Decision {
+    /// An operator may volunteer the result of an external intervention.
+    pub fn accepts_human_response(&self) -> bool {
+        self.resolution.is_none()
+            && (self.status == "pending_human"
+                || self.status == "blocked_external" && self.request.kind == "intervention")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {

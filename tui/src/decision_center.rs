@@ -280,6 +280,10 @@ impl Center {
         self.scroll = 0;
         self.focus = 0;
     }
+    fn can_respond(&self, decision: &dm::Decision) -> bool {
+        decision.accepts_human_response()
+            && (self.manual || self.policy().human_question_min_risk != dm::Consultation::NeverAsk)
+    }
     fn inbox_pending(status: &str) -> bool {
         matches!(status, "pending_human" | "blocked_external")
     }
@@ -411,6 +415,9 @@ impl Center {
         } else {
             self.current.as_ref().map(Self::key).unwrap_or_default()
         };
+        if !self.feedback && !self.current.as_ref().is_some_and(|d| self.can_respond(d)) {
+            return None;
+        }
         let draft = self.drafts.entry(name).or_default();
         if self.feedback {
             if command == DecisionCommand::Submit {
@@ -421,16 +428,6 @@ impl Center {
         let Some(current) = &self.current else {
             return None;
         };
-        if current.status != "pending_human"
-            || self
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.pointer("/policy/human_question_min_risk"))
-                .and_then(Value::as_str)
-                == Some("never_ask")
-        {
-            return None;
-        }
         if command == DecisionCommand::Challenge {
             let mut fields = draft.fields.clone();
             fields.remove("__attestation");
@@ -777,6 +774,7 @@ mod tests {
     #[test]
     fn full_autonomy_history_never_accepts_an_answer() {
         let mut c = center("never_ask");
+        c.current.as_mut().unwrap().status = "resolved".into();
         assert!(c.key_event(KeyCode::Char('x')).is_none());
         assert!(c.attempt_send(false).is_none());
         assert!(c.drafts.get("q@1").is_none_or(|d| d.text.is_empty()));

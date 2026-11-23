@@ -113,11 +113,7 @@ impl Center {
         }
     }
     pub(super) fn response_overview(&self) -> String {
-        let Some(d) = self
-            .current
-            .as_ref()
-            .filter(|d| d.status == "pending_human")
-        else {
+        let Some(d) = self.current.as_ref().filter(|d| self.can_respond(d)) else {
             return String::new();
         };
         let draft = self.drafts.get(&Self::key(d)).cloned().unwrap_or_default();

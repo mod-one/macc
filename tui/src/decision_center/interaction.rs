@@ -82,9 +82,7 @@ impl Center {
         if self.feedback {
             controls.push(Control::Note);
         } else if let Some(d) = &self.current {
-            if d.status == "pending_human"
-                && self.policy().human_question_min_risk != dm::Consultation::NeverAsk
-            {
+            if self.can_respond(d) {
                 let fields = self.form_fields();
                 let draft = self.drafts.get(&Self::key(d)).cloned().unwrap_or_default();
                 let completed_intervention =
@@ -183,9 +181,7 @@ impl Center {
             return self.form_command(DecisionCommand::Submit);
         }
         let current = self.current.as_ref()?;
-        if current.status != "pending_human"
-            || self.policy().human_question_min_risk == dm::Consultation::NeverAsk
-        {
+        if !self.can_respond(current) {
             return None;
         }
         if self
