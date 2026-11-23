@@ -623,3 +623,105 @@ fn legacy_session_redaction_handles_extended_token_and_checks_its_hash() {
         Some(compute_file_sha256(&file).unwrap())
     );
 }
+
+#[test]
+fn nested_phase_logs_round_trip_with_deterministic_budget_omissions() {
+    let (_tmp, paths, saves) = setup();
+    let root = paths.macc_dir.join("log");
+    let evidence = "performer/T-1/phases/review/outcome.json";
+    // Create in reverse selection order. The oversized file must not starve the evidence.
+    for (name, text) in [
+        ("z.log", "late"),
+        (evidence, "{}"),
+        ("coordinator/run.log", "run"),
+        ("a.log", "oversized"),
+        ("unrelated/app.log", "private"),
+    ] {
+        let file = root.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("unrelated"), root.join("performer/external")).unwrap();
+    let opts = SaveOptions {
+        only: Some("logs".into()),
+        log_max_size: "5B".into(),
+        ..options()
+    };
+    let manifest = bundle::create_in(&paths, "evidence", &opts, &saves).unwrap();
+    assert!(manifest.includes.logs);
+    assert_eq!(manifest.logs_omitted_by_size, ["a.log", "z.log"]);
+    let archive = saves.join("evidence/logs");
+    assert_eq!(
+        fs::read(archive.join("coordinator/run.log")).unwrap(),
+        b"run"
+    );
+    assert_eq!(fs::read(archive.join(evidence)).unwrap(), b"{}");
+    for excluded in ["a.log", "z.log", "unrelated", "performer/external"] {
+        assert!(!archive.join(excluded).exists());
+    }
+
+    let restore_opts = RestoreOptions {
+        include_logs: true,
+        ..restore_options()
+    };
+    restore::restore_from(&paths, "evidence", &restore_opts, &saves).unwrap();
+    assert_eq!(
+        fs::read(paths.macc_dir.join("restored-logs/evidence").join(evidence)).unwrap(),
+        b"{}"
+    );
+
+    let empty = bundle::create_in(
+        &paths,
+        "zero",
+        &SaveOptions {
+            log_max_size: "0".into(),
+            ..opts
+        },
+        &saves,
+    )
+    .unwrap();
+    assert!(!empty.includes.logs);
+    assert!(empty.paths.logs_archive.is_none());
+    assert_eq!(empty.logs_omitted_by_size.len(), 4);
+}
+
+#[test]
+fn log_archive_io_failure_identifies_the_path() {
+    let (_tmp, paths, saves) = setup();
+    let log = paths.macc_dir.join("log");
+    fs::write(&log, "not a directory").unwrap();
+    let error = bundle::create_in(
+        &paths,
+        "invalid",
+        &SaveOptions {
+            only: Some("logs".into()),
+            ..options()
+        },
+        &saves,
+    )
+    .unwrap_err();
+    assert!(matches!(error, MaccError::Io { path, .. } if Path::new(&path) == log));
+    assert!(!saves.join("invalid").exists());
+}
+
+#[test]
+fn excluded_phase_evidence_leaves_no_log_section() {
+    let (_tmp, paths, saves) = setup();
+    let phase = paths.macc_dir.join("log/performer/T-1/phases/review");
+    fs::create_dir_all(&phase).unwrap();
+    fs::write(
+        phase.join("projected.txt"),
+        format!("ghp_{}", "a".repeat(36)),
+    )
+    .unwrap();
+    let opts = SaveOptions {
+        only: Some("logs".into()),
+        redact_logs: false,
+        handle_secrets: Some(SecretHandlingChoice::Exclude),
+        ..options()
+    };
+    let manifest = bundle::create_in(&paths, "excluded", &opts, &saves).unwrap();
+    assert!(!manifest.includes.logs);
+    assert!(manifest.paths.logs_archive.is_none());
+}

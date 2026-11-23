@@ -55,13 +55,9 @@ pub(super) fn secure_payloads(
     manifest: &mut SaveBundleManifest,
     opts: &SaveOptions,
 ) -> Result<()> {
-    if opts.dry_run {
-        // The final checksum manifest contains the relative filenames as well.
-        let yaml =
-            serde_yaml::to_string(manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
-        manifest.security.secret_scan.findings += blocking(yaml.as_bytes()).len();
-    }
-    for relative in super::integrity::staged_files(root)? {
+    let files = super::integrity::staged_files(root)?;
+    let mut log_files = files.iter().filter(|path| path.starts_with("logs")).count();
+    for relative in files {
         if opts.dry_run {
             manifest.security.secret_scan.findings +=
                 blocking(relative.to_string_lossy().as_bytes()).len();
@@ -84,11 +80,24 @@ pub(super) fn secure_payloads(
             None | Some(SecretHandlingChoice::Abort) => {
                 return Err(MaccError::Validation("MACC-SAVE-1003: Secret scan failed in staged payloads. Choose redaction, exclusion or abort.".into()));
             }
-            Some(SecretHandlingChoice::Exclude) => exclude(root, &relative, manifest)?,
+            Some(SecretHandlingChoice::Exclude) => {
+                exclude(root, &relative, manifest)?;
+                if relative.starts_with("logs") {
+                    log_files -= 1;
+                }
+            }
             Some(SecretHandlingChoice::Redact) => {
                 redact_file(&path, &relative, &bytes, findings, manifest)?
             }
         }
+    }
+    manifest.includes.logs = log_files > 0;
+    manifest.paths.logs_archive = manifest.includes.logs.then(|| "logs".into());
+    if opts.dry_run {
+        // The final checksum manifest contains the relative filenames as well.
+        let yaml =
+            serde_yaml::to_string(manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
+        manifest.security.secret_scan.findings += blocking(yaml.as_bytes()).len();
     }
     Ok(())
 }

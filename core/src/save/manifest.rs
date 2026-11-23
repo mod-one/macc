@@ -37,6 +37,9 @@ pub struct SaveBundleManifest {
     pub macc_version: String,
     pub repository: RepositoryIdentity,
     pub includes: SaveIncludes,
+    /// Paths relative to the log root, in budget allocation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs_omitted_by_size: Vec<String>,
     pub excludes: SaveExcludes,
     pub paths: SavePaths,
     pub hashes: SaveHashes,

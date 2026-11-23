@@ -4,13 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::classifier::copy_dir_all;
-use super::logs::{parse_duration_to_seconds, parse_size_to_bytes};
 use super::manifest::{
     SaveBundleManifest, SaveExcludes, SaveHashes, SaveIncludes, SavePaths, SaveSecurity,
     SecretScanMetadata,
 };
 use super::repository_identity::get_repository_identity;
-use super::scanner::redact_secrets_in_text;
 use crate::{MaccError, ProjectPaths, Result};
 
 use super::integrity::write_checksums_file;
@@ -212,73 +210,15 @@ pub(super) fn create_in(
         includes.automation_state = true;
     }
 
-    // 5. Copy logs
-    let logs_src = paths.macc_dir.join("log");
-    if include_logs && logs_src.exists() {
-        let logs_dest = tmp_save_dir.join("logs");
-        fs::create_dir_all(&logs_dest).map_err(|source| MaccError::Io {
-            path: logs_dest.display().to_string(),
-            action: "stage logs".into(),
-            source,
-        })?;
-
-        // Custom copy logs with size limit, time range, and redaction
-        let max_bytes = parse_size_to_bytes(&opts.log_max_size);
-        let max_age_seconds = parse_duration_to_seconds(&opts.log_since);
-        let mut total_copied = 0;
-
-        let mut read_logs = |dir: &Path| -> std::io::Result<()> {
-            if !dir.exists() {
-                return Ok(());
-            }
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    let meta = entry.metadata()?;
-                    if let Ok(modified_time) = meta.modified() {
-                        if let Ok(elapsed) = modified_time.elapsed() {
-                            if elapsed.as_secs() > max_age_seconds {
-                                continue;
-                            }
-                        }
-                    }
-                    if total_copied + meta.len() > max_bytes {
-                        break;
-                    }
-                    let mut text = match fs::read_to_string(&path) {
-                        Ok(text) => text,
-                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
-                        Err(e) => return Err(e),
-                    };
-                    if opts.redact_logs {
-                        text = redact_secrets_in_text(&text);
-                    }
-                    let rel = path.strip_prefix(&logs_src).unwrap();
-                    let target_path = logs_dest.join(rel);
-                    fs::create_dir_all(target_path.parent().unwrap())?;
-                    fs::write(&target_path, text)?;
-                    total_copied += meta.len();
-                }
-            }
-            Ok(())
-        };
-
-        for dir in [
-            logs_src.clone(),
-            logs_src.join("coordinator"),
-            logs_src.join("performer"),
-        ] {
-            read_logs(&dir).map_err(|source| MaccError::Io {
-                path: dir.display().to_string(),
-                action: "stage logs".into(),
-                source,
-            })?;
-        }
-
-        includes.logs = true;
-        paths_meta.logs_archive = Some("logs".to_string());
-    }
+    let logs_omitted_by_size = if include_logs {
+        super::logs::capture(
+            &paths.macc_dir.join("log"),
+            &tmp_save_dir.join("logs"),
+            opts,
+        )?
+    } else {
+        Vec::new()
+    };
 
     // Write manifest
     let manifest_path = tmp_save_dir.join("manifest.yaml");
@@ -298,6 +238,7 @@ pub(super) fn create_in(
         macc_version: crate::version().to_string(),
         repository: get_repository_identity(&paths.root),
         includes,
+        logs_omitted_by_size,
         excludes: SaveExcludes {
             worktrees: true,
             cache: true,

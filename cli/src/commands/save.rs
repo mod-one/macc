@@ -143,9 +143,7 @@ impl Command for SaveCommand {
                         "-"
                     }
                 );
-                if manifest.includes.logs {
-                    println!("  ✓ logs, redacted");
-                }
+                print_logs(&manifest);
 
                 println!("\nExcluded:");
                 println!("  - worktrees");
@@ -239,7 +237,7 @@ impl Command for SaveCommand {
                         "-"
                     }
                 );
-                println!("  {} logs", if manifest.includes.logs { "✓" } else { "-" });
+                print_logs(manifest);
 
                 println!("\nExplicitly excluded:");
                 println!("  - worktrees");
@@ -267,5 +265,20 @@ impl Command for SaveCommand {
         }
 
         Ok(())
+    }
+}
+
+fn print_logs(manifest: &macc_core::save::SaveBundleManifest) {
+    if manifest.includes.logs {
+        println!("  ✓ logs");
+    }
+    if !manifest.logs_omitted_by_size.is_empty() {
+        println!(
+            "  Log size limit omitted {} file(s):",
+            manifest.logs_omitted_by_size.len()
+        );
+        for path in &manifest.logs_omitted_by_size {
+            println!("    {path}");
+        }
     }
 }
