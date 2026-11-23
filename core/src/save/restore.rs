@@ -22,16 +22,9 @@ pub(super) fn restore_from(
     opts: &super::RestoreOptions,
     saves_dir: &std::path::Path,
 ) -> Result<()> {
-    if name.is_empty()
-        || name
-            .chars()
-            .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
-    {
-        return Err(MaccError::Validation(
-            "MACC-RESTORE-2000: Invalid save name".into(),
-        ));
-    }
-    let target_save_dir = saves_dir.join(name);
+    let name = super::name::SaveName::parse(name)
+        .map_err(|_| MaccError::Validation("MACC-RESTORE-2000: Invalid save name".into()))?;
+    let target_save_dir = name.path(saves_dir);
 
     if !target_save_dir.exists() {
         return Err(MaccError::Validation(format!(
@@ -57,12 +50,7 @@ pub(super) fn restore_from(
         ))
     })?;
 
-    if !matches!(manifest.version, 1 | 2 | 3)
-        || manifest.kind != "macc.save_bundle"
-        || (manifest.version < 3 && ((manifest.version == 2) != manifest.session_store.is_some()))
-        || ((manifest.version == 3) != manifest.decision_store.is_some())
-        || (manifest.session_store.is_some() && !manifest.includes.coordinator_sessions)
-    {
+    if !manifest.supported_format() {
         return Err(MaccError::Validation(
             "MACC-RESTORE-2001: Unsupported bundle format".into(),
         ));
@@ -176,7 +164,7 @@ pub(super) fn restore_from(
     let sections = files::plan(
         paths,
         &target_save_dir,
-        name,
+        &name,
         &manifest,
         config_only,
         restore_sessions,

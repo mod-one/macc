@@ -39,18 +39,8 @@ pub(super) fn create_in(
     opts: &super::SaveOptions,
     saves_dir: &Path,
 ) -> Result<SaveBundleManifest> {
-    if name.is_empty()
-        || name
-            .chars()
-            .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
-    {
-        return Err(MaccError::Validation(format!(
-            "MACC-SAVE-1000: Invalid save name: {}",
-            name
-        )));
-    }
-
-    let target_save_dir = saves_dir.join(name);
+    let name = super::name::SaveName::parse(name)?;
+    let target_save_dir = name.path(saves_dir);
 
     if target_save_dir.exists() && !opts.overwrite {
         return Err(MaccError::Validation(format!(
@@ -438,8 +428,18 @@ pub(super) fn create_in(
 
     // Atomic move to saves dir
     if target_save_dir.exists() {
+        if !opts.overwrite {
+            return Err(MaccError::Validation(format!(
+                "MACC-SAVE-1001: Save already exists: {name}"
+            )));
+        }
+        name.existing_bundle(saves_dir)?;
         let backup_dir = saves_dir.join(format!("{}.old.{}", name, uuid::Uuid::new_v4()));
-        fs::rename(&target_save_dir, &backup_dir).ok();
+        fs::rename(&target_save_dir, &backup_dir).map_err(|source| MaccError::Io {
+            path: target_save_dir.display().to_string(),
+            action: "move previous save bundle".into(),
+            source,
+        })?;
         if let Err(e) = fs::rename(&tmp_save_dir, &target_save_dir) {
             fs::rename(&backup_dir, &target_save_dir).ok(); // Rollback
             return Err(MaccError::Io {

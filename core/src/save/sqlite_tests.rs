@@ -426,3 +426,68 @@ fn malformed_catalog_destination_prevents_restoring_sessions_and_configuration()
     );
     assert_eq!(store::fingerprint::current(&paths.root).unwrap(), current);
 }
+
+#[test]
+fn deletion_only_removes_the_named_bundle_in_the_save_root() {
+    let (tmp, paths, saves) = setup();
+    let manifest = save(&paths, &saves);
+    let neighbor = tmp.path().join("neighbor");
+    let ordinary = saves.join("ordinary");
+    for dir in [&neighbor, &ordinary] {
+        fs::create_dir(dir).unwrap();
+        fs::write(dir.join("notes"), "keep").unwrap();
+    }
+    for name in [
+        "",
+        ".",
+        "..",
+        "../neighbor",
+        neighbor.to_str().unwrap(),
+        "ordinary",
+        "nested/full",
+        r"..\neighbor",
+    ] {
+        assert!(delete_from(name, &saves).is_err(), "{name:?}");
+    }
+    let manifest_path = ordinary.join("manifest.yaml");
+    for text in [
+        "unrelated: metadata".into(),
+        serde_yaml::to_string(&manifest).unwrap(),
+    ] {
+        fs::write(&manifest_path, text).unwrap();
+        assert!(delete_from("ordinary", &saves).is_err());
+    }
+    let mut wrong_kind = manifest;
+    wrong_kind.name = "ordinary".into();
+    wrong_kind.kind = "other".into();
+    fs::write(&manifest_path, serde_yaml::to_string(&wrong_kind).unwrap()).unwrap();
+    assert!(delete_from("ordinary", &saves).is_err());
+    let mut overwrite = options();
+    overwrite.overwrite = true;
+    assert!(bundle::create_in(&paths, "ordinary", &overwrite, &saves).is_err());
+    assert_eq!(fs::read(ordinary.join("notes")).unwrap(), b"keep");
+    assert_eq!(fs::read(neighbor.join("notes")).unwrap(), b"keep");
+    bundle::create_in(&paths, "full", &overwrite, &saves).unwrap();
+    delete_from("full", &saves).unwrap();
+    assert!(!saves.join("full").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn deletion_refuses_linked_bundle_and_linked_manifest() {
+    use std::os::unix::fs::symlink;
+    let (tmp, paths, saves) = setup();
+    save(&paths, &saves);
+    let bundle = saves.join("full");
+    let outside = tmp.path().join("outside");
+    fs::rename(&bundle, &outside).unwrap();
+    symlink(&outside, &bundle).unwrap();
+    assert!(delete_from("full", &saves).is_err());
+    assert!(bundle.is_symlink());
+    fs::remove_file(&bundle).unwrap();
+    fs::create_dir(&bundle).unwrap();
+    symlink(outside.join("manifest.yaml"), bundle.join("manifest.yaml")).unwrap();
+    assert!(delete_from("full", &saves).is_err());
+    assert!(bundle.join("manifest.yaml").is_symlink());
+    assert!(outside.join("manifest.yaml").is_file());
+}

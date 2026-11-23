@@ -43,6 +43,16 @@ pub struct SaveBundleManifest {
     pub security: SaveSecurity,
 }
 
+impl SaveBundleManifest {
+    pub(super) fn supported_format(&self) -> bool {
+        matches!(self.version, 1..=3)
+            && self.kind == "macc.save_bundle"
+            && (self.version == 3 || ((self.version == 2) == self.session_store.is_some()))
+            && ((self.version == 3) == self.decision_store.is_some())
+            && (self.session_store.is_none() || self.includes.coordinator_sessions)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SaveIncludes {
     pub config: bool,

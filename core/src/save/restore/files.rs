@@ -54,7 +54,7 @@ pub(super) fn destination(section: &str, root: &Path, path: &Path, directory: bo
 pub(super) fn plan(
     paths: &ProjectPaths,
     bundle: &Path,
-    name: &str,
+    name: &crate::save::name::SaveName<'_>,
     manifest: &crate::save::SaveBundleManifest,
     config_only: bool,
     restore_sessions: bool,
@@ -111,7 +111,7 @@ pub(super) fn plan(
                 include_logs && manifest.includes.logs,
                 "archived logs",
                 "logs",
-                paths.macc_dir.join("restored-logs").join(name),
+                name.path(&paths.macc_dir.join("restored-logs")),
             ),
             (
                 manifest.includes.prd || manifest.includes.automation_state,

@@ -3,6 +3,7 @@ pub mod classifier;
 mod integrity;
 pub mod logs;
 pub mod manifest;
+mod name;
 pub mod repository_identity;
 pub mod restore;
 pub mod scanner;
@@ -95,17 +96,15 @@ pub fn list_save_bundles() -> Result<Vec<SaveBundleManifest>> {
 
 pub fn delete_save_bundle(name: &str) -> Result<()> {
     let saves_dir = user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
-    let target_save_dir = saves_dir.join(name);
-    if !target_save_dir.exists() {
-        return Err(MaccError::Validation(format!(
-            "MACC-RESTORE-2000: Save not found: {}",
-            name
-        )));
-    }
-    fs::remove_dir_all(target_save_dir).map_err(|e| MaccError::Io {
-        path: name.to_string(),
+    delete_from(name, &saves_dir)
+}
+
+fn delete_from(name: &str, saves_dir: &std::path::Path) -> Result<()> {
+    let target = name::SaveName::parse(name)?.existing_bundle(saves_dir)?;
+    fs::remove_dir_all(&target).map_err(|source| MaccError::Io {
+        path: target.display().to_string(),
         action: "delete save bundle".into(),
-        source: e,
+        source,
     })
 }
 
