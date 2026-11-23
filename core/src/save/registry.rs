@@ -68,7 +68,7 @@ impl RegistryStore {
     }
 }
 
-pub(super) fn capture(paths: &ProjectPaths, bundle: &Path) -> Result<(String, usize)> {
+pub(super) fn capture(paths: &ProjectPaths, bundle: &Path) -> Result<String> {
     let store = RegistryStore::resolve(paths, &paths.config_path)?;
     let registry = match store.mode {
         CoordinatorStorageMode::Json => read_registry(store.target())?,
@@ -87,11 +87,7 @@ pub(super) fn capture(paths: &ProjectPaths, bundle: &Path) -> Result<(String, us
             "Incomplete coordinator registry snapshot".into(),
         ));
     }
-    let findings = crate::security::scan_bytes(PAYLOAD, &written)
-        .iter()
-        .filter(|f| f.severity == crate::security::Severity::Error)
-        .count();
-    Ok((super::integrity::sha256(&written), findings))
+    Ok(super::integrity::sha256(&written))
 }
 
 fn read_registry(path: &Path) -> Result<TaskRegistry> {

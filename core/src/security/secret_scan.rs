@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::bytes::Regex;
 use std::ops::Range;
 use std::sync::OnceLock;
 
@@ -55,19 +55,12 @@ fn get_regexes() -> &'static [(&'static SecretPattern, Regex)] {
 pub fn scan_bytes(path: &str, bytes: &[u8]) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // We assume UTF-8 for secret scanning as most secrets are ASCII-compatible.
-    // If it's not valid UTF-8, we just skip it for now (best-effort).
-    let content = match std::str::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return findings,
-    };
-
     for (pattern, re) in get_regexes() {
-        for m in re.find_iter(content) {
+        for m in re.find_iter(bytes) {
             findings.push(Finding {
                 path: path.to_string(),
                 pattern_name: pattern.name.to_string(),
-                redacted_match: redact(m.as_str()),
+                redacted_match: redact(&String::from_utf8_lossy(m.as_bytes())),
                 range: m.range(),
                 severity: pattern.severity.clone(),
             });
@@ -115,6 +108,14 @@ mod tests {
         // Verify that the full secret is NOT in the redacted_match
         assert!(!findings[0].redacted_match.contains("123456789012"));
         assert!(!findings[1].redacted_match.contains("123456789012"));
+    }
+
+    #[test]
+    fn findings_use_original_byte_offsets_in_binary_files() {
+        let bytes = b"\xff\x00sk-svcacct-test_1234-567890123456\xfe";
+        let findings = scan_bytes("snapshot", bytes);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].range, 2..bytes.len() - 1);
     }
 
     #[test]

@@ -47,26 +47,6 @@ pub(super) fn capture(
     }
     Ok(snapshot)
 }
-pub(super) fn findings(directory: &Path, snapshot: bool) -> Result<usize> {
-    let mut count = 0;
-    for rel in ["state/tool-sessions.json", "state/memory.sqlite"] {
-        if rel.ends_with(".sqlite") && !snapshot {
-            continue;
-        }
-        let path = directory.join(rel);
-        if path.exists() {
-            // SQLite pages contain non-UTF8 bytes. Scan their lossy text view
-            // so embedded ASCII credentials are not silently skipped.
-            let bytes = crate::session_store::bytes(&path)?;
-            let text = String::from_utf8_lossy(&bytes);
-            count += crate::security::scan_bytes(rel, text.as_bytes())
-                .iter()
-                .filter(|f| f.severity == crate::security::Severity::Error)
-                .count();
-        }
-    }
-    Ok(count)
-}
 /// Manifest paths are relative regular files inside the bundle, never symlinks.
 pub(super) fn payload(directory: &Path, relative: &str) -> Result<std::path::PathBuf> {
     let p = Path::new(relative);

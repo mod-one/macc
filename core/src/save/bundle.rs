@@ -11,7 +11,6 @@ use super::manifest::{
 };
 use super::repository_identity::get_repository_identity;
 use super::scanner::redact_secrets_in_text;
-use super::SecretHandlingChoice;
 use crate::{MaccError, ProjectPaths, Result};
 
 use super::integrity::write_checksums_file;
@@ -100,7 +99,6 @@ pub(super) fn create_in(
             .unwrap_or(false);
 
     let tmp_parent = saves_dir.join(".tmp");
-    fs::create_dir_all(&tmp_parent).ok();
     let tmp_save_dir = tmp_parent.join(format!("{}.{}", name, uuid::Uuid::new_v4()));
     fs::create_dir_all(&tmp_save_dir).map_err(|e| MaccError::Io {
         path: tmp_save_dir.to_string_lossy().into(),
@@ -133,12 +131,14 @@ pub(super) fn create_in(
         manifest_payload: "".to_string(),
     };
 
-    let mut findings_count = 0;
-
     // 1. Copy config
     if include_config && paths.config_path.exists() {
         let config_dir = tmp_save_dir.join("config");
-        fs::create_dir_all(&config_dir).ok();
+        fs::create_dir_all(&config_dir).map_err(|source| MaccError::Io {
+            path: config_dir.display().to_string(),
+            action: "stage configuration".into(),
+            source,
+        })?;
         let dest = config_dir.join("macc.yaml");
         fs::copy(&paths.config_path, &dest).map_err(|e| MaccError::Io {
             path: dest.to_string_lossy().into(),
@@ -146,14 +146,11 @@ pub(super) fn create_in(
             source: e,
         })?;
 
-        let config_bytes = fs::read(&dest).unwrap();
-        let findings = crate::security::scan_bytes("config/macc.yaml", &config_bytes);
-        findings_count += findings
-            .iter()
-            .filter(|f| f.severity == crate::security::Severity::Error)
-            .count();
-
-        let sha = compute_file_sha256(&dest).unwrap();
+        let sha = compute_file_sha256(&dest).map_err(|source| MaccError::Io {
+            path: dest.display().to_string(),
+            action: "hash staged configuration".into(),
+            source,
+        })?;
         hashes.config = Some(sha);
         paths_meta.config = Some("config/macc.yaml".to_string());
         includes.config = true;
@@ -166,7 +163,7 @@ pub(super) fn create_in(
     } else {
         None
     };
-    let mut session_store = if include_sessions {
+    let session_store = if include_sessions {
         super::sessions::capture(
             paths,
             &tmp_save_dir,
@@ -177,7 +174,6 @@ pub(super) fn create_in(
     } else {
         None
     };
-    findings_count += super::sessions::findings(&tmp_save_dir, session_store.is_some())?;
 
     // 3. Copy catalogs
     if include_catalogs && paths.project_catalog_dir().exists() {
@@ -197,7 +193,6 @@ pub(super) fn create_in(
     let registry_src = paths.macc_dir.join("automation").join("task");
     if include_prd && registry_src.exists() {
         let registry_dest = tmp_save_dir.join("automation").join("task");
-        fs::create_dir_all(registry_dest.parent().unwrap()).ok();
         if let Err(e) = copy_dir_all(&registry_src, &registry_dest, paths) {
             fs::remove_dir_all(&tmp_save_dir).ok();
             return Err(MaccError::Io {
@@ -212,36 +207,20 @@ pub(super) fn create_in(
     }
 
     if include_state {
-        let (hash, findings) = super::registry::capture(paths, &tmp_save_dir)?;
-        findings_count += findings;
-        if findings > 0
-            && !opts.dry_run
-            && opts.handle_secrets == Some(SecretHandlingChoice::Exclude)
-        {
-            let path = tmp_save_dir.join(super::registry::PAYLOAD);
-            fs::remove_file(&path).map_err(|source| MaccError::Io {
-                path: path.display().to_string(),
-                action: "exclude coordinator registry".into(),
-                source,
-            })?;
-        } else {
-            if findings > 0
-                && !opts.dry_run
-                && opts.handle_secrets == Some(SecretHandlingChoice::Redact)
-            {
-                return Err(MaccError::Validation("MACC-SAVE-1003: Exclude the coordinator registry containing potential secrets or abort the save".into()));
-            }
-            hashes.task_registry = Some(hash);
-            paths_meta.task_registry = Some(super::registry::PAYLOAD.into());
-            includes.automation_state = true;
-        }
+        hashes.task_registry = Some(super::registry::capture(paths, &tmp_save_dir)?);
+        paths_meta.task_registry = Some(super::registry::PAYLOAD.into());
+        includes.automation_state = true;
     }
 
     // 5. Copy logs
     let logs_src = paths.macc_dir.join("log");
     if include_logs && logs_src.exists() {
         let logs_dest = tmp_save_dir.join("logs");
-        fs::create_dir_all(&logs_dest).ok();
+        fs::create_dir_all(&logs_dest).map_err(|source| MaccError::Io {
+            path: logs_dest.display().to_string(),
+            action: "stage logs".into(),
+            source,
+        })?;
 
         // Custom copy logs with size limit, time range, and redaction
         let max_bytes = parse_size_to_bytes(&opts.log_max_size);
@@ -267,141 +246,38 @@ pub(super) fn create_in(
                     if total_copied + meta.len() > max_bytes {
                         break;
                     }
-                    if let Ok(mut text) = fs::read_to_string(&path) {
-                        if opts.redact_logs {
-                            text = redact_secrets_in_text(&text);
-                        }
-                        let rel = path.strip_prefix(&logs_src).unwrap();
-                        let target_path = logs_dest.join(rel);
-                        fs::create_dir_all(target_path.parent().unwrap()).ok();
-                        fs::write(&target_path, text)?;
-                        total_copied += meta.len();
+                    let mut text = match fs::read_to_string(&path) {
+                        Ok(text) => text,
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                        Err(e) => return Err(e),
+                    };
+                    if opts.redact_logs {
+                        text = redact_secrets_in_text(&text);
                     }
+                    let rel = path.strip_prefix(&logs_src).unwrap();
+                    let target_path = logs_dest.join(rel);
+                    fs::create_dir_all(target_path.parent().unwrap())?;
+                    fs::write(&target_path, text)?;
+                    total_copied += meta.len();
                 }
             }
             Ok(())
         };
 
-        let _ = read_logs(&logs_src);
-        let _ = read_logs(&logs_src.join("coordinator"));
-        let _ = read_logs(&logs_src.join("performer"));
+        for dir in [
+            logs_src.clone(),
+            logs_src.join("coordinator"),
+            logs_src.join("performer"),
+        ] {
+            read_logs(&dir).map_err(|source| MaccError::Io {
+                path: dir.display().to_string(),
+                action: "stage logs".into(),
+                source,
+            })?;
+        }
 
         includes.logs = true;
         paths_meta.logs_archive = Some("logs".to_string());
-    }
-
-    // If dry run, clean up temp dir and abort
-    if opts.dry_run {
-        fs::remove_dir_all(&tmp_save_dir).ok();
-        return Ok(SaveBundleManifest {
-            version: bundle_version(
-                includes.automation_state,
-                decision_store.is_some(),
-                session_store.is_some(),
-            ),
-            decision_store,
-            session_store,
-            kind: "macc.save_bundle".to_string(),
-            name: name.to_string(),
-            description: opts.description.clone(),
-            created_at: Utc::now().to_rfc3339(),
-            updated_at: Utc::now().to_rfc3339(),
-            macc_version: crate::version().to_string(),
-            repository: get_repository_identity(&paths.root),
-            includes,
-            excludes: SaveExcludes {
-                worktrees: true,
-                cache: true,
-                generated_files: true,
-                secrets: true,
-            },
-            paths: paths_meta,
-            hashes,
-            security: SaveSecurity {
-                secret_scan: SecretScanMetadata {
-                    performed: true,
-                    findings: findings_count,
-                    redacted_logs: opts.redact_logs,
-                },
-            },
-        });
-    }
-
-    // Abort or redact/exclude if secrets were found in config/session files
-    if findings_count > 0 {
-        match opts.handle_secrets {
-            Some(SecretHandlingChoice::Redact) => {
-                if session_store.is_some() && super::sessions::findings(&tmp_save_dir, true)? > 0 {
-                    fs::remove_dir_all(&tmp_save_dir).ok();
-                    return Err(MaccError::Validation("MACC-SAVE-1003: SQLite session secrets cannot be text-redacted; exclude sessions or use --no-sessions".into()));
-                }
-                let config_dest = tmp_save_dir.join("config").join("macc.yaml");
-                if config_dest.exists() {
-                    if let Ok(content) = fs::read_to_string(&config_dest) {
-                        let redacted = redact_secrets_in_text(&content);
-                        fs::write(&config_dest, &redacted).ok();
-                        let sha = compute_file_sha256(&config_dest).unwrap();
-                        hashes.config = Some(sha);
-                    }
-                }
-                let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
-                if sessions_dest.exists() && session_store.is_none() {
-                    if let Ok(content) = fs::read_to_string(&sessions_dest) {
-                        let redacted = redact_secrets_in_text(&content);
-                        fs::write(&sessions_dest, &redacted).ok();
-                        let sha = compute_file_sha256(&sessions_dest).unwrap();
-                        hashes.coordinator_sessions = Some(sha);
-                    }
-                }
-                findings_count = 0;
-            }
-            Some(SecretHandlingChoice::Exclude) => {
-                if session_store.is_some() && super::sessions::findings(&tmp_save_dir, true)? > 0 {
-                    fs::remove_dir_all(tmp_save_dir.join("state"))
-                        .map_err(|e| MaccError::Validation(e.to_string()))?;
-                    session_store = None;
-                    includes.coordinator_sessions = false;
-                    paths_meta.coordinator_sessions = None;
-                    hashes.coordinator_sessions = None;
-                }
-                let config_dest = tmp_save_dir.join("config").join("macc.yaml");
-                if config_dest.exists() {
-                    if let Ok(bytes) = fs::read(&config_dest) {
-                        let findings = crate::security::scan_bytes("config/macc.yaml", &bytes);
-                        if findings
-                            .iter()
-                            .any(|f| f.severity == crate::security::Severity::Error)
-                        {
-                            fs::remove_dir_all(config_dest.parent().unwrap()).ok();
-                            includes.config = false;
-                            hashes.config = None;
-                            paths_meta.config = None;
-                        }
-                    }
-                }
-                let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
-                if sessions_dest.exists() && session_store.is_none() {
-                    if let Ok(bytes) = fs::read(&sessions_dest) {
-                        let findings =
-                            crate::security::scan_bytes("state/tool-sessions.json", &bytes);
-                        if findings
-                            .iter()
-                            .any(|f| f.severity == crate::security::Severity::Error)
-                        {
-                            fs::remove_dir_all(sessions_dest.parent().unwrap()).ok();
-                            includes.coordinator_sessions = false;
-                            hashes.coordinator_sessions = None;
-                            paths_meta.coordinator_sessions = None;
-                        }
-                    }
-                }
-                findings_count = 0;
-            }
-            _ => {
-                fs::remove_dir_all(&tmp_save_dir).ok();
-                return Err(MaccError::Validation(format!("MACC-SAVE-1003: Secret scan failed. Found {} potential secrets in config/session files. Choose [R/E/A] to proceed.", findings_count)));
-            }
-        }
     }
 
     // Write manifest
@@ -429,15 +305,25 @@ pub(super) fn create_in(
             secrets: true,
         },
         paths: paths_meta,
-        hashes: hashes.clone(),
+        hashes,
         security: SaveSecurity {
             secret_scan: SecretScanMetadata {
                 performed: true,
-                findings: findings_count,
+                findings: 0,
                 redacted_logs: opts.redact_logs,
             },
         },
     };
+
+    super::scanner::secure_payloads(&tmp_save_dir, &mut manifest, opts)?;
+    if opts.dry_run {
+        return Ok(manifest);
+    }
+    manifest.version = bundle_version(
+        manifest.includes.automation_state,
+        manifest.decision_store.is_some(),
+        manifest.session_store.is_some(),
+    );
 
     // Calculate manifest payload hash by serializing with empty payload first
     let manifest_str =
@@ -481,7 +367,6 @@ pub(super) fn create_in(
         }
         fs::remove_dir_all(&backup_dir).ok();
     } else {
-        fs::create_dir_all(saves_dir).ok();
         fs::rename(&tmp_save_dir, &target_save_dir).map_err(|e| MaccError::Io {
             path: target_save_dir.to_string_lossy().into(),
             action: "atomic create save directory".into(),

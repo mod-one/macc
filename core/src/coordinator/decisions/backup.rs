@@ -32,12 +32,9 @@ pub fn capture_backup(root: &Path, directory: &Path) -> crate::Result<Option<Con
         .execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()]))?;
     let snapshot = Store::open_read_only(root, &destination)?;
     let data = bytes(&destination)?;
-    if crate::security::scan_bytes(
-        "state/control.sqlite",
-        String::from_utf8_lossy(&data).as_bytes(),
-    )
-    .iter()
-    .any(|f| f.severity == crate::security::Severity::Error)
+    if crate::security::scan_bytes("state/control.sqlite", &data)
+        .iter()
+        .any(|f| f.severity == crate::security::Severity::Error)
     {
         return Err(error("Decision backup contains potential credentials; remove secrets from decision evidence or save without sessions"));
     }

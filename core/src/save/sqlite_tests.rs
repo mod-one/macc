@@ -553,3 +553,73 @@ fn legacy_state_bundle_requires_an_actual_registry_before_restore() {
     .unwrap();
     assert_eq!(registry["tasks"][0]["state"], "merged");
 }
+
+#[test]
+fn redaction_uses_detector_ranges_and_hashes_the_archived_bytes() {
+    let (_tmp, paths, saves) = setup();
+    // Overlapping GitHub and generic token ranges, punctuation, and a UTF-8 prefix.
+    let token = format!("sk-svcacct-_{}-ghp_{}", "z".repeat(22), "A".repeat(36));
+    let text = format!("évidence: {token}\n");
+    fs::write(&paths.config_path, &text).unwrap();
+    let mut opts = options();
+    opts.only = Some("config,logs".into());
+    opts.redact_logs = true;
+    fs::create_dir_all(paths.macc_dir.join("log")).unwrap();
+    fs::write(paths.macc_dir.join("log/worker.log"), &text).unwrap();
+    opts.handle_secrets = Some(SecretHandlingChoice::Redact);
+    let manifest = bundle::create_in(&paths, "redacted", &opts, &saves).unwrap();
+    let archived = saves.join("redacted/config/macc.yaml");
+    assert_eq!(
+        manifest.hashes.config,
+        Some(compute_file_sha256(&archived).unwrap())
+    );
+    assert_eq!(manifest.security.secret_scan.findings, 0);
+    for file in [archived, saves.join("redacted/logs/worker.log")] {
+        assert_eq!(fs::read_to_string(file).unwrap(), "évidence: [REDACTED]\n");
+    }
+    assert_eq!(fs::read_to_string(&paths.config_path).unwrap(), text);
+}
+
+#[test]
+fn final_scan_rejects_a_secret_in_the_manifest_and_preserves_the_previous_save() {
+    let (_tmp, paths, saves) = setup();
+    let mut opts = options();
+    opts.only = Some("config".into());
+    bundle::create_in(&paths, "same", &opts, &saves).unwrap();
+    let file = saves.join("same/manifest.yaml");
+    let previous = fs::read(&file).unwrap();
+    opts.description = Some(format!("sk-proj-{}", "a_b-".repeat(10)));
+    opts.overwrite = true;
+    opts.handle_secrets = Some(SecretHandlingChoice::Redact);
+    opts.dry_run = true;
+    let preview = bundle::create_in(&paths, "same", &opts, &saves).unwrap();
+    assert_eq!(preview.security.secret_scan.findings, 1);
+    opts.dry_run = false;
+    let error = bundle::create_in(&paths, "same", &opts, &saves).unwrap_err();
+    assert!(error.to_string().contains("blocking secret"));
+    assert_eq!(fs::read(file).unwrap(), previous);
+}
+
+#[test]
+fn legacy_session_redaction_handles_extended_token_and_checks_its_hash() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ProjectPaths::from_root(temp.path().join("project"));
+    let session = paths.macc_dir.join("state/tool-sessions.json");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    fs::write(&paths.config_path, "tools: {}\n").unwrap();
+    fs::write(&session, r#"{"note":"sk-proj-ab_cd-12345678901234567890"}"#).unwrap();
+    let mut opts = options();
+    opts.only = Some("sessions".into());
+    opts.handle_secrets = Some(SecretHandlingChoice::Redact);
+    let saves = temp.path().join("saves");
+    let manifest = bundle::create_in(&paths, "legacy", &opts, &saves).unwrap();
+    let file = saves.join("legacy/state/tool-sessions.json");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        r#"{"note":"[REDACTED]"}"#
+    );
+    assert_eq!(
+        manifest.hashes.coordinator_sessions,
+        Some(compute_file_sha256(&file).unwrap())
+    );
+}
