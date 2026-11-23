@@ -1,4 +1,4 @@
-use macc_core::{prd_queue, MaccError, ProjectPaths, Result};
+use macc_core::{config::CoordinatorConfig, prd_queue, MaccError, ProjectPaths, Result};
 
 /// Explain the reset and ask for an explicit "y". Never auto-confirms: without
 /// an interactive terminal the caller must pass `--confirm`.
@@ -50,17 +50,38 @@ fn ask_reset(
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
+/// Compare only queue settings so independent edits to the YAML survive.
+fn save_files(paths: &ProjectPaths, opened: &CoordinatorConfig, files: Vec<String>) -> Result<()> {
+    macc_core::config::transaction::update(paths, None, |config| {
+        let current = config
+            .automation
+            .coordinator
+            .get_or_insert_with(Default::default);
+        if !paths.config_path.is_file()
+            || current.prd_file != opened.prd_file
+            || current.prd_files != opened.prd_files
+        {
+            return Err(MaccError::Validation(
+                "PRD queue configuration changed since it was opened. Reopen the queue and retry."
+                    .into(),
+            ));
+        }
+        current.prd_files = files;
+        Ok(())
+    })?;
+    Ok(())
+}
+
 pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
     let action = args.first().map(String::as_str).unwrap_or("list");
     if matches!(action, "help" | "--help") {
         println!("macc coordinator prds [list|check|status|edit|add PATH|remove POSITION|move FROM TO|reset [--confirm]]\nPositions start at 1. Directories import immediate JSON files in lexical order. edit opens the visual terminal editor. reset resets progress only; it does not undo delivered tasks. Without --confirm it explains the action and asks for y; non-interactive use requires --confirm.");
         return Ok(());
     }
-    let mut config = macc_core::load_canonical_config(&paths.config_path)?;
-    let coordinator = config
+    let coordinator = macc_core::load_canonical_config(&paths.config_path)?
         .automation
         .coordinator
-        .get_or_insert_with(Default::default);
+        .unwrap_or_default();
     let mut files = if coordinator.prd_files.is_empty() {
         coordinator.prd_file.iter().cloned().collect()
     } else {
@@ -109,7 +130,7 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
                 entries.len(),
                 entries.iter().map(|e| e.task_ids.len()).sum::<usize>()
             );
-            let review = prd_queue::review::inspect(&paths.root, coordinator)?;
+            let review = prd_queue::review::inspect(&paths.root, &coordinator)?;
             if !review.changes.is_empty() {
                 for change in &review.changes {
                     println!("  {change}");
@@ -171,7 +192,7 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
                 println!("Reset cancelled; queue progress unchanged.");
                 return Ok(());
             }
-            prd_queue::transition::reset_locked(&paths.root, coordinator)?;
+            prd_queue::transition::reset_locked(&paths.root, &coordinator)?;
             println!("Queue progress reset; existing task delivery state is preserved.");
             return Ok(());
         }
@@ -181,8 +202,7 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
             ))
         }
     }
-    coordinator.prd_files = files;
-    macc_core::save_canonical_config(paths, &config)?;
+    save_files(paths, &coordinator, files)?;
     println!("PRD queue saved. Run coordinator prds check before launching. Existing progress is preserved.");
     Ok(())
 }
@@ -190,6 +210,46 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_save_preserves_independent_edits_and_rejects_stale_queue_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(root.path());
+        std::fs::create_dir_all(&paths.macc_dir).unwrap();
+        let write_config = |queue: &str, parallel: usize| {
+            std::fs::write(&paths.config_path, format!(
+                "tools:\n  enabled: []\nautomation:\n  coordinator:\n    max_parallel: {parallel}\n{queue}\n"
+            )).unwrap();
+        };
+        let initial = "    prd_file: legacy.json\n    prd_files: [a.json, b.json]";
+        write_config(initial, 2);
+        let read = || {
+            macc_core::load_canonical_config(&paths.config_path)
+                .unwrap()
+                .automation
+                .coordinator
+                .unwrap()
+        };
+        let opened = read();
+        write_config(initial, 7);
+        let edited = vec!["b.json".to_owned(), "a.json".to_owned()];
+        save_files(&paths, &opened, edited.clone()).unwrap();
+        let saved = read();
+        assert_eq!(saved.max_parallel, Some(7));
+        assert_eq!(saved.prd_files, edited);
+        assert_eq!(saved.prd_file, opened.prd_file);
+
+        for changed in [
+            "    prd_file: legacy.json\n    prd_files: [b.json, a.json]",
+            "    prd_file: other.json\n    prd_files: [a.json, b.json]",
+        ] {
+            write_config(changed, 7);
+            let before = std::fs::read(&paths.config_path).unwrap();
+            let err = save_files(&paths, &opened, vec!["c.json".into()]).unwrap_err();
+            assert!(err.to_string().contains("PRD queue configuration changed"));
+            assert_eq!(std::fs::read(&paths.config_path).unwrap(), before);
+        }
+    }
 
     #[test]
     fn prd_queue_reset_confirmation_reaches_command_handler() {
