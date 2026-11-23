@@ -23,7 +23,6 @@ mod workspace;
 use recovery::intervene;
 pub use report::{record_failure, record_shutdown};
 use report::{slug, write_json, write_report, Intervention};
-pub use shutdown::request_stop;
 pub(super) fn configured_tool(
     root: &Path,
     canonical: &CanonicalConfig,
@@ -46,10 +45,15 @@ use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
 
-pub async fn run(paths: ProjectPaths, canonical: CanonicalConfig, attached: bool) -> Result<()> {
+pub async fn run(
+    paths: ProjectPaths,
+    canonical: CanonicalConfig,
+    attached: bool,
+    instance: &macc_core::supervisor::instance::Instance,
+) -> Result<()> {
     tokio::select! {
         result = run_monitor(paths.clone(), canonical) => result,
-        result = shutdown::wait_for_operator_stop(&paths, attached) => result,
+        result = shutdown::wait_for_operator_stop(&paths, attached, instance) => result,
     }
 }
 

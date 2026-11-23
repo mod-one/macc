@@ -6,10 +6,10 @@ pub fn status_strip(paths: &ProjectPaths) -> Option<String> {
     let raw =
         std::fs::read_to_string(paths.root.join(".macc/state/supervisor-health.json")).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
-    let pid = std::fs::read_to_string(paths.root.join(".macc/state/supervisor.pid"))
+    let alive = macc_core::supervisor::instance::Instance::running(&paths.root)
         .ok()
-        .and_then(|p| p.trim().parse::<i64>().ok());
-    let alive = pid.is_some_and(macc_core::coordinator::helpers::is_pid_running);
+        .flatten()
+        .is_some();
     let status = if alive {
         value
             .pointer("/health/status")

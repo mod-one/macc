@@ -245,3 +245,28 @@ fn detached_lifecycle(terminal: bool) {
     assert!(output.status.success());
     assert!(!root.join(".macc/state/supervisor.pid").exists());
 }
+
+#[test]
+fn supervisor_stop_ignores_a_legacy_pid_pointing_to_another_process() {
+    let fixture = project();
+    let state = fixture.path().join(".macc/state");
+    std::fs::create_dir_all(&state).unwrap();
+    let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+    std::fs::write(state.join("supervisor.pid"), unrelated.id().to_string()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_macc"))
+        .arg("--cwd")
+        .arg(fixture.path())
+        .args(["supervisor", "stop"])
+        .output();
+    let alive = unrelated.try_wait().unwrap().is_none();
+    let _ = unrelated.kill();
+    unrelated.wait().unwrap();
+    let output = result.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(alive);
+    assert!(!state.join("supervisor.pid").exists());
+}

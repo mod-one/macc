@@ -25,6 +25,7 @@ use std::path::PathBuf;
 
 pub mod coordinator_supervisor;
 pub mod incident;
+pub mod instance;
 pub mod live;
 pub mod mode_a;
 pub mod mode_b;

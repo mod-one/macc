@@ -1,30 +1,13 @@
 //! Supervisor bootstrap shared by the CLI, TUI and Web launch service.
-use crate::{MaccError, Result};
+use crate::{supervisor::instance::Instance, MaccError, Result};
 use std::{
     path::Path,
     process::{Command as ProcessCommand, Stdio},
 };
-const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
 const COORDINATOR_SUPERVISOR_REL_PATH: &str = ".macc/state/coordinator-supervisor.json";
 pub fn attach(project_root: &Path, coordinator_pid: u32) -> Result<()> {
-    let pid_file = project_root.join(SUPERVISOR_PID_REL_PATH);
-    if let Ok(raw) = std::fs::read_to_string(&pid_file) {
-        if let Ok(pid) = raw.trim().parse::<u32>() {
-            if crate::coordinator::helpers::is_pid_running(pid as i64) {
-                let marker =
-                    serde_json::json!({"coordinator_pid":coordinator_pid,"supervisor_pid":pid});
-                std::fs::write(
-                    project_root.join(COORDINATOR_SUPERVISOR_REL_PATH),
-                    format!("{marker}\n"),
-                )
-                .map_err(|source| MaccError::Io {
-                    path: pid_file.display().to_string(),
-                    action: "attach existing supervisor".into(),
-                    source,
-                })?;
-                return Ok(());
-            }
-        }
+    if let Some(instance) = Instance::running(project_root)? {
+        return record_attachment(project_root, coordinator_pid, &instance);
     }
     let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
         path: project_root.to_string_lossy().into(),
@@ -59,38 +42,49 @@ pub fn attach(project_root: &Path, coordinator_pid: u32) -> Result<()> {
         )));
     }
 
-    // Poll for the supervisor daemon child to write its PID file (up to 2 s).
-    // Once found, record the binding so `macc coordinator stop` can stop the
-    // supervisor along with the coordinator.
-    let supervisor_pid_path = project_root.join(SUPERVISOR_PID_REL_PATH);
-    let mut supervisor_pid: Option<u32> = None;
-    for _ in 0..20 {
-        if let Ok(raw) = std::fs::read_to_string(&supervisor_pid_path) {
-            if let Ok(pid) = raw.trim().parse::<u32>() {
-                supervisor_pid = Some(pid);
-                break;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    let instance = Instance::running(project_root)?
+        .ok_or_else(|| MaccError::Validation("Supervisor did not register its instance".into()))?;
+    record_attachment(project_root, coordinator_pid, &instance)
+}
 
-    let spid = supervisor_pid
-        .ok_or_else(|| MaccError::Validation("Supervisor did not register its PID".into()))?;
+fn record_attachment(root: &Path, coordinator_pid: u32, instance: &Instance) -> Result<()> {
+    let marker = serde_json::json!({"coordinator_pid": coordinator_pid, "supervisor_pid": instance.pid, "generation": instance.generation});
+    crate::atomic_write(
+        &crate::ProjectPaths::from_root(root),
+        &root.join(COORDINATOR_SUPERVISOR_REL_PATH),
+        marker.to_string().as_bytes(),
+    )
+}
+
+pub fn stop_attached(project_root: &Path) -> Result<()> {
+    let path = project_root.join(COORDINATOR_SUPERVISOR_REL_PATH);
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(MaccError::Io {
+                path: path.display().to_string(),
+                action: "read supervisor attachment".into(),
+                source,
+            })
+        }
+    };
+    let marker: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| MaccError::Validation(e.to_string()))?;
+    if let Some(generation) = marker["generation"]
+        .as_str()
+        .and_then(|v| uuid::Uuid::parse_str(v).ok())
     {
-        let marker = serde_json::json!({
-            "coordinator_pid": coordinator_pid,
-            "supervisor_pid": spid
-        });
-        let marker_path = project_root.join(COORDINATOR_SUPERVISOR_REL_PATH);
-        if let Some(parent) = marker_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(&marker_path, format!("{}\n", marker)).map_err(|source| MaccError::Io {
-            path: marker_path.display().to_string(),
-            action: "record supervisor attachment".into(),
-            source,
-        })?;
+        crate::supervisor::instance::stop(project_root, Some(generation))?;
     }
-
+    if let Some(_idle) = crate::supervisor::instance::lock_if_idle(project_root)? {
+        if std::fs::read(&path).ok().as_ref() == Some(&raw) {
+            std::fs::remove_file(&path).map_err(|source| MaccError::Io {
+                path: path.display().to_string(),
+                action: "clear supervisor attachment".into(),
+                source,
+            })?;
+        }
+    }
     Ok(())
 }

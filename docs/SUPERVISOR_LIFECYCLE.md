@@ -54,8 +54,13 @@ unexpected coordinator crashes do not authorize this shutdown. Drain requests
 allow the coordinator to finish its active work; the attached supervisor exits
 when the run reaches a user-stopped terminal state.
 
-`macc supervisor stop` also writes a PID-specific cooperative stop request before
-sending its signal. Shutdown marks an active intervention interrupted and archives
+`macc supervisor stop` also writes a cooperative stop request addressed to the instance UUID.
+On Linux, TERM and any subsequent KILL use a process descriptor after MACC
+verifies the project, instance, process birth and owner of the project lock.
+When the kernel cannot verify the signal target, MACC waits for cooperative
+shutdown. A legacy PID file alone cannot authorize a signal.
+
+Shutdown marks an active intervention interrupted and archives
 available evidence. Interrupted slots with unfinished work remain available for inspection; clean slots are closed after archiving. An
 explicit operator stop never initiates another intervention or coordinator restart.
 

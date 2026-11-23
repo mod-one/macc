@@ -18,9 +18,6 @@ use macc_core::{find_project_root, load_canonical_config, MaccError, Result};
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
 
-const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
-const COORDINATOR_SUPERVISOR_REL_PATH: &str = ".macc/state/coordinator-supervisor.json";
-
 fn build_native_logger(
     repo_root: &Path,
     command_name: &str,
@@ -382,7 +379,7 @@ Performers cannot commit without it. Fix this first:\n\
             // Doing this before killing the coordinator prevents the supervisor's
             // --attach loop from detecting the coordinator is gone and triggering
             // an unwanted recovery/restart.
-            stop_attached_supervisor_if_present(&paths.root);
+            macc_core::service::supervisor_launch::stop_attached(&paths.root)?;
             let coordinator_path = paths.automation_coordinator_path();
             let stopped =
                 stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
@@ -794,76 +791,6 @@ fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Resul
     macc_core::service::supervisor_launch::attach(project_root, coordinator_pid)?;
     println!("Supervisor attached to coordinator (pid {coordinator_pid}).");
     Ok(())
-}
-
-/// Stop the supervisor that was spawned by `coordinator run --supervisor`, if
-/// one is recorded in the marker file and is still alive.  Does nothing when
-/// the marker is absent or stale (i.e., the coordinator that created it is no
-/// longer running, meaning it already exited on its own).
-fn stop_attached_supervisor_if_present(project_root: &Path) {
-    let marker_path = project_root.join(COORDINATOR_SUPERVISOR_REL_PATH);
-    let Ok(raw) = std::fs::read_to_string(&marker_path) else {
-        return;
-    };
-    let Ok(marker) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        let _ = std::fs::remove_file(&marker_path);
-        return;
-    };
-    let coordinator_pid = marker
-        .get("coordinator_pid")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-    let supervisor_pid = marker
-        .get("supervisor_pid")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-
-    let (Some(cpid), Some(spid)) = (coordinator_pid, supervisor_pid) else {
-        let _ = std::fs::remove_file(&marker_path);
-        return;
-    };
-
-    // Guard: only act if the coordinator that wrote this marker is currently
-    // running.  A stale marker (coordinator already exited naturally) must not
-    // cause an independently-started supervisor to be killed.
-    // Attachment remains valid even when the coordinator has already exited.
-    let registered = std::fs::read_to_string(project_root.join(SUPERVISOR_PID_REL_PATH))
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
-    if registered != Some(spid) {
-        let _ = std::fs::remove_file(&marker_path);
-        return;
-    }
-    let _ = cpid;
-
-    let _ = ProcessCommand::new("kill")
-        .arg("-TERM")
-        .arg(spid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
-        if !pid_is_alive(spid) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    let _ = std::fs::remove_file(&marker_path);
-    println!("Attached supervisor (pid {}) stopped.", spid);
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    ProcessCommand::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 fn handle_sessions_command(repo_root: &Path, extra_args: &[String]) -> Result<()> {

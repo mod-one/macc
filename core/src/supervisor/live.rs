@@ -70,10 +70,10 @@ impl SupervisorLive {
 pub fn load(paths: &ProjectPaths) -> Option<SupervisorLive> {
     let raw = std::fs::read_to_string(paths.root.join(".macc/log/supervisor/latest.json")).ok()?;
     let report: Value = serde_json::from_str(&raw).ok()?;
-    let running = std::fs::read_to_string(paths.root.join(".macc/state/supervisor.pid"))
+    let running = super::instance::Instance::running(&paths.root)
         .ok()
-        .and_then(|pid| pid.trim().parse::<i64>().ok())
-        .is_some_and(crate::coordinator::helpers::is_pid_running);
+        .flatten()
+        .is_some();
     from_report(&report, running)
 }
 

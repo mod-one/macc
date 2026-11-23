@@ -3,7 +3,10 @@ use crate::commands::Command;
 use crate::SupervisorCommands;
 use macc_core::process_ownership::{ProcessHandle, ProcessKind};
 
-use macc_core::supervisor::SupervisorReport;
+use macc_core::supervisor::{
+    instance::{self, Instance, Owner},
+    SupervisorReport,
+};
 use macc_core::{MaccError, Result};
 use serde_json::Value;
 use std::fs;
@@ -13,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
-const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
 const SUPERVISOR_HEALTH_REL_PATH: &str = ".macc/state/supervisor-health.json";
 const SUPERVISOR_DAEMON_CHILD_ENV: &str = "MACC_SUPERVISOR_DAEMON_CHILD";
 
@@ -69,14 +71,12 @@ impl<'a> SupervisorCommand<'a> {
                 eprintln!("Supervisor can diagnose but cannot repair yet: {error}. Configure `macc supervisor config set validation_commands '<JSON array>'`, then `macc supervisor config check`.");
             }
         }
-        let supervisor_pid_path = paths.root.join(SUPERVISOR_PID_REL_PATH);
 
         if daemon {
-            ensure_not_running(&supervisor_pid_path)?;
-            if paths.root.join(SUPERVISOR_HEALTH_REL_PATH).exists() {
-                fs::remove_file(paths.root.join(SUPERVISOR_HEALTH_REL_PATH)).map_err(|e| {
-                    MaccError::Validation(format!("Reset supervisor readiness: {e}"))
-                })?;
+            if Instance::running(&paths.root)?.is_some() {
+                return Err(MaccError::Validation(
+                    "Supervisor is already running".into(),
+                ));
             }
             let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
                 path: paths.root.to_string_lossy().into(),
@@ -150,12 +150,17 @@ impl<'a> SupervisorCommand<'a> {
 
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                if read_pid_file(&supervisor_pid_path)? == Some(child.id())
+                if Instance::running(&paths.root)?.is_some_and(|owner| owner.pid == child.id())
                     && paths.root.join(SUPERVISOR_HEALTH_REL_PATH).exists()
                 {
                     break;
                 }
-                if !is_pid_running(child.id()) || Instant::now() >= deadline {
+                if child
+                    .try_wait()
+                    .map_err(|e| MaccError::Validation(e.to_string()))?
+                    .is_some()
+                    || Instant::now() >= deadline
+                {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(MaccError::Validation(format!("Supervisor did not become ready; inspect {}/.macc/log/supervisor/daemon.log", paths.root.display())));
@@ -166,13 +171,7 @@ impl<'a> SupervisorCommand<'a> {
             return Ok(());
         }
 
-        ensure_not_running(&supervisor_pid_path)?;
-
-        let _instance_lock = macc_core::fs_lock::AdvisoryLock::acquire(
-            &paths.root.join(".macc/state/supervisor.lock"),
-            Duration::ZERO,
-            "supervisor",
-        )?;
+        let owner = Owner::acquire(&paths.root)?;
         if retry {
             super::supervisor_runtime::request_retry(&paths)?;
             let ledger = paths.root.join(".macc/state/supervisor-interventions.json");
@@ -189,16 +188,6 @@ impl<'a> SupervisorCommand<'a> {
             }
         }
         let process_id = std::process::id();
-        let stop_request = paths.root.join(".macc/state/supervisor-stop.json");
-        if stop_request.exists() {
-            fs::remove_file(&stop_request).map_err(|source| MaccError::Io {
-                path: stop_request.display().to_string(),
-                action: "clear previous supervisor stop request".into(),
-                source,
-            })?;
-        }
-        write_pid_file(&supervisor_pid_path, process_id)?;
-
         let supervisor_handle = ProcessHandle {
             kind: ProcessKind::Supervisor,
             project_root: paths.root.to_path_buf(),
@@ -220,7 +209,11 @@ impl<'a> SupervisorCommand<'a> {
         };
 
         if let Some(pid) = coordinator_pid {
-            write_pid_file(&paths.root.join(".macc/state/coordinator.pid"), pid)?;
+            macc_core::atomic_write(
+                &paths,
+                &paths.root.join(".macc/state/coordinator.pid"),
+                format!("{pid}\n").as_bytes(),
+            )?;
         }
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| MaccError::Validation(format!("Supervisor runtime: {e}")))?;
@@ -230,14 +223,14 @@ impl<'a> SupervisorCommand<'a> {
                 let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                     .map_err(|e| MaccError::Validation(format!("Supervisor SIGTERM handler: {e}")))?;
                 tokio::select! {
-                    result = super::supervisor_runtime::run(paths.clone(), canonical.clone(), attach) => result,
+                    result = super::supervisor_runtime::run(paths.clone(), canonical.clone(), attach, &owner.instance) => result,
                     _ = term.recv() => Ok(()),
                     result = tokio::signal::ctrl_c() => result.map_err(|e| MaccError::Validation(e.to_string())),
                 }
             }
             #[cfg(not(unix))]
             { tokio::select! {
-                result = super::supervisor_runtime::run(paths.clone(), canonical.clone(), attach) => result,
+                result = super::supervisor_runtime::run(paths.clone(), canonical.clone(), attach, &owner.instance) => result,
                 result = tokio::signal::ctrl_c() => result.map_err(|e| MaccError::Validation(e.to_string())),
             } }
         });
@@ -250,7 +243,6 @@ impl<'a> SupervisorCommand<'a> {
                 &error.to_string(),
             )?;
         }
-        cleanup_pid_file_if_matches(&supervisor_pid_path, process_id)?;
 
         if std::env::var(SUPERVISOR_DAEMON_CHILD_ENV).is_ok() {
             result
@@ -264,41 +256,19 @@ impl<'a> SupervisorCommand<'a> {
 
     fn stop(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
-        let supervisor_pid_path = paths.root.join(SUPERVISOR_PID_REL_PATH);
 
-        let Some(pid) = read_pid_file(&supervisor_pid_path)? else {
-            println!("Supervisor is not running.");
-            return Ok(());
-        };
-
-        if !is_pid_running(pid) {
-            let _ = fs::remove_file(&supervisor_pid_path);
-            println!("Supervisor is not running (stale pid file removed).");
-            return Ok(());
-        }
-
-        super::supervisor_runtime::request_stop(&paths, pid)?;
-        send_signal(pid, "-TERM")?;
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if !is_pid_running(pid) {
-                break;
+        if instance::stop(&paths.root, None)? {
+            if let Some(_idle) = instance::lock_if_idle(&paths.root)? {
+                if let Err(error) =
+                    macc_core::git::prune_merged_supervisor_branches(&paths.root, None, false)
+                {
+                    eprintln!("Supervisor branches retained: {error}");
+                }
             }
-            std::thread::sleep(Duration::from_millis(150));
+            println!("Supervisor stopped.");
+        } else {
+            println!("Supervisor is not running.");
         }
-
-        if is_pid_running(pid) {
-            send_signal(pid, "-KILL")?;
-        }
-
-        let _ = fs::remove_file(&supervisor_pid_path);
-        if let Err(error) =
-            macc_core::git::prune_merged_supervisor_branches(&paths.root, None, false)
-        {
-            eprintln!("Supervisor branches retained: {error}");
-        }
-        println!("Supervisor stopped.");
         Ok(())
     }
 
@@ -326,11 +296,10 @@ impl<'a> SupervisorCommand<'a> {
 
     fn status(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
-        let supervisor_pid_path = paths.root.join(SUPERVISOR_PID_REL_PATH);
         let supervisor_health_path = paths.root.join(SUPERVISOR_HEALTH_REL_PATH);
 
-        let pid = read_pid_file(&supervisor_pid_path)?;
-        let running = pid.map(is_pid_running).unwrap_or(false);
+        let pid = Instance::running(&paths.root)?.map(|owner| owner.pid);
+        let running = pid.is_some();
 
         println!("Supervisor:");
         if running {
@@ -534,100 +503,4 @@ fn resolve_project_path(root: &Path, path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     root.join(path)
-}
-
-fn read_pid_file(path: &Path) -> Result<Option<u32>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = fs::read_to_string(path).map_err(|e| MaccError::Io {
-        path: path.to_string_lossy().into(),
-        action: "read supervisor pid file".into(),
-        source: e,
-    })?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-
-    let pid = trimmed.parse::<u32>().map_err(|e| {
-        MaccError::Validation(format!(
-            "invalid supervisor pid in {}: {}",
-            path.display(),
-            e
-        ))
-    })?;
-    Ok(Some(pid))
-}
-
-fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-            path: parent.to_string_lossy().into(),
-            action: "create supervisor state directory".into(),
-            source: e,
-        })?;
-    }
-    fs::write(path, format!("{}\n", pid)).map_err(|e| MaccError::Io {
-        path: path.to_string_lossy().into(),
-        action: "write supervisor pid file".into(),
-        source: e,
-    })
-}
-
-fn cleanup_pid_file_if_matches(path: &Path, pid: u32) -> Result<()> {
-    if let Some(existing) = read_pid_file(path)? {
-        if existing == pid {
-            let _ = fs::remove_file(path);
-        }
-    }
-    Ok(())
-}
-
-fn ensure_not_running(path: &Path) -> Result<()> {
-    if let Some(pid) = read_pid_file(path)? {
-        if is_pid_running(pid) {
-            return Err(MaccError::Validation(format!(
-                "supervisor is already running (pid {})",
-                pid
-            )));
-        }
-        let _ = fs::remove_file(path);
-    }
-    Ok(())
-}
-
-fn is_pid_running(pid: u32) -> bool {
-    ProcessCommand::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-fn send_signal(pid: u32, signal: &str) -> Result<()> {
-    let status = ProcessCommand::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| MaccError::Io {
-            path: "kill".into(),
-            action: format!("send {} to supervisor pid {}", signal, pid),
-            source: e,
-        })?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    Err(MaccError::Validation(format!(
-        "failed to send {} to supervisor pid {}",
-        signal, pid
-    )))
 }

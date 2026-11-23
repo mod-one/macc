@@ -41,15 +41,14 @@ pub fn requested(paths: &ProjectPaths) -> Result<bool> {
             && stall_run.as_deref() != Some(run.run_id.as_str())
     }))
 }
-pub async fn wait_for_operator_stop(paths: &ProjectPaths, attached: bool) -> Result<()> {
+pub async fn wait_for_operator_stop(
+    paths: &ProjectPaths,
+    attached: bool,
+    instance: &macc_core::supervisor::instance::Instance,
+) -> Result<()> {
     loop {
         // A storage problem does not authorize shutdown; normal monitoring reports it.
-        let stop = std::fs::read_to_string(paths.root.join(".macc/state/supervisor-stop.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|value| value["pid"].as_u64())
-            == Some(std::process::id() as u64);
-        if stop || (attached && requested(paths).unwrap_or(false)) {
+        if instance.stop_requested() || (attached && requested(paths).unwrap_or(false)) {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -109,11 +108,4 @@ mod tests {
             "supervisor stall recovery must keep monitoring"
         );
     }
-}
-
-pub fn request_stop(paths: &ProjectPaths, pid: u32) -> Result<()> {
-    super::report::write_json(
-        &paths.root.join(".macc/state/supervisor-stop.json"),
-        &serde_json::json!({"pid":pid,"requested_at":chrono::Utc::now().to_rfc3339()}),
-    )
 }
