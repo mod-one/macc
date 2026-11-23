@@ -8,9 +8,11 @@ use std::{
 
 pub fn compute_file_sha256(path: &Path) -> std::io::Result<String> {
     let content = fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&content);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(sha256(&content))
+}
+
+pub(super) fn sha256(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
 }
 
 pub fn compute_manifest_payload_hash(content: &str) -> String {

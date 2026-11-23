@@ -24,6 +24,15 @@ impl Drop for StagingDirectory {
     }
 }
 
+fn bundle_version(registry: bool, decisions: bool, sessions: bool) -> u32 {
+    match (registry, decisions, sessions) {
+        (true, _, _) => 4,
+        (_, true, _) => 3,
+        (_, _, true) => 2,
+        _ => 1,
+    }
+}
+
 pub fn create_save_bundle(
     paths: &ProjectPaths,
     name: &str,
@@ -186,7 +195,7 @@ pub(super) fn create_in(
 
     // 4. Copy task registry / state
     let registry_src = paths.macc_dir.join("automation").join("task");
-    if (include_prd || include_state) && registry_src.exists() {
+    if include_prd && registry_src.exists() {
         let registry_dest = tmp_save_dir.join("automation").join("task");
         fs::create_dir_all(registry_dest.parent().unwrap()).ok();
         if let Err(e) = copy_dir_all(&registry_src, &registry_dest, paths) {
@@ -198,8 +207,34 @@ pub(super) fn create_in(
             });
         }
         includes.prd = include_prd;
-        includes.automation_state = include_state;
+
         paths_meta.task_registry = Some("automation/task".to_string());
+    }
+
+    if include_state {
+        let (hash, findings) = super::registry::capture(paths, &tmp_save_dir)?;
+        findings_count += findings;
+        if findings > 0
+            && !opts.dry_run
+            && opts.handle_secrets == Some(SecretHandlingChoice::Exclude)
+        {
+            let path = tmp_save_dir.join(super::registry::PAYLOAD);
+            fs::remove_file(&path).map_err(|source| MaccError::Io {
+                path: path.display().to_string(),
+                action: "exclude coordinator registry".into(),
+                source,
+            })?;
+        } else {
+            if findings > 0
+                && !opts.dry_run
+                && opts.handle_secrets == Some(SecretHandlingChoice::Redact)
+            {
+                return Err(MaccError::Validation("MACC-SAVE-1003: Exclude the coordinator registry containing potential secrets or abort the save".into()));
+            }
+            hashes.task_registry = Some(hash);
+            paths_meta.task_registry = Some(super::registry::PAYLOAD.into());
+            includes.automation_state = true;
+        }
     }
 
     // 5. Copy logs
@@ -259,13 +294,11 @@ pub(super) fn create_in(
     if opts.dry_run {
         fs::remove_dir_all(&tmp_save_dir).ok();
         return Ok(SaveBundleManifest {
-            version: if decision_store.is_some() {
-                3
-            } else if session_store.is_some() {
-                2
-            } else {
-                1
-            },
+            version: bundle_version(
+                includes.automation_state,
+                decision_store.is_some(),
+                session_store.is_some(),
+            ),
             decision_store,
             session_store,
             kind: "macc.save_bundle".to_string(),
@@ -374,13 +407,11 @@ pub(super) fn create_in(
     // Write manifest
     let manifest_path = tmp_save_dir.join("manifest.yaml");
     let mut manifest = SaveBundleManifest {
-        version: if decision_store.is_some() {
-            3
-        } else if session_store.is_some() {
-            2
-        } else {
-            1
-        },
+        version: bundle_version(
+            includes.automation_state,
+            decision_store.is_some(),
+            session_store.is_some(),
+        ),
         decision_store,
         session_store,
         kind: "macc.save_bundle".to_string(),

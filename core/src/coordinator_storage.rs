@@ -321,6 +321,11 @@ impl JsonStorage {
     pub fn new(paths: CoordinatorStoragePaths) -> Self {
         Self { paths }
     }
+    pub(crate) fn replace_registry(&self, registry: &TaskRegistry) -> Result<()> {
+        ensure_parent_dir(&self.paths.registry_json_path)?;
+        let _guard = lock_json_registry(&self.paths.registry_json_path)?;
+        write_json_atomic(&self.paths.registry_json_path, registry)
+    }
 }
 
 impl CoordinatorStorage for JsonStorage {
@@ -370,10 +375,7 @@ impl CoordinatorStorage for JsonStorage {
         ensure_parent_dir(&self.paths.events_jsonl_path)?;
         ensure_parent_dir(&self.paths.cursor_json_path)?;
 
-        {
-            let _guard = lock_json_registry(&self.paths.registry_json_path)?;
-            write_json_atomic(&self.paths.registry_json_path, &snapshot.registry)?;
-        }
+        self.replace_registry(&snapshot.registry)?;
 
         let mut events_buf = String::new();
         for event in &snapshot.events {
@@ -1964,16 +1966,23 @@ impl SqliteStorage {
     fn load_registry_from_tables(&self, conn: &Connection) -> Result<TaskRegistry> {
         let mut registry = TaskRegistry::default();
         let mut stmt = conn
-            .prepare("SELECT payload_json FROM tasks ORDER BY task_id")
+            .prepare("SELECT task_id, payload_json FROM tasks ORDER BY task_id")
             .map_err(sql_err)?;
         let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(sql_err)?;
         for row in rows {
-            let raw = row.map_err(sql_err)?;
-            if let Ok(task) = serde_json::from_str::<Task>(&raw) {
-                registry.tasks.push(task);
+            let (id, raw) = row.map_err(sql_err)?;
+            let task = parse_task_payload(&id, &raw)?;
+            if task.id != id {
+                return Err(MaccError::Storage {
+                    backend: "sqlite",
+                    message: format!("Task ID in coordinator payload does not match row {id}"),
+                });
             }
+            registry.tasks.push(task);
         }
 
         let mut stmt = conn
@@ -1988,9 +1997,12 @@ impl SqliteStorage {
             .map_err(sql_err)?;
         for row in rows {
             let (resource, payload) = row.map_err(sql_err)?;
-            if let Ok(lock) = serde_json::from_str::<ResourceLock>(&payload) {
-                registry.resource_locks.insert(resource, lock);
-            }
+            let lock =
+                serde_json::from_str::<ResourceLock>(&payload).map_err(|e| MaccError::Storage {
+                    backend: "sqlite",
+                    message: format!("Invalid coordinator lock {resource}: {e}"),
+                })?;
+            registry.resource_locks.insert(resource, lock);
         }
         registry.updated_at = Some(now_iso_string());
         registry
@@ -2025,11 +2037,15 @@ impl SqliteStorage {
 }
 
 impl SqliteStorage {
-    /// The task registry alone, without the event log: what most readers need.
+    /// The task registry alone, without the event log.
     pub fn load_registry(&self) -> Result<TaskRegistry> {
         let conn = self.open()?;
         self.init_schema(&conn)?;
-        self.load_registry_with_conn(&conn)
+        // The registry spans metadata, tasks, runtime and locks. Read one revision.
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        let registry = self.load_registry_with_conn(&tx)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(registry)
     }
 
     fn load_registry_with_conn(&self, conn: &Connection) -> Result<TaskRegistry> {
@@ -2267,6 +2283,28 @@ impl CoordinatorStorage for SqliteStorage {
         self.init_schema(&conn)?;
         let tx = write_transaction(&mut conn)?;
 
+        let now = now_iso_string();
+        self.write_registry_rows(&tx, &snapshot.registry, &now)?;
+        self.write_snapshot_history(&tx, snapshot, &now)?;
+        tx.commit().map_err(sql_err)
+    }
+}
+
+impl SqliteStorage {
+    pub(crate) fn replace_registry(&self, registry: &TaskRegistry) -> Result<()> {
+        let mut conn = self.open()?;
+        self.init_schema(&conn)?;
+        let tx = write_transaction(&mut conn)?;
+        self.write_registry_rows(&tx, registry, &now_iso_string())?;
+        tx.commit().map_err(sql_err)
+    }
+
+    fn write_registry_rows(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        registry: &TaskRegistry,
+        now: &str,
+    ) -> Result<()> {
         // The coordinator saves the registry many times per tick while only a
         // task or two change: rewrite just the rows whose task changed.
         let stored_tasks: HashMap<String, String> = {
@@ -2279,8 +2317,7 @@ impl CoordinatorStorage for SqliteStorage {
             rows.collect::<std::result::Result<_, _>>()
                 .map_err(sql_err)?
         };
-        let kept: HashSet<&str> = snapshot
-            .registry
+        let kept: HashSet<&str> = registry
             .tasks
             .iter()
             .map(|task| task.id.as_str())
@@ -2298,18 +2335,13 @@ impl CoordinatorStorage for SqliteStorage {
         .map_err(sql_err)?;
         tx.execute("DELETE FROM resource_locks", [])
             .map_err(sql_err)?;
-        // Events are append-only — never delete them during snapshot save.
-        // IPC handlers write events concurrently; deleting + re-inserting
-        // creates a race window that loses events (including phase_results).
-        tx.execute("DELETE FROM cursors", []).map_err(sql_err)?;
         tx.execute("DELETE FROM jobs", []).map_err(sql_err)?;
 
-        let now = now_iso_string();
         // The tasks live in their own table; `registry_json` keeps the rest of
         // the registry, and is only rewritten when that changes.
         let registry_meta = TaskRegistry {
             tasks: Vec::new(),
-            ..snapshot.registry.clone()
+            ..registry.clone()
         };
         let registry_raw =
             serde_json::to_string(&registry_meta).map_err(|e| MaccError::Storage {
@@ -2324,7 +2356,7 @@ impl CoordinatorStorage for SqliteStorage {
         )
         .map_err(sql_err)?;
 
-        for task in &snapshot.registry.tasks {
+        for task in &registry.tasks {
             let task_id = task.id.clone();
             if task_id.is_empty() {
                 continue;
@@ -2333,7 +2365,7 @@ impl CoordinatorStorage for SqliteStorage {
             let title = task.title.clone().unwrap_or_default();
             let priority = task.priority.clone().unwrap_or_default();
             let tool = task.tool.clone().unwrap_or_default();
-            let task_updated = task.updated_at.as_deref().unwrap_or(now.as_str());
+            let task_updated = task.updated_at.as_deref().unwrap_or(now);
             let task_raw = serde_json::to_string(task).map_err(|e| MaccError::Storage {
                 backend: "sqlite",
                 message: format!("Failed to serialize task payload: {}", e),
@@ -2353,7 +2385,7 @@ impl CoordinatorStorage for SqliteStorage {
                     params![task_id, state, title, priority, tool, task_raw, task_updated],
                 )
                 .map_err(sql_err)?;
-                self.upsert_task_runtime_row(&tx, task, runtime_updated)?;
+                self.upsert_task_runtime_row(tx, task, runtime_updated)?;
             }
 
             if let Some(pid) = pid {
@@ -2400,7 +2432,7 @@ impl CoordinatorStorage for SqliteStorage {
             }
         }
 
-        for (resource, lock_value) in &snapshot.registry.resource_locks {
+        for (resource, lock_value) in &registry.resource_locks {
             let task_id = lock_value.task_id.as_str();
             let claim_id = if lock_value.claim_id.is_empty() {
                 format!("unclaimed-{}", task_id)
@@ -2432,6 +2464,19 @@ impl CoordinatorStorage for SqliteStorage {
             .map_err(sql_err)?;
         }
 
+        Ok(())
+    }
+
+    fn write_snapshot_history(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        snapshot: &CoordinatorSnapshot,
+        now: &str,
+    ) -> Result<()> {
+        tx.execute("DELETE FROM cursors", []).map_err(sql_err)?;
+        // Events are append-only — never delete them during snapshot save.
+        // IPC handlers write events concurrently; deleting + re-inserting
+        // creates a race window that loses events (including phase_results).
         for (idx, event) in snapshot.events.iter().enumerate() {
             let event_id = if event.event_id.is_empty() {
                 format!("event-{}", idx + 1)
@@ -2486,7 +2531,7 @@ impl CoordinatorStorage for SqliteStorage {
             let inode = cursor.inode.unwrap_or(0);
             let offset = i64::try_from(cursor.offset).unwrap_or(i64::MAX);
             let last_event_id = cursor.last_event_id.as_deref().unwrap_or("");
-            let updated_at = cursor.updated_at.as_deref().unwrap_or(now.as_str());
+            let updated_at = cursor.updated_at.as_deref().unwrap_or(now);
             tx.execute(
                 "INSERT INTO cursors (name, path, inode, offset, last_event_id, updated_at, payload_json)
                  VALUES ('coordinator', ?1, ?2, ?3, ?4, ?5, ?6)",
@@ -2495,7 +2540,6 @@ impl CoordinatorStorage for SqliteStorage {
             .map_err(sql_err)?;
         }
 
-        tx.commit().map_err(sql_err)?;
         Ok(())
     }
 }

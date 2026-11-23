@@ -132,6 +132,9 @@ impl Command for SaveCommand {
                         "-"
                     }
                 );
+                if manifest.includes.automation_state {
+                    println!("  ✓ coordinator task registry");
+                }
                 println!(
                     "  {} catalogs",
                     if manifest.includes.catalogs {
@@ -181,6 +184,9 @@ impl Command for SaveCommand {
                         if m.includes.coordinator_sessions {
                             incls.push("sessions");
                         }
+                        if m.includes.automation_state {
+                            incls.push("coordinator task registry");
+                        }
                         if m.includes.catalogs {
                             incls.push("catalogs");
                         }
@@ -222,6 +228,9 @@ impl Command for SaveCommand {
                         "-"
                     }
                 );
+                if manifest.includes.automation_state {
+                    println!("  ✓ coordinator task registry");
+                }
                 println!(
                     "  {} catalogs",
                     if manifest.includes.catalogs {

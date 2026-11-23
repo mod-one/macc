@@ -1,5 +1,5 @@
 use super::bundle::{compute_file_sha256, compute_manifest_payload_hash};
-mod files;
+pub(super) mod files;
 use super::manifest::{MatchStrength, SaveBundleManifest};
 use super::repository_identity::{compute_match_strength, get_repository_identity};
 use crate::{MaccError, ProjectPaths, Result};
@@ -170,6 +170,23 @@ pub(super) fn restore_from(
         restore_sessions,
         opts.include_logs,
     )?;
+    let registry = if manifest.includes.automation_state && !config_only {
+        let config = if manifest.includes.config {
+            super::sessions::payload(
+                &target_save_dir,
+                manifest.paths.config.as_deref().ok_or_else(|| {
+                    MaccError::Validation("Missing configuration path in bundle".into())
+                })?,
+            )?
+        } else {
+            paths.config_path.clone()
+        };
+        let store = super::registry::RegistryStore::resolve(paths, &config)?;
+        store.preflight(paths)?;
+        Some((store, super::registry::unpack(&target_save_dir, &manifest)?))
+    } else {
+        None
+    };
     let session_db = paths.macc_dir.join("memory.db");
     if restore_sessions && manifest.session_store.is_some() {
         files::destination("session database", &paths.root, &session_db, false)?;
@@ -244,6 +261,11 @@ pub(super) fn restore_from(
     }
     for section in sections {
         progress.run(section.name, &section.target, || section.restore(paths))?;
+    }
+    if let Some((store, registry)) = registry {
+        progress.run("coordinator registry", store.target(), || {
+            store.restore(&registry)
+        })?;
     }
     Ok(())
 }

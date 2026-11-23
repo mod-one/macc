@@ -45,10 +45,20 @@ pub struct SaveBundleManifest {
 
 impl SaveBundleManifest {
     pub(super) fn supported_format(&self) -> bool {
-        matches!(self.version, 1..=3)
+        let valid_version = match self.version {
+            1 | 2 => {
+                self.decision_store.is_none() && (self.version == 2) == self.session_store.is_some()
+            }
+            3 => self.decision_store.is_some(),
+            4 => {
+                self.includes.automation_state
+                    && self.paths.task_registry.as_deref() == Some(super::registry::PAYLOAD)
+                    && self.hashes.task_registry.is_some()
+            }
+            _ => false,
+        };
+        valid_version
             && self.kind == "macc.save_bundle"
-            && (self.version == 3 || ((self.version == 2) == self.session_store.is_some()))
-            && ((self.version == 3) == self.decision_store.is_some())
             && (self.session_store.is_none() || self.includes.coordinator_sessions)
     }
 }

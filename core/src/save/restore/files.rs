@@ -14,7 +14,12 @@ fn io_error(action: &str, path: &Path, source: io::Error) -> MaccError {
     }
 }
 
-pub(super) fn destination(section: &str, root: &Path, path: &Path, directory: bool) -> Result<()> {
+pub(in crate::save) fn destination(
+    section: &str,
+    root: &Path,
+    path: &Path,
+    directory: bool,
+) -> Result<()> {
     let relative = path.strip_prefix(root).map_err(|_| {
         MaccError::Validation(format!(
             "Restore {section} destination outside project: {}",
@@ -114,7 +119,7 @@ pub(super) fn plan(
                 name.path(&paths.macc_dir.join("restored-logs")),
             ),
             (
-                manifest.includes.prd || manifest.includes.automation_state,
+                manifest.includes.prd,
                 "task state",
                 "automation/task",
                 paths.macc_dir.join("automation/task"),

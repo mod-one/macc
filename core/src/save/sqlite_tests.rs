@@ -491,3 +491,65 @@ fn deletion_refuses_linked_bundle_and_linked_manifest() {
     assert!(bundle.join("manifest.yaml").is_symlink());
     assert!(outside.join("manifest.yaml").is_file());
 }
+
+#[test]
+fn state_only_save_requires_a_readable_coordinator_registry() {
+    let (_tmp, paths, saves) = setup();
+    let mut opts = options();
+    opts.only = Some("automation_state".into());
+    opts.no_sessions = true;
+    let storage = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+    // A stale mirror cannot stand in for a missing authoritative SQLite database.
+    fs::create_dir_all(storage.registry_json_path.parent().unwrap()).unwrap();
+    fs::write(&storage.registry_json_path, r#"{"tasks":[]}"#).unwrap();
+    assert!(bundle::create_in(&paths, "missing", &opts, &saves).is_err());
+    assert!(!storage.sqlite_path.exists());
+    assert!(!saves.join("missing").exists());
+
+    crate::coordinator_storage::coordinator_storage_import_json_to_sqlite(&paths).unwrap();
+    let db = rusqlite::Connection::open(storage.sqlite_path).unwrap();
+    db.execute("INSERT INTO tasks (task_id,state,payload_json,updated_at) VALUES ('A','merged','bad','now')", []).unwrap();
+    assert!(bundle::create_in(&paths, "broken", &opts, &saves).is_err());
+    assert!(!saves.join("broken").exists());
+}
+
+#[test]
+fn legacy_state_bundle_requires_an_actual_registry_before_restore() {
+    let (_tmp, paths, saves) = setup();
+    let mut manifest = save(&paths, &saves);
+    manifest.includes.automation_state = true;
+    manifest.paths.task_registry = Some("automation/task".into());
+    let dir = saves.join("full");
+    fs::create_dir_all(dir.join("automation/task")).unwrap();
+    manifest.hashes.manifest_payload =
+        compute_manifest_payload_hash(&serde_yaml::to_string(&manifest).unwrap());
+    fs::write(
+        dir.join("manifest.yaml"),
+        serde_yaml::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    super::integrity::write_checksums_file(&dir).unwrap();
+    let opts = RestoreOptions {
+        no_sessions: true,
+        ..restore_options()
+    };
+    let initial = "tools:\n  enabled: []\n# retain until preflight succeeds\n";
+    fs::write(&paths.config_path, initial).unwrap();
+    let err = restore::restore_from(&paths, "full", &opts, &saves).unwrap_err();
+    assert!(err.to_string().contains("Missing bundle payload"), "{err}");
+    assert_eq!(fs::read_to_string(&paths.config_path).unwrap(), initial);
+    fs::write(
+        dir.join("automation/task/task_registry.json"),
+        r#"{"tasks":[{"id":"legacy","state":"merged"}]}"#,
+    )
+    .unwrap();
+    super::integrity::write_checksums_file(&dir).unwrap();
+    restore::restore_from(&paths, "full", &opts, &saves).unwrap();
+    let registry = crate::coordinator::state::coordinator_state_registry_load(
+        &paths.root,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(registry["tasks"][0]["state"], "merged");
+}

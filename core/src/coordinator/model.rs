@@ -690,7 +690,8 @@ pub struct ResourceLock {
     pub task_id: String,
     #[serde(default)]
     pub claim_id: String,
-    #[serde(default)]
+    // Historical SQLite lock payloads use null for an unassigned worktree.
+    #[serde(default, deserialize_with = "deserialize_nullable_path")]
     pub worktree_path: String,
     #[serde(default)]
     pub locked_at: String,
@@ -746,6 +747,12 @@ pub struct PrdTaskInput {
 
 fn default_todo_state() -> String {
     "todo".to_string()
+}
+
+fn deserialize_nullable_path<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn deserialize_stringish<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
