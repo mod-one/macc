@@ -124,8 +124,16 @@ pub(super) fn restore_from(
     // Repository match validation
     let current_repo = get_repository_identity(&paths.root);
     let match_strength = compute_match_strength(&current_repo, &manifest.repository);
-    if match_strength == MatchStrength::None && !opts.yes {
-        return Err(MaccError::Validation("MACC-RESTORE-2002: Repository mismatch. Choose config-only restore or confirm with yes.".to_string()));
+    if match_strength == MatchStrength::None {
+        let reason = if manifest.repository.has_legacy_remote_hash() {
+            "This legacy bundle cannot establish a cross-checkout match because its Git remote path was case-folded."
+        } else {
+            "The saved repository identity does not match this project."
+        };
+        if !opts.yes && !opts.config_only {
+            return Err(MaccError::Validation(format!("MACC-RESTORE-2002: {reason} Choose --config-only to transfer settings or --yes to confirm a full cross-project restore.")));
+        }
+        tracing::warn!("{reason} Proceeding with the explicitly requested cross-project restore.");
     }
 
     for (section, relative, expected) in [

@@ -20,23 +20,58 @@ fn hash_string(s: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn normalize_git_url(url: &str) -> String {
-    let mut s = url.trim().to_ascii_lowercase();
-    if s.starts_with("https://") {
-        s = s["https://".len()..].to_string();
-    } else if s.starts_with("http://") {
-        s = s["http://".len()..].to_string();
-    } else if s.starts_with("ssh://") {
-        s = s["ssh://".len()..].to_string();
+// Only the scheme and host are case-insensitive. Keep the port, user and
+// repository path distinct, including the .git suffix of local directories.
+const REMOTE_HASH_VERSION: &str = "v2:";
+
+impl RepositoryIdentity {
+    pub(super) fn has_legacy_remote_hash(&self) -> bool {
+        !self.git_remote_url_hash.is_empty()
+            && !self.git_remote_url_hash.starts_with(REMOTE_HASH_VERSION)
     }
-    if s.starts_with("git@") {
-        s = s["git@".len()..].to_string();
+}
+
+fn normalized_authority(authority: &str) -> String {
+    match authority.rsplit_once('@') {
+        Some((user, host)) => format!("{user}@{}", host.to_ascii_lowercase()),
+        None => authority.to_ascii_lowercase(),
     }
-    s = s.replace(':', "/");
-    if s.ends_with(".git") {
-        s = s[..s.len() - 4].to_string();
+}
+
+fn normalize_git_url(root: &Path, remote: &str) -> String {
+    if let Some((scheme, rest)) = remote.split_once("://") {
+        if scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        {
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            return format!(
+                "url:{}://{}{}",
+                scheme.to_ascii_lowercase(),
+                normalized_authority(&rest[..end]),
+                &rest[end..]
+            );
+        }
     }
-    s
+    // In scp syntax the first colon outside an IPv6 literal separates the
+    // authority from the path. A slash before it identifies a local path.
+    let authority_end = remote.find(':').and_then(|first| {
+        let prefix = remote[..first].rsplit('@').next().unwrap_or_default();
+        if prefix.starts_with('[') {
+            remote.find("]:").map(|i| i + 1)
+        } else {
+            Some(first)
+        }
+    });
+    if let Some(i) = authority_end {
+        let authority = &remote[..i];
+        if !authority.is_empty() && !authority.contains(['/', '\\']) && !(cfg!(windows) && i == 1) {
+            return format!("scp:{}{}", normalized_authority(authority), &remote[i..]);
+        }
+    }
+    let path = root.join(remote);
+    format!("local:{}", path.canonicalize().unwrap_or(path).display())
 }
 
 fn get_git_remote_url(repo_root: &Path) -> Option<String> {
@@ -45,9 +80,10 @@ fn get_git_remote_url(repo_root: &Path) -> Option<String> {
         &["remote", "get-url", "origin"],
         "get remote url",
     ) {
-        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let raw = String::from_utf8(out.stdout).ok()?;
+        let url = raw.strip_suffix('\n').unwrap_or(&raw);
         if !url.is_empty() {
-            return Some(url);
+            return Some(url.to_owned());
         }
     }
     None
@@ -104,7 +140,12 @@ pub fn get_repository_identity(repo_root: &Path) -> RepositoryIdentity {
     let remote_url = get_git_remote_url(repo_root);
     let git_remote_url_hash = remote_url
         .as_ref()
-        .map(|url| hash_string(&normalize_git_url(url)))
+        .map(|url| {
+            format!(
+                "{REMOTE_HASH_VERSION}{}",
+                hash_string(&normalize_git_url(repo_root, url))
+            )
+        })
         .unwrap_or_default();
 
     let git_current_branch =
@@ -136,17 +177,84 @@ pub fn compute_match_strength(
     current: &RepositoryIdentity,
     manifest: &RepositoryIdentity,
 ) -> MatchStrength {
-    if !current.git_remote_url_hash.is_empty()
-        && current.git_remote_url_hash == manifest.git_remote_url_hash
-    {
-        MatchStrength::Strong
-    } else if current.root_name == manifest.root_name
-        && current.root_path_hash == manifest.root_path_hash
-    {
+    let same_checkout = current.root_name == manifest.root_name
+        && current.root_path_hash == manifest.root_path_hash;
+    if !manifest.git_remote_url_hash.is_empty() {
+        if manifest.has_legacy_remote_hash() {
+            // The original path case cannot be recovered from a legacy hash.
+            return if same_checkout {
+                MatchStrength::Medium
+            } else {
+                MatchStrength::None
+            };
+        }
+        if !current.git_remote_url_hash.is_empty() {
+            return if current.git_remote_url_hash == manifest.git_remote_url_hash {
+                MatchStrength::Strong
+            } else {
+                MatchStrength::None
+            };
+        }
+    }
+    if same_checkout {
         MatchStrength::Medium
     } else if current.root_name == manifest.root_name {
         MatchStrength::Weak
     } else {
         MatchStrength::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_case_is_insignificant_and_path_case_is_significant() {
+        let key = |url| normalize_git_url(Path::new("/checkout"), url);
+        for (first, same, different) in [
+            (
+                "HTTPS://Git.Example/A.git",
+                "https://git.example/A.git",
+                "https://git.example/a.git",
+            ),
+            (
+                "ssh://git@HOST:2222/A",
+                "ssh://git@host:2222/A",
+                "ssh://git@host:2222/a",
+            ),
+            (
+                "git@[ABCD::1]:Team/Repo",
+                "git@[abcd::1]:Team/Repo",
+                "git@[abcd::1]:team/Repo",
+            ),
+            ("HOST:Team]:v1", "host:Team]:v1", "host:team]:v1"),
+            (
+                "file:///Repos/Systems.git",
+                "FILE:///Repos/Systems.git",
+                "file:///Repos/systems.git",
+            ),
+        ] {
+            assert_eq!(key(first), key(same));
+            assert_ne!(key(first), key(different));
+        }
+    }
+
+    #[test]
+    fn legacy_hash_requires_independent_checkout_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut current = get_repository_identity(temp.path());
+        current.git_remote_url_hash = "v2:sha256:current".into();
+        let mut legacy = current.clone();
+        legacy.git_remote_url_hash = "sha256:case-folded".into();
+        assert_eq!(
+            compute_match_strength(&current, &legacy),
+            MatchStrength::Medium
+        );
+        legacy.root_path_hash = "another checkout".into();
+        assert_eq!(
+            compute_match_strength(&current, &legacy),
+            MatchStrength::None
+        );
     }
 }
