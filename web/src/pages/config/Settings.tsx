@@ -289,7 +289,7 @@ function MaxParallelPerToolField({
   value, enabledTools, onChange, help,
 }: { value: Record<string, number>; enabledTools: string[]; onChange: (v: Record<string, number>) => void; help?: string }) {
   const adjust = (tool: string, delta: number) => {
-    const current = value[tool] ?? 1;
+    const current = value[tool] ?? 0;
     onChange({ ...value, [tool]: Math.max(0, current + delta) });
   };
 
@@ -305,7 +305,7 @@ function MaxParallelPerToolField({
       <Label>Max Parallel Per Tool</Label>
       <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
         {enabledTools.map((tool, idx) => {
-          const count = value[tool] ?? 1;
+          const count = value[tool];
           return (
             <div
               key={tool}
@@ -319,8 +319,13 @@ function MaxParallelPerToolField({
               <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{tool}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <ArrowBtn onClick={() => adjust(tool, -1)} disabled={count === 0} label="Decrease">−</ArrowBtn>
-                <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', width: 20, textAlign: 'center', fontWeight: 500 }}>{count}</span>
+                <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', minWidth: 20, textAlign: 'center', fontWeight: 500 }}>{count === undefined ? 'Global limit' : count === 0 ? 'No new assignments' : count}</span>
                 <ArrowBtn onClick={() => adjust(tool, 1)} label="Increase">+</ArrowBtn>
+                {count !== undefined && <button type="button" onClick={() => {
+                  const next = { ...value };
+                  delete next[tool];
+                  onChange(next);
+                }}>Use global limit</button>}
               </div>
             </div>
           );
@@ -604,7 +609,7 @@ function AdvancedTab({ draft, update }: { draft: ApiConfigResponse; update: (p: 
           <ToolPriorityField value={draft.toolPriority} enabledTools={draft.enabledTools} onChange={(v) => update({ toolPriority: v })} help="↑↓ buttons reorder priority. Tools not listed use default order." />
         </FullWidth>
         <FullWidth>
-          <MaxParallelPerToolField value={draft.maxParallelPerTool as Record<string, number>} enabledTools={draft.enabledTools} onChange={(v) => update({ maxParallelPerTool: v })} help="Set the cap to 0 to stop new task assignments for a tool." />
+          <MaxParallelPerToolField value={draft.maxParallelPerTool as Record<string, number>} enabledTools={draft.enabledTools} onChange={(v) => update({ maxParallelPerTool: v })} help="Tools use the global limit until you set a per-tool cap. Set it to 0 to stop new assignments." />
         </FullWidth>
         <FullWidth>
           <ToolSpecializationsField value={draft.toolSpecializations as Record<string, string[]>} enabledTools={draft.enabledTools} onChange={(v) => update({ toolSpecializations: v })} help="Route task categories to specific tools. Empty = all tools handle all categories." />

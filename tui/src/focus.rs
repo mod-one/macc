@@ -240,9 +240,12 @@ pub(super) fn widget_input(state: &mut AppState, key: KeyCode) {
                 // ↓ / j — navigate to next tool
                 KeyCode::Down | KeyCode::Char('j') => state.tool_parallel_editor_select(true),
                 // ← / - — decrement count
-                KeyCode::Left | KeyCode::Char('-') => state.tool_parallel_editor_adjust(-1),
+                KeyCode::Left | KeyCode::Char('-') => state
+                    .edit_tool_parallel_limit(|limit| Some(limit.unwrap_or(0).saturating_sub(1))),
                 // → / + — increment count
-                KeyCode::Right | KeyCode::Char('+') => state.tool_parallel_editor_adjust(1),
+                KeyCode::Right | KeyCode::Char('+') => state
+                    .edit_tool_parallel_limit(|limit| Some(limit.unwrap_or(0).saturating_add(1))),
+                KeyCode::Char('g') => state.edit_tool_parallel_limit(|_| None),
                 // Enter / s — commit and exit
                 KeyCode::Enter | KeyCode::Char('s') => state.cancel_tool_parallel_editor(),
                 // Esc — cancel (changes already applied in-place; u restores the previous snapshot)

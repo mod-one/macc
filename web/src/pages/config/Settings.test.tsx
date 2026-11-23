@@ -269,7 +269,7 @@ describe('Settings page', () => {
     expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
   });
 
-  it('saves a zero concurrency cap for the selected tool', async () => {
+  it('saves zero and restores the global limit by removing only the selected override', async () => {
     const config = buildConfig({ enabledTools: ['tool-a', 'tool-b'], maxParallelPerTool: { 'tool-b': 3 } });
     const caps = { 'tool-a': 0, 'tool-b': 3 };
     getConfigMock.mockResolvedValue(config);
@@ -278,13 +278,23 @@ describe('Settings page', () => {
 
     await screen.findByText('Settings');
     fireEvent.click(screen.getByRole('button', { name: /Advanced/i }));
+    expect(screen.getByText('Global limit')).toBeInTheDocument();
     const decrease = screen.getAllByRole('button', { name: 'Decrease' })[0];
     fireEvent.click(decrease);
     expect(decrease).toBeDisabled();
+    expect(screen.getByText('No new assignments')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     await waitFor(() => expect(updateConfigMock).toHaveBeenCalledWith(
       expect.objectContaining({ maxParallelPerTool: caps }),
+    ));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Use global limit' })[0]);
+    expect(screen.getByText('Global limit')).toBeInTheDocument();
+    updateConfigMock.mockResolvedValue(config);
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(updateConfigMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ maxParallelPerTool: { 'tool-b': 3 } }),
     ));
   });
 

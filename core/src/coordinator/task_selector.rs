@@ -901,6 +901,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn per_tool_limit_only_restricts_global_capacity_when_configured() {
+        let registry = json!({"tasks": [
+            {"id":"ACTIVE","state":"in_progress","tool":"tool-a"},
+            {"id":"NEXT","state":"todo","tool":"tool-a"}
+        ]});
+        for (cap, ready) in [
+            (None, true),
+            (Some(0), false),
+            (Some(1), false),
+            (Some(2), true),
+        ] {
+            let config = TaskSelectorConfig {
+                default_tool: "tool-a".into(),
+                max_parallel: 3,
+                max_parallel_per_tool: cap.map(|n| ("tool-a".into(), n)).into_iter().collect(),
+                ..Default::default()
+            };
+            assert_eq!(
+                select_next_ready_task(&registry, &config).is_some(),
+                ready,
+                "cap {cap:?}"
+            );
+        }
+    }
+
+    #[test]
     fn testing_and_reviewing_keep_capacity_and_worktrees_reserved() {
         for phase in ["testing", "reviewing"] {
             let registry = json!({"tasks":[

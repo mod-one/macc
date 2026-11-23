@@ -8,6 +8,7 @@ fn tool_parallel_editor_allows_zero_and_reenabling_a_tool() {
     state.working_copy.as_mut().unwrap().tools.enabled = vec!["tool-a".into(), "tool-b".into()];
     state.goto_screen(Screen::Automation);
     state.start_tool_parallel_editor();
+    assert!(text(&render(&state, 160, 40)).contains("tool-a: Global limit"));
     for key in [
         KeyCode::Left,
         KeyCode::Char('-'),
@@ -18,14 +19,17 @@ fn tool_parallel_editor_allows_zero_and_reenabling_a_tool() {
     }
     assert_eq!(
         state.automation_field_display_value(4),
-        r#"{"tool-a":0,"tool-b":2}"#
+        r#"{"tool-a":0,"tool-b":1}"#
     );
+    assert!(text(&render(&state, 160, 40)).contains("tool-a: No new assignments"));
     handle_key(&mut state, KeyCode::Up);
     handle_key(&mut state, KeyCode::Char('+'));
     assert_eq!(
         state.automation_field_display_value(4),
-        r#"{"tool-a":1,"tool-b":2}"#
+        r#"{"tool-a":1,"tool-b":1}"#
     );
+    handle_key(&mut state, KeyCode::Char('g'));
+    assert_eq!(state.automation_field_display_value(4), r#"{"tool-b":1}"#);
 }
 
 #[test]

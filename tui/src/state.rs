@@ -3929,7 +3929,7 @@ impl AppState {
             1 => "Default git branch used when task.base_branch is not set (default: main).",
             2 => "Enter: edit ordered PRD queue; add files/directories, Space + arrows to reorder. Accept then s to save config. Empty queue uses legacy prd_file.",
             3 => "Tool priority order as comma-separated values, e.g. tool-a,tool-b,tool-c.",
-            4 => "Use 0 to stop new task assignments for a tool, e.g. {\"tool-a\":3,\"tool-b\":0}.",
+            4 => "Omit a tool to use the global limit. Use 0 to stop new task assignments, e.g. {\"tool-a\":3,\"tool-b\":0}.",
             5 => "Category routing as JSON object, e.g. {\"frontend\":[\"tool-b\",\"tool-c\"]}.",
             6 => "Total tasks to dispatch per run, 0 means no cap, unset uses default 10.",
             7 => "Maximum concurrent performer runs.",
@@ -4591,26 +4591,36 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         }
     }
 
-    /// Field 4 – adjust the parallel count for the currently selected tool by `delta`.
-    pub fn tool_parallel_editor_adjust(&mut self, delta: isize) {
-        let tool = {
-            let enabled = self
-                .working_copy
-                .as_ref()
-                .map(|wc| wc.tools.enabled.clone())
-                .unwrap_or_default();
-            enabled.into_iter().nth(self.tool_parallel_editor_index)
+    /// An absent override leaves the global concurrency limit in effect.
+    pub fn edit_tool_parallel_limit(&mut self, edit: impl FnOnce(Option<usize>) -> Option<usize>) {
+        let Some(config) = self.working_copy.as_ref() else {
+            return;
         };
-        let Some(tool) = tool else { return };
+        let Some(tool) = config
+            .tools
+            .enabled
+            .get(self.tool_parallel_editor_index)
+            .cloned()
+        else {
+            return;
+        };
+        let current = config
+            .automation
+            .coordinator
+            .as_ref()
+            .and_then(|c| c.max_parallel_per_tool.get(&tool))
+            .copied();
+        let next = edit(current);
+        if next == current {
+            return;
+        }
         self.snapshot_before_config_change();
         if let Some(coordinator) = self.coordinator_config_mut() {
-            let current = coordinator
-                .max_parallel_per_tool
-                .get(&tool)
-                .copied()
-                .unwrap_or(1);
-            let next = current.saturating_add_signed(delta);
-            coordinator.max_parallel_per_tool.insert(tool, next);
+            if let Some(limit) = next {
+                coordinator.max_parallel_per_tool.insert(tool, limit);
+            } else {
+                coordinator.max_parallel_per_tool.remove(&tool);
+            }
         }
     }
 

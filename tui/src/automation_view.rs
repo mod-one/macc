@@ -95,7 +95,7 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect, draft: &[(S
                         "[reorder — ↑↓ navigate, Space to grab]".to_string()
                     }
                 } else if source == 1 && field_idx == 4 && state.tool_parallel_editor_active {
-                    "[edit — ↑↓ select, ←→ adjust, Enter done]".to_string()
+                    "[edit — ↑↓ select, ←→ adjust, g global, Enter done]".to_string()
                 } else {
                     setting_value(state, source, field_idx)
                 }
@@ -215,11 +215,16 @@ pub(super) fn draw(f: &mut Frame, state: &AppState, body_area: Rect, draft: &[(S
             "↓/j  Next tool".to_string(),
             "←/−  Decrease (0 stops new task assignments)".to_string(),
             "→/+  Increase".to_string(),
+            "g    Use global limit".to_string(),
             "Enter/s  Exit editor".to_string(),
             String::new(),
         ];
         for (i, tool) in enabled.iter().enumerate() {
-            let count = counts.get(tool).copied().unwrap_or(1);
+            let count = match counts.get(tool) {
+                None => "Global limit".to_owned(),
+                Some(0) => "No new assignments".to_owned(),
+                Some(limit) => limit.to_string(),
+            };
             let marker = if i == sel { "› " } else { "  " };
             lines.push(format!("{}{}: {}", marker, tool, count));
         }
