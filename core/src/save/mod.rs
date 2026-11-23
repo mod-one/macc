@@ -4,6 +4,7 @@ mod integrity;
 pub mod logs;
 pub mod manifest;
 mod name;
+mod prd;
 mod registry;
 pub mod repository_identity;
 pub mod restore;

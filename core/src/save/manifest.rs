@@ -37,6 +37,8 @@ pub struct SaveBundleManifest {
     pub macc_version: String,
     pub repository: RepositoryIdentity,
     pub includes: SaveIncludes,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prd_files: Vec<SavedPrd>,
     /// Paths relative to the log root, in budget allocation order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs_omitted_by_size: Vec<String>,
@@ -48,22 +50,33 @@ pub struct SaveBundleManifest {
 
 impl SaveBundleManifest {
     pub(super) fn supported_format(&self) -> bool {
+        let has_registry = self.includes.automation_state
+            && self.paths.task_registry.as_deref() == Some(super::registry::PAYLOAD)
+            && self.hashes.task_registry.is_some();
         let valid_version = match self.version {
             1 | 2 => {
                 self.decision_store.is_none() && (self.version == 2) == self.session_store.is_some()
             }
             3 => self.decision_store.is_some(),
-            4 => {
-                self.includes.automation_state
-                    && self.paths.task_registry.as_deref() == Some(super::registry::PAYLOAD)
-                    && self.hashes.task_registry.is_some()
+            4 => has_registry,
+            5 => {
+                self.includes.prd
+                    && !self.prd_files.is_empty()
+                    && (!self.includes.automation_state || has_registry)
             }
             _ => false,
         };
         valid_version
+            && (self.version == 5 || self.prd_files.is_empty())
             && self.kind == "macc.save_bundle"
             && (self.session_store.is_none() || self.includes.coordinator_sessions)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedPrd {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

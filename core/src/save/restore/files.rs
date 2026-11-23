@@ -105,6 +105,23 @@ pub(super) fn plan(
         )?);
     }
     if !config_only {
+        let mut destinations = std::collections::HashSet::new();
+        for (index, prd) in manifest.prd_files.iter().enumerate() {
+            crate::project_ownership::validate_path(paths, &prd.path)?;
+            if !destinations.insert(&prd.path) {
+                return Err(MaccError::Validation(format!(
+                    "Duplicate PRD destination: {}",
+                    prd.path
+                )));
+            }
+            let source = crate::save::prd::verified_payload(bundle, index, prd)?;
+            sections.push(FileSection::file(
+                "PRD",
+                paths,
+                paths.root.join(&prd.path),
+                Payload::Copy(source),
+            )?);
+        }
         for (selected, section, source, target) in [
             (
                 manifest.includes.catalogs,
@@ -119,7 +136,7 @@ pub(super) fn plan(
                 name.path(&paths.macc_dir.join("restored-logs")),
             ),
             (
-                manifest.includes.prd,
+                manifest.includes.prd && manifest.version < 5,
                 "task state",
                 "automation/task",
                 paths.macc_dir.join("automation/task"),

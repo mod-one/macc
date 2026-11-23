@@ -21,7 +21,10 @@ impl Drop for StagingDirectory {
     }
 }
 
-fn bundle_version(registry: bool, decisions: bool, sessions: bool) -> u32 {
+fn bundle_version(prd: bool, registry: bool, decisions: bool, sessions: bool) -> u32 {
+    if prd {
+        return 5;
+    }
     match (registry, decisions, sessions) {
         (true, _, _) => 4,
         (_, true, _) => 3,
@@ -187,22 +190,17 @@ pub(super) fn create_in(
         includes.catalogs = true;
     }
 
-    // 4. Copy task registry / state
-    let registry_src = paths.macc_dir.join("automation").join("task");
-    if include_prd && registry_src.exists() {
-        let registry_dest = tmp_save_dir.join("automation").join("task");
-        if let Err(e) = copy_dir_all(&registry_src, &registry_dest, paths) {
-            fs::remove_dir_all(&tmp_save_dir).ok();
-            return Err(MaccError::Io {
-                path: registry_dest.to_string_lossy().into(),
-                action: "copy task registry directory".into(),
-                source: e,
-            });
-        }
-        includes.prd = include_prd;
-
-        paths_meta.task_registry = Some("automation/task".to_string());
-    }
+    let prd_files = if include_prd {
+        let config = paths_meta.config.as_ref().map(|p| tmp_save_dir.join(p));
+        super::prd::capture(
+            paths,
+            config.as_deref().unwrap_or(&paths.config_path),
+            &tmp_save_dir,
+        )?
+    } else {
+        Vec::new()
+    };
+    includes.prd = !prd_files.is_empty();
 
     if include_state {
         hashes.task_registry = Some(super::registry::capture(paths, &tmp_save_dir)?);
@@ -224,6 +222,7 @@ pub(super) fn create_in(
     let manifest_path = tmp_save_dir.join("manifest.yaml");
     let mut manifest = SaveBundleManifest {
         version: bundle_version(
+            includes.prd,
             includes.automation_state,
             decision_store.is_some(),
             session_store.is_some(),
@@ -238,6 +237,7 @@ pub(super) fn create_in(
         macc_version: crate::version().to_string(),
         repository: get_repository_identity(&paths.root),
         includes,
+        prd_files,
         logs_omitted_by_size,
         excludes: SaveExcludes {
             worktrees: true,
@@ -261,6 +261,7 @@ pub(super) fn create_in(
         return Ok(manifest);
     }
     manifest.version = bundle_version(
+        manifest.includes.prd,
         manifest.includes.automation_state,
         manifest.decision_store.is_some(),
         manifest.session_store.is_some(),

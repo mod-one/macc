@@ -132,6 +132,9 @@ impl Command for SaveCommand {
                         "-"
                     }
                 );
+                for prd in &manifest.prd_files {
+                    println!("  ✓ PRD {}", prd.path);
+                }
                 if manifest.includes.automation_state {
                     println!("  ✓ coordinator task registry");
                 }
@@ -182,6 +185,9 @@ impl Command for SaveCommand {
                         if m.includes.coordinator_sessions {
                             incls.push("sessions");
                         }
+                        if m.includes.prd {
+                            incls.push("PRDs");
+                        }
                         if m.includes.automation_state {
                             incls.push("coordinator task registry");
                         }
@@ -226,6 +232,9 @@ impl Command for SaveCommand {
                         "-"
                     }
                 );
+                for prd in &manifest.prd_files {
+                    println!("  ✓ PRD {}", prd.path);
+                }
                 if manifest.includes.automation_state {
                     println!("  ✓ coordinator task registry");
                 }

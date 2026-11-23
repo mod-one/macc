@@ -158,10 +158,12 @@ fn exclude(root: &Path, relative: &Path, manifest: &mut SaveBundleManifest) -> R
         manifest.includes.automation_state = false;
         manifest.paths.task_registry = None;
         manifest.hashes.task_registry = None;
-    } else if relative.starts_with("logs")
-        || relative.starts_with("catalogs")
-        || relative.starts_with("automation")
-    {
+    } else if relative.starts_with("prds") {
+        let path = root.join("prds");
+        fs::remove_dir_all(&path).map_err(|e| io_error(&path, e))?;
+        manifest.prd_files.clear();
+        manifest.includes.prd = false;
+    } else if relative.starts_with("logs") || relative.starts_with("catalogs") {
         remove(relative)?;
     } else {
         return Err(MaccError::Validation(
