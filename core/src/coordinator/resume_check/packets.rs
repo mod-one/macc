@@ -69,10 +69,9 @@ pub(super) fn load(root: &Path, r: &CheckRef) -> Result<Packet> {
 
 impl Packet {
     /// Only the candidate commit may change during a native handoff.
-    pub(super) fn successor(mut self, previous: &str, commit: &str) -> Self {
+    pub(super) fn advance_candidate(&mut self, previous: &str, commit: &str) {
         self.previous_packet = Some(previous.to_owned());
         self.binding["commit"] = serde_json::json!(commit);
-        self
     }
 }
 
@@ -82,7 +81,7 @@ pub(super) fn load_for_replay(
     task: &Task,
     reference: &mut CheckRef,
 ) -> Result<Packet> {
-    let packet = load(root, reference)?;
+    let mut packet = load(root, reference)?;
     let current = binding::version(root, prd, task, &packet.proposal)?;
     if current == packet.binding {
         return Ok(packet);
@@ -90,10 +89,10 @@ pub(super) fn load_for_replay(
     // The registry write may have been interrupted after the handoff. Accept only
     // a saved successor of this packet whose complete binding still matches.
     if let Some(commit) = current["commit"].as_str() {
-        let successor = packet.successor(&reference.id, commit);
-        if successor.binding == current {
+        packet.advance_candidate(&reference.id, commit);
+        if packet.binding == current {
             let mut next = reference.clone();
-            next.id = dm::digest(&successor);
+            next.id = dm::digest(&packet);
             if let Ok(saved) = load(root, &next) {
                 reference.id = next.id;
                 return Ok(saved);

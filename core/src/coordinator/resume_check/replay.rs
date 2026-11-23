@@ -96,12 +96,22 @@ fn check_task(
             let branch = CoordinatorConfigResolved::resolve(config).reference_branch;
             let original = packet.binding["commit"]
                 .as_str()
-                .ok_or_else(|| error("Missing candidate commit"))?;
-            let base =
-                repair_handoff::reconcile_task_from(root, &mut next, &branch, Some(original))?;
-            if base != original {
-                packet = packet.successor(&reference.id, &base);
-                reference.id = packets::save(root, &packet)?;
+                .ok_or_else(|| error("Missing candidate commit"))?
+                .to_owned();
+            let mut successor_id = None;
+            let base = repair_handoff::reconcile_task_from(
+                root,
+                &mut next,
+                &branch,
+                Some(&original),
+                |base| {
+                    packet.advance_candidate(&reference.id, base);
+                    successor_id = Some(packets::save(root, &packet)?);
+                    Ok(())
+                },
+            )?;
+            if let Some(id) = successor_id {
+                reference.id = id;
             }
             reference.observation_sha256 = None;
             verify_binding(root, prd, &next, &packet)?;

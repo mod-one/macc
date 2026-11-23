@@ -30,12 +30,12 @@ pub(super) fn git(path: &Path, args: &[&str]) -> Result<String> {
 /// Successful reconciliation keeps the branch and leaves unfinished work uncommitted.
 pub fn reconcile(root: &Path, task: &Task, reference: &str) -> Result<String> {
     let _roles = super::worktree_roles::lock(root)?;
-    reconcile_inner(root, task, reference, None)
+    reconcile_inner(root, task, reference, None, |_| Ok(()))
 }
 
 /// Supported recovery used by coordinator sync, unblock and supervisor repair.
 pub fn reconcile_task(root: &Path, task: &mut Task, reference: &str) -> Result<String> {
-    reconcile_task_from(root, task, reference, None)
+    reconcile_task_from(root, task, reference, None, |_| Ok(()))
 }
 
 pub(super) fn reconcile_task_from(
@@ -43,10 +43,11 @@ pub(super) fn reconcile_task_from(
     task: &mut Task,
     reference: &str,
     expected_head: Option<&str>,
+    before_checkout: impl FnOnce(&str) -> Result<()>,
 ) -> Result<String> {
     let _locks = super::worktree_roles::retained_locks(root, task)?;
     super::worktree_recovery::recover_reserved(root, task)?;
-    reconcile_inner(root, task, reference, expected_head)
+    reconcile_inner(root, task, reference, expected_head, before_checkout)
 }
 
 fn reconcile_inner(
@@ -54,6 +55,7 @@ fn reconcile_inner(
     task: &Task,
     reference: &str,
     expected_head: Option<&str>,
+    before_checkout: impl FnOnce(&str) -> Result<()>,
 ) -> Result<String> {
     let path = task.worktree_path().map(Path::new).ok_or_else(|| {
         MaccError::Validation(format!("Task {} has no retained worktree", task.id))
@@ -263,16 +265,19 @@ fn reconcile_inner(
         }
         Ok(())
     };
+    // Publish any restart data while the original candidate is still intact.
+    before_checkout(&base)?;
     let applied = apply(&["read-tree", &tree])
         .and_then(|_| apply(&["update-index", "--refresh"]))
         .and_then(|_| apply(&["read-tree", "-m", "-u", &tree, &merged]));
     let _ = std::fs::remove_file(&scratch);
     applied?;
+    // Once the new HEAD is visible to replay, its checkout and index must be ready.
+    git(path, &["read-tree", &base])?;
     git(
         path,
         &["update-ref", &format!("refs/heads/{branch}"), &base, &head],
     )?;
-    git(path, &["read-tree", &base])?;
     Ok(base)
 }
 

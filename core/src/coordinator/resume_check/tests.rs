@@ -402,6 +402,31 @@ fn a_custom_time_window_can_run_without_an_artifact_or_device() {
     }
 }
 
+// Capture the durable packets at Git's commit point, before control returns to MACC.
+#[cfg(unix)]
+fn snapshot_packets_at_handoff(root: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hooks = root.join("fixture-hooks");
+    fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("reference-transaction");
+    fs::write(
+        &hook,
+        r#"#!/bin/sh
+[ "$1" = committed ] || exit 0
+while read -r old new ref; do
+    if [ "$ref" = refs/heads/ai/fixture/worker ]; then
+        common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 1
+        cp -R "$common/../.macc/state/resume-checks" "$common/packets-at-handoff"
+    fi
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+}
+
 #[test]
 fn reconciliation_rechecks_the_retained_phase_on_its_new_commit() {
     for commit_specific in [false, true] {
@@ -448,16 +473,31 @@ fn reconciliation_rechecks_the_retained_phase_on_its_new_commit() {
         if commit_specific {
             project.report_at(&worker, &old_head);
         }
-        git(
-            root,
-            &[
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Independent task advanced main",
-            ],
-        );
+        fs::write(worker.join("unfinished.txt"), "retained work").unwrap();
+        fs::write(root.join("independent.txt"), "new reference content").unwrap();
+        git(root, &["add", "independent.txt"]);
+        git(root, &["commit", "-qm", "Independent task advanced main"]);
         let head = crate::git::head_commit(root).unwrap();
+        if !commit_specific {
+            // An unwritable successor must stop the handoff before checkout or ref movement.
+            let blocked = project.tasks().remove(0);
+            let check = blocked.task_runtime.resume_check.as_deref().unwrap();
+            let mut packet = packets::load(root, check).unwrap();
+            packet.advance_candidate(&previous, &head);
+            let id = crate::coordinator::decisions::digest(&packet);
+            let file = root
+                .join(".macc/state/resume-checks")
+                .join(format!("{}.json", id.strip_prefix("sha256:").unwrap()));
+            fs::create_dir(&file).unwrap();
+            let failed = project.replay();
+            assert_eq!(outcome(&failed).status, Status::Error);
+            assert_eq!(failed.task_runtime.resume_check.unwrap().id, previous);
+            assert_eq!(crate::git::head_commit(&worker).unwrap(), old_head);
+            assert!(!worker.join("independent.txt").exists());
+            fs::remove_dir(file).unwrap();
+        }
+        #[cfg(unix)]
+        snapshot_packets_at_handoff(root);
         let task = project.replay();
         assert_eq!(
             crate::git::head_commit(&worker).unwrap(),
@@ -469,24 +509,45 @@ fn reconciliation_rechecks_the_retained_phase_on_its_new_commit() {
         let packet = packets::load(root, check).unwrap();
         assert_eq!(packet.previous_packet.as_deref(), Some(previous.as_str()));
         assert_eq!(packet.binding["commit"], head);
+        // Restart from exactly the packets visible when Git moved the branch
+        // and the registry still pointed to the previous candidate.
+        #[cfg(unix)]
+        {
+            fs::rename(
+                root.join(".macc/state/resume-checks"),
+                root.join("after-replay"),
+            )
+            .unwrap();
+            fs::rename(
+                root.join(".git/packets-at-handoff"),
+                root.join(".macc/state/resume-checks"),
+            )
+            .unwrap();
+        }
+        state::coordinator_state_registry_save(root, &args, &registered).unwrap();
+        let recovered = project.replay();
+        assert_eq!(
+            recovered.task_runtime.resume_check.as_ref().unwrap().id,
+            check.id
+        );
         let resumed = if commit_specific {
             assert_eq!(task.state, "blocked");
             assert_eq!(outcome(&task).status, Status::Waiting);
-            // Simulate interruption between packet publication and registry publication.
-            state::coordinator_state_registry_save(root, &args, &registered).unwrap();
-            let recovered = project.replay();
             assert_eq!(outcome(&recovered).status, Status::Waiting);
-            assert_eq!(recovered.task_runtime.resume_check.unwrap().id, check.id);
             project.report_at(&worker, &head);
             project.replay()
         } else {
-            task
+            recovered
         };
         assert_eq!(
             outcome(&resumed).status,
             Status::Ready,
             "{:?}",
             outcome(&resumed)
+        );
+        assert_eq!(
+            fs::read_to_string(worker.join("unfinished.txt")).unwrap(),
+            "retained work"
         );
         assert_eq!(resumed.state, "testing");
         assert!(resumed.external_block_is_cleared());
