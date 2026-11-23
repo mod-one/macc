@@ -187,7 +187,7 @@ const Skills: React.FC = () => {
           : config.selectedMcp;
 
       try {
-        await saveConfigSelection({ selectedSkills: nextSkills, selectedMcp: nextMcp });
+        await saveConfigSelection({ revision: config.revision, selectedSkills: nextSkills, selectedMcp: nextMcp });
       } catch (saveError) {
         setError(formatError(saveError));
       } finally {
@@ -215,7 +215,7 @@ const Skills: React.FC = () => {
     );
 
     try {
-      await saveConfigSelection({ selectedSkills: nextSkills, selectedMcp: nextMcp });
+      await saveConfigSelection({ revision: config.revision, selectedSkills: nextSkills, selectedMcp: nextMcp });
       setRemoveCandidate(null);
     } catch (saveError) {
       setError(formatError(saveError));

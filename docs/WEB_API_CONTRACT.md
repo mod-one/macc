@@ -337,6 +337,7 @@ Purpose: read the effective canonical configuration.
 Response 200:
 ```json
 {
+  "revision": "<opaque revision>",
   "version": "v1",
   "enabledTools": ["codex", "claude"],
   "toolConfig": {},
@@ -366,6 +367,7 @@ Purpose: update and persist the canonical configuration.
 Request body:
 ```json
 {
+  "revision": "<revision from GET or the last successful PUT>",
   "quiet": true,
   "offline": false,
   "webPort": 3450,
@@ -373,7 +375,7 @@ Request body:
 }
 ```
 
-Response 200: same shape as `GET /api/v1/config`.
+A successful update returns the saved configuration and its revision. Each PUT requires the revision on which the draft was based. A missing revision returns HTTP 400. A stale revision returns HTTP 409 (`config_revision_conflict`). Keep the draft for review and load the current configuration before submitting a new edit.
 
 ### POST `/api/v1/config/standards-preview`
 

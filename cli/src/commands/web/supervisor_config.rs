@@ -24,7 +24,7 @@ mod supervisor_tests {
     fn config_api_exposes_and_persists_supervisor_without_changing_coordinator() {
         let mut canonical = CanonicalConfig::default();
         let before = canonical.automation.coordinator.clone();
-        let mut response = ApiConfigResponse::from(canonical.clone());
+        let mut response = ApiConfigResponse::try_from(canonical.clone()).unwrap();
         assert!(!response.supervisor.tests_enabled);
         assert_eq!(
             response.supervisor_fields.len(),
@@ -40,12 +40,13 @@ mod supervisor_tests {
         canonical.validate().unwrap();
         assert_eq!(canonical.automation.coordinator, before);
         assert_eq!(canonical.automation.supervisor, Some(response.supervisor));
-        let request: ApiConfigUpdateRequest =
-            serde_json::from_value(serde_json::json!({"supervisor":{"max_repair_rounds":0}}))
-                .unwrap();
+        let request: ApiConfigUpdateRequest = serde_json::from_value(
+            serde_json::json!({"revision":response.revision,"supervisor":{"max_repair_rounds":0}}),
+        )
+        .unwrap();
         assert!(apply_update(&mut canonical, &request, &[]).is_err());
         let partial: ApiConfigUpdateRequest = serde_json::from_value(
-            serde_json::json!({"supervisor":{"ai_verification_enabled":false}}),
+            serde_json::json!({"revision":response.revision,"supervisor":{"ai_verification_enabled":false}}),
         )
         .unwrap();
         apply_update(&mut canonical, &partial, &[]).unwrap();

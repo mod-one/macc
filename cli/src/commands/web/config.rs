@@ -56,24 +56,28 @@ pub(super) async fn update_config_handler(
         macc_core::catalog::mandatory_skill_ids(&state.paths).map_err(ApiError::from)?;
     let catalog =
         macc_core::catalog::load_skills_catalog_with_local(&state.paths).map_err(ApiError::from)?;
-    let canonical = macc_core::config::transaction::update(&state.paths, None, |canonical| {
-        if let Some(ids) = &request.selected_skills {
-            for id in ids.iter().filter(|id| {
-                !canonical
-                    .selections
-                    .as_ref()
-                    .is_some_and(|selections| selections.skills.contains(id))
-            }) {
-                if let Some(entry) = catalog.entries.iter().find(|entry| &entry.id == id) {
-                    macc_core::catalog::availability::ensure_selectable(entry)?;
+    let canonical = macc_core::config::transaction::update(
+        &state.paths,
+        Some(&request.revision),
+        |canonical| {
+            if let Some(ids) = &request.selected_skills {
+                for id in ids.iter().filter(|id| {
+                    !canonical
+                        .selections
+                        .as_ref()
+                        .is_some_and(|selections| selections.skills.contains(id))
+                }) {
+                    if let Some(entry) = catalog.entries.iter().find(|entry| &entry.id == id) {
+                        macc_core::catalog::availability::ensure_selectable(entry)?;
+                    }
                 }
             }
-        }
-        apply_update(canonical, &request, &mandatory_skills)?;
-        Ok(())
-    })
+            apply_update(canonical, &request, &mandatory_skills)?;
+            Ok(())
+        },
+    )
     .map_err(ApiError::from)?;
-    let mut response = response_from_canonical(canonical, mandatory_skills);
+    let mut response = response_from_canonical(canonical, mandatory_skills)?;
     response.supervisor_readiness =
         supervisor_config::readiness(&state.paths, &response.supervisor);
     Ok(Json(response))
@@ -171,12 +175,16 @@ fn tool_title(tool_id: &str) -> String {
         .collect()
 }
 
-impl From<CanonicalConfig> for ApiConfigResponse {
-    fn from(config: CanonicalConfig) -> Self {
+impl TryFrom<CanonicalConfig> for ApiConfigResponse {
+    type Error = macc_core::MaccError;
+
+    fn try_from(config: CanonicalConfig) -> Result<Self, Self::Error> {
+        let revision = macc_core::config::transaction::revision(&config)?;
         let selections = config.selections.unwrap_or_default();
         let ralph = config.automation.ralph;
         let coordinator = config.automation.coordinator;
-        Self {
+        Ok(Self {
+            revision,
             supervisor: config.automation.supervisor.clone().unwrap_or_default(),
             supervisor_fields: macc_core::supervisor::settings::FIELDS
                 .iter()
@@ -306,7 +314,7 @@ impl From<CanonicalConfig> for ApiConfigResponse {
                 .and_then(|cfg| cfg.destructive_actions.clone()),
             requirements_detected: false,
             managed_environment_warnings: Vec::new(),
-        }
+        })
     }
 }
 
@@ -315,19 +323,19 @@ fn config_response_with_mandatory(
     canonical: CanonicalConfig,
 ) -> macc_core::Result<ApiConfigResponse> {
     let mandatory_skills = macc_core::catalog::mandatory_skill_ids(paths)?;
-    Ok(response_from_canonical(canonical, mandatory_skills))
+    response_from_canonical(canonical, mandatory_skills)
 }
 
 fn response_from_canonical(
     canonical: CanonicalConfig,
     mandatory_skills: Vec<String>,
-) -> ApiConfigResponse {
-    let mut response = ApiConfigResponse::from(canonical);
+) -> macc_core::Result<ApiConfigResponse> {
+    let mut response = ApiConfigResponse::try_from(canonical)?;
     response.selected_skills.extend(mandatory_skills.clone());
     response.selected_skills.sort();
     response.selected_skills.dedup();
     response.mandatory_skills = mandatory_skills;
-    response
+    Ok(response)
 }
 
 fn apply_update(

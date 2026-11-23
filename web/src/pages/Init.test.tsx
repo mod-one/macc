@@ -35,6 +35,7 @@ vi.mock('react-router-dom', async () => {
 
 function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigResponse {
   return {
+    revision: 'fixture-revision',
     version: 'v1',
     enabledTools: ['codex', 'claude'],
     toolConfig: {

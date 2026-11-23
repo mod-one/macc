@@ -237,7 +237,8 @@ const Standards: React.FC = () => {
     variant: 'success',
   });
 
-  const baselineRef = React.useRef<{ path: string | null; inline: StandardsMap }>({
+  const baselineRef = React.useRef<{ revision: string; path: string | null; inline: StandardsMap }>({
+    revision: '',
     path: null,
     inline: {},
   });
@@ -247,6 +248,7 @@ const Standards: React.FC = () => {
     const presetId = pickClosestPreset(nextInline);
 
     baselineRef.current = {
+      revision: config.revision,
       path: config.standardsPath,
       inline: nextInline,
     };
@@ -402,6 +404,7 @@ const Standards: React.FC = () => {
 
     try {
       const updated = await updateConfig({
+        revision: baselineRef.current.revision,
         standardsPath: currentPath,
         standardsInline: effectiveInline,
       });

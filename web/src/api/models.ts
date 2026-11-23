@@ -351,6 +351,7 @@ export interface SupervisorField {
 }
 
 export interface ApiConfigResponse {
+  revision: string;
   supervisor?: SupervisorConfig;
   supervisorFields?: SupervisorField[];
   supervisorReadiness?: string[];
@@ -417,6 +418,7 @@ export interface ApiConfigResponse {
 }
 
 export interface ApiConfigUpdateRequest {
+  revision: string;
   supervisor?: SupervisorConfig;
   version?: string | null;
   enabledTools?: string[];

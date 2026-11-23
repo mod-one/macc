@@ -25,6 +25,7 @@ vi.mock('../../api/client', () => ({
 
 function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigResponse {
   return {
+    revision: 'fixture-revision',
     version: null,
     enabledTools: [],
     toolConfig: {},

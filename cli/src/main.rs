@@ -1187,7 +1187,7 @@ fn init_tracing(verbose: bool, protocol_stdio: bool) {
 fn get_exit_code(err: &MaccError) -> i32 {
     match err {
         MaccError::ApplyPreparation { source, .. } => get_exit_code(source),
-        MaccError::Validation(_) => 1,
+        MaccError::Validation(_) | MaccError::ConfigRevisionConflict => 1,
         MaccError::NotProcessOwner { .. } => 14,
         MaccError::UserScopeNotAllowed(_) => 2,
         MaccError::Io { .. } => 3,

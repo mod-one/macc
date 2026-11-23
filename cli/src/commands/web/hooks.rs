@@ -55,9 +55,7 @@ pub(super) async fn inspect(body: Bytes) -> Result<Json<serde_json::Value>, ApiE
 }
 
 fn api_error(error: macc_core::MaccError) -> ApiError {
-    if matches!(&error, macc_core::MaccError::Validation(message)
-        if message == "Configuration revision conflict; reload and review your draft")
-    {
+    if matches!(error, macc_core::MaccError::ConfigRevisionConflict) {
         ApiError::new(
             axum::http::StatusCode::CONFLICT,
             super::errors::WEB_ERR_REGISTRY_CONFLICT,

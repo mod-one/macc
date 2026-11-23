@@ -26,9 +26,7 @@ pub fn update(
     };
     if let Some(revision) = expected {
         if revision != self::revision(&config)? {
-            return Err(MaccError::Validation(
-                "Configuration revision conflict; reload and review your draft".into(),
-            ));
+            return Err(MaccError::ConfigRevisionConflict);
         }
     }
     edit(&mut config)?;

@@ -25,6 +25,7 @@ vi.mock('../../api/client', () => ({
 
 function buildConfig(): ApiConfigResponse {
   return {
+    revision: 'fixture-revision',
     enabledTools: ['codex'],
     toolConfig: {
       codex: {

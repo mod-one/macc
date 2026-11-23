@@ -684,6 +684,7 @@ const Tools: React.FC = () => {
     try {
       const updated = normalizeConfigResponse(
         await updateConfig({
+          revision: config.revision,
           enabledTools: Array.from(draftEnabledTools).sort((a, b) => a.localeCompare(b)),
           toolConfig: cloneJson(draftToolConfig),
         }),

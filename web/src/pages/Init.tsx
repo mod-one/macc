@@ -441,6 +441,7 @@ const Init: React.FC = () => {
     setSaveError(null);
     try {
       await updateConfig({
+        revision: config.revision,
         enabledTools: Array.from(selectedTools).sort((left, right) => left.localeCompare(right)),
         toolConfig: config.toolConfig,
         toolSettings: config.toolSettings,

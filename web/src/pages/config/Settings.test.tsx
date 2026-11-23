@@ -3,25 +3,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiConfigResponse } from '../../api/models';
 import { MemoryRouter } from 'react-router-dom';
 import Settings from './Settings';
+import { ApiClientError } from '../../api/client';
 
 const getConfigMock = vi.fn();
 const updateConfigMock = vi.fn();
 
-vi.mock('../../api/client', () => ({
+vi.mock('../../api/client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../api/client')>(),
   getConfig: (...args: unknown[]) => getConfigMock(...args),
   updateConfig: (...args: unknown[]) => updateConfigMock(...args),
-  ApiClientError: class ApiClientError extends Error {
-    envelope = {
-      error: {
-        code: 'MACC-WEB-0000',
-        message: 'Mock error',
-      },
-    };
-  },
 }));
 
 function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigResponse {
   return {
+    revision: 'fixture-revision',
     version: null,
     enabledTools: [],
     toolConfig: {},
@@ -190,7 +185,7 @@ describe('Settings page', () => {
 
   it('saves changes via updateConfig and shows success toast', async () => {
     const initial = buildConfig({ offline: false });
-    const saved = buildConfig({ offline: true });
+    const saved = buildConfig({ offline: true, revision: 'next-revision' });
     getConfigMock.mockResolvedValue(initial);
     updateConfigMock.mockResolvedValue(saved);
     renderPage();
@@ -203,6 +198,31 @@ describe('Settings page', () => {
       expect(updateConfigMock).toHaveBeenCalledTimes(1);
     });
     expect(await screen.findByText('Settings saved')).toBeInTheDocument();
+    expect(updateConfigMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ revision: initial.revision }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Offline mode/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(updateConfigMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ revision: saved.revision })));
+
+  });
+
+  it('keeps raw edits and uses the loaded revision when another client has saved', async () => {
+    getConfigMock.mockResolvedValue(buildConfig());
+    updateConfigMock.mockRejectedValue(new ApiClientError(409, {
+      error: { code: 'config_revision_conflict', category: 'Conflict', message: 'Settings changed', retryable: false },
+    }));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Raw JSON/i }));
+    const editor = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const fields = JSON.parse(editor.value);
+    expect(fields.revision).toBeUndefined();
+    fireEvent.change(editor, { target: { value: JSON.stringify({ ...fields, webPort: 5678, revision: 'copied-token' }) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply JSON' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your draft is still here');
+    expect(JSON.parse(editor.value).webPort).toBe(5678);
+    expect(updateConfigMock).toHaveBeenCalledWith(expect.objectContaining({ revision: 'fixture-revision', webPort: 5678 }));
+    expect(getConfigMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
   });
 
   it('shows error toast when save fails', async () => {

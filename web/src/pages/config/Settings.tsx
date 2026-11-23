@@ -768,14 +768,19 @@ function AdminTab({ draft, update }: { draft: ApiConfigResponse; update: (p: Par
   );
 }
 
+function editableSettingsJson(config: ApiConfigResponse): string {
+  const fields = Object.entries(config).filter(([key]) => key !== 'revision');
+  return JSON.stringify(Object.fromEntries(fields), null, 2);
+}
+
 function RawTab({ config, onApplyRaw }: { config: ApiConfigResponse; onApplyRaw: (raw: string) => void }) {
-  const [rawText, setRawText] = useState(() => JSON.stringify(config, null, 2));
+  const [rawText, setRawText] = useState(() => editableSettingsJson(config));
   const [parseError, setParseError] = useState<string | null>(null);
   const [prevConfig, setPrevConfig] = useState(config);
 
   if (config !== prevConfig) {
     setPrevConfig(config);
-    setRawText(JSON.stringify(config, null, 2));
+    setRawText(editableSettingsJson(config));
     setParseError(null);
   }
 
@@ -901,6 +906,7 @@ function sectionForKey(key: string): SettingsSection {
 const Settings: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState<ApiConfigResponse | null>(null);
   const [draft, setDraft] = useState<ApiConfigResponse | null>(null);
@@ -940,7 +946,7 @@ const Settings: React.FC = () => {
   const handleDiscard = useCallback(() => { setDraft(config); }, [config]);
 
   const handleSave = useCallback(async () => {
-    if (!draft) return;
+    if (!draft || !config) return;
     const problems = supervisorErrors(draft.supervisor);
     if (problems.length) {
       setToast({ open: true, title: 'Invalid supervisor settings', description: problems.join('; '), variant: 'error' });
@@ -948,21 +954,25 @@ const Settings: React.FC = () => {
     }
     setSaving(true);
     try {
-      const updated = normalizeConfigResponse(await updateConfig(draft as ApiConfigUpdateRequest));
+      const updated = normalizeConfigResponse(await updateConfig({ ...draft, revision: config.revision }));
       setConfig(updated);
       setDraft(updated);
       setToast({ open: true, title: 'Settings saved', variant: 'success' });
     } catch (err) {
+      if (err instanceof ApiClientError && err.envelope.error.code === 'config_revision_conflict') {
+        setConflict(true);
+        return;
+      }
       setToast({ open: true, title: 'Failed to save', description: formatError(err), variant: 'error' });
     } finally {
       setSaving(false);
     }
-  }, [draft]);
+  }, [draft, config]);
 
   const handleApplyRaw = useCallback((raw: string) => {
     try {
       const parsed = normalizeConfigResponse(JSON.parse(raw) as ApiConfigResponse);
-      setDraft(parsed);
+      setDraft(prev => prev && { ...parsed, revision: prev.revision });
     } catch { /* handled in RawTab */ }
   }, []);
 
@@ -980,10 +990,18 @@ const Settings: React.FC = () => {
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {isDirty && <DiscardBtn onClick={handleDiscard} />}
-          <SaveBtn onClick={handleSave} disabled={!isDirty || saving || supervisorErrors(draft.supervisor).length > 0} loading={saving} />
+          {isDirty && !conflict && <DiscardBtn onClick={handleDiscard} />}
+          <SaveBtn onClick={handleSave} disabled={!isDirty || saving || conflict || supervisorErrors(draft.supervisor).length > 0} loading={saving} />
         </div>
       </div>
+
+      {conflict && (
+        <div role="alert">
+          Settings changed since you opened this page. Your draft is still here.
+          Copy any edits you want to keep before loading the latest settings.
+          <button type="button" onClick={() => window.location.reload()}>Discard draft and load latest settings</button>
+        </div>
+      )}
 
       {/* Two-column layout */}
       <div style={{ display: 'grid', gridTemplateColumns: '156px 1fr', gap: 24, alignItems: 'start' }}>

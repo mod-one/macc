@@ -271,6 +271,16 @@ impl From<MaccError> for ApiError {
                 response.body.error.preparation = Some(report);
                 response
             }
+            MaccError::ConfigRevisionConflict => ApiError::new(
+                StatusCode::CONFLICT,
+                "config_revision_conflict",
+                "Conflict",
+                err.to_string(),
+                false,
+                Some("Load the latest configuration and review your edits before saving".into()),
+                None,
+                None,
+            ),
             MaccError::Validation(message) => ApiError::new(
                 StatusCode::BAD_REQUEST,
                 WEB_ERR_VALIDATION,

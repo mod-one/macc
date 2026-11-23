@@ -81,6 +81,9 @@ pub enum MaccError {
         source: serde_yaml::Error,
     },
 
+    #[error("Configuration revision conflict; reload and review your draft")]
+    ConfigRevisionConflict,
+
     #[error("Validation error: {0}")]
     Validation(String),
 

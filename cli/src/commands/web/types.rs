@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiConfigResponse {
+    pub revision: String,
     #[serde(default)]
     pub supervisor: macc_core::supervisor::SupervisorConfig,
     #[serde(default)]
@@ -162,6 +163,7 @@ pub(crate) struct ApiConfigResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiConfigUpdateRequest {
+    pub revision: String,
     pub supervisor: Option<serde_json::Value>,
     /// Optional schema or config version to persist.
     pub version: Option<String>,

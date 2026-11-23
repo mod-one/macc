@@ -1192,6 +1192,7 @@ async fn audit_log_entry_includes_expected_fields_for_put_request() {
     );
     let app = build_web_router(state);
 
+    let revision = config_revision(&app).await;
     let response = app
         .oneshot(
             Request::builder()
@@ -1200,6 +1201,7 @@ async fn audit_log_entry_includes_expected_fields_for_put_request() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "revision": revision,
                         "webPort": 4567,
                         "quiet": true
                     })
@@ -1223,7 +1225,7 @@ async fn audit_log_entry_includes_expected_fields_for_put_request() {
     assert_eq!(entry["inputs_summary"]["body"]["kind"], "json-object");
     assert_eq!(
         entry["inputs_summary"]["body"]["keys"],
-        serde_json::json!(["quiet", "webPort"])
+        serde_json::json!(["quiet", "revision", "webPort"])
     );
 }
 
@@ -3993,6 +3995,85 @@ async fn catalog_mcp_available_includes_local_project_catalog_entries() {
     assert_eq!(local_mcp["source"]["kind"], "git");
 }
 
+async fn config_revision(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn config_put_requires_the_loaded_revision_and_preserves_newer_yaml() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write_test_config(root);
+    let app = build_web_router(test_web_state(
+        root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    ));
+    let put = |body: serde_json::Value| {
+        app.clone().oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+    let path = ProjectPaths::from_root(root).config_path;
+    let revision = config_revision(&app).await;
+    let response = put(serde_json::json!({"revision":revision, "webPort":4567}))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let saved = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+    assert_ne!(saved["revision"], revision);
+    assert_eq!(saved["revision"], config_revision(&app).await);
+
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        put(serde_json::json!({"revision":revision, "quiet":true}))
+            .await
+            .unwrap()
+            .status(),
+        axum::http::StatusCode::CONFLICT
+    );
+    assert_eq!(
+        put(serde_json::json!({"quiet":true}))
+            .await
+            .unwrap()
+            .status(),
+        axum::http::StatusCode::BAD_REQUEST
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    write_test_config_with_port(root, 8765);
+    let manual_edit = fs::read(&path).unwrap();
+    assert_eq!(
+        put(serde_json::json!({"revision":saved["revision"], "webPort":4567}))
+            .await
+            .unwrap()
+            .status(),
+        axum::http::StatusCode::CONFLICT
+    );
+    assert_eq!(fs::read(path).unwrap(), manual_edit);
+}
+
 #[tokio::test]
 async fn config_put_endpoint_updates_config_file() {
     let root = temp_root("config-put");
@@ -4000,6 +4081,7 @@ async fn config_put_endpoint_updates_config_file() {
     write_test_config(&root);
     let state = test_web_state(&root, Arc::new(TestEngine::with_fixtures()), WebAssetsMode::Embedded);
     let app = build_web_router(state);
+    let revision = config_revision(&app).await;
     let response = app
         .oneshot(
             Request::builder()
@@ -4008,6 +4090,7 @@ async fn config_put_endpoint_updates_config_file() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "revision": revision,
                         "webPort": 4567,
                         "quiet": true,
                         "selectedSkills": ["macc-performer"]
@@ -4103,13 +4186,14 @@ async fn config_put_endpoint_creates_backup_before_write() {
     let original = fs::read_to_string(&paths.config_path).expect("read original");
     let state = test_web_state(&root, Arc::new(TestEngine::with_fixtures()), WebAssetsMode::Embedded);
     let app = build_web_router(state);
+    let revision = config_revision(&app).await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/config")
                 .method("PUT")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "webPort": 5678 }).to_string()))
+                .body(Body::from(serde_json::json!({ "revision": revision, "webPort": 5678 }).to_string()))
                 .expect("request"),
         )
         .await
@@ -5594,7 +5678,7 @@ async fn config_rejects_new_unavailable_skill_and_allows_removing_an_existing_se
     let app=build_web_router(state);
     let original=fs::read(&paths.config_path).unwrap();
     let response=app.clone().oneshot(Request::builder().uri("/api/v1/config").method("PUT")
-        .header("content-type","application/json").body(Body::from(r#"{"selectedSkills":["unavailable-fixture"]}"#)).unwrap()).await.unwrap();
+        .header("content-type","application/json").body(Body::from(serde_json::json!({"revision":config_revision(&app).await,"selectedSkills":["unavailable-fixture"]}).to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status(),axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(fs::read(&paths.config_path).unwrap(),original);
     // A pre-existing selection is preserved by unrelated updates; explicit removal remains possible.
@@ -5602,8 +5686,10 @@ async fn config_rejects_new_unavailable_skill_and_allows_removing_an_existing_se
     config.selections=Some(macc_core::config::SelectionsConfig{skills:vec!["unavailable-fixture".into()],..Default::default()});
     fs::write(&paths.config_path,config.to_yaml().unwrap()).unwrap();
     for body in [r#"{"quiet":true}"#,r#"{"selectedSkills":[]}"#] {
+        let mut body: serde_json::Value = serde_json::from_str(body).unwrap();
+        body["revision"] = config_revision(&app).await.into();
         let response=app.clone().oneshot(Request::builder().uri("/api/v1/config").method("PUT")
-            .header("content-type","application/json").body(Body::from(body)).unwrap()).await.unwrap();
+            .header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
         assert_eq!(response.status(),axum::http::StatusCode::OK);
     }
     let config=macc_core::load_canonical_config(&paths.config_path).unwrap();
