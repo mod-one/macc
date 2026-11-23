@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check lint test test-tool-runner test-tool-runner-real test-o2-benchmark o2-benchmark test-contract web-build web-ci all check check-generic check-version release-bump
+.PHONY: fmt fmt-check lint test test-tool-runner test-tool-runner-real test-o2-benchmark o2-benchmark test-contract web-build web-ci all check check-generic check-version check-lockfiles release-bump
 
 all: fmt lint check-version test test-tool-runner web-ci check-generic test-contract
 
@@ -63,6 +63,10 @@ web-ci:
 
 check-generic:
 	@./scripts/check-ui-tool-transparency.sh
+
+check-lockfiles:
+	cargo tree --workspace --locked --depth 0
+	cargo tree --manifest-path adapters/Cargo.toml --workspace --locked --depth 0
 
 check-version:
 	@python3 scripts/check-version.py "$${TAG_VERSION:-}"
