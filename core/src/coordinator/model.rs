@@ -542,6 +542,8 @@ pub struct TaskRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performer_group: Option<crate::process_ownership::launched_group::LaunchedGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,

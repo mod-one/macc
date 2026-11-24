@@ -4,7 +4,7 @@ use super::*;
 pub(super) async fn launch_performer(
     ctx: LaunchPerformerContext<'_>,
     claim: &DispatchClaim,
-) -> Result<Option<i64>> {
+) -> Result<Option<coordinator_runtime::LaunchedGroup>> {
     let LaunchPerformerContext {
         repo_root,
         prd_file,
@@ -145,7 +145,7 @@ pub(super) async fn launch_performer(
         }
     };
 
-    let pid = coordinator_runtime::spawn_performer_job(
+    let group = coordinator_runtime::spawn_performer_job(
         &current_exe,
         repo_root,
         &claim.task_id,
@@ -165,7 +165,11 @@ pub(super) async fn launch_performer(
     })?;
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
-    coordinator_engine::apply_dispatch_pid_in_registry(&mut registry, &claim.task_id, pid)?;
+    coordinator_engine::apply_dispatch_group_in_registry(
+        &mut registry,
+        &claim.task_id,
+        group.as_ref(),
+    )?;
     let keys = crate::coordinator::quota_scope::keys(
         repo_root,
         &registry,
@@ -194,7 +198,7 @@ pub(super) async fn launch_performer(
     if let Some(log) = logger {
         let _ = log.note(format!("- Lifecycle task={} stage=run", claim.task_id));
     }
-    Ok(pid)
+    Ok(group)
 }
 
 /// The same immutable attempt is used by the context, receipt and performer.

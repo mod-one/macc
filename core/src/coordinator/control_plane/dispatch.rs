@@ -793,7 +793,7 @@ pub(super) async fn run_dispatch_pipeline(
             Ok(false) => continue,
             Err(error) => return Err(failure::record(repo_root, &claim, error, logger)?),
         }
-        let pid = launch_performer(
+        let group = launch_performer(
             LaunchPerformerContext {
                 repo_root,
                 prd_file,
@@ -806,9 +806,7 @@ pub(super) async fn run_dispatch_pipeline(
             &claim,
         )
         .await?;
-        if pid.is_none() {
-            continue;
-        }
+        let Some(group) = group else { continue };
         let _ = append_task_lifecycle_event_with_session(
             repo_root,
             "task_dispatched",
@@ -820,8 +818,7 @@ pub(super) async fn run_dispatch_pipeline(
                 claim.task_id,
                 claim.tool,
                 claim.worktree_path.display(),
-                pid.map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
+                group.leader
             ),
             claim.active_session_id.as_deref(),
         );
@@ -833,7 +830,7 @@ pub(super) async fn run_dispatch_pipeline(
                 worktree_path: claim.worktree_path,
                 attempt: 1,
                 started_at: std::time::Instant::now(),
-                pid,
+                group: Some(group),
                 failure_signaled_at: None,
             },
         );

@@ -394,10 +394,10 @@ pub fn apply_dispatch_claim_in_registry(
     Ok(())
 }
 
-pub fn apply_dispatch_pid_in_registry(
+pub fn apply_dispatch_group_in_registry(
     registry: &mut Value,
     task_id: &str,
-    pid: Option<i64>,
+    group: Option<&crate::process_ownership::launched_group::LaunchedGroup>,
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed
@@ -406,7 +406,8 @@ pub fn apply_dispatch_pid_in_registry(
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
         })?;
-    apply_dispatch_pid_typed(task, pid);
+    apply_dispatch_pid_typed(task, group.map(|g| i64::from(g.leader)));
+    task.task_runtime.performer_group = group.cloned();
     *registry = typed.to_value()?;
     Ok(())
 }
@@ -725,6 +726,7 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     runtime.events_log = Some(format!("{}.events.jsonl", log_prefix));
     runtime.stdout_log = Some(format!("{}.stdout.log", log_prefix));
     runtime.stderr_log = Some(format!("{}.stderr.log", log_prefix));
+    runtime.performer_group = None;
     runtime.pid = update.pid;
     task.touch_state_changed(&update.now);
 }
@@ -1841,65 +1843,17 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                 if let Some(mut job) = self.run_state.phase_job.take() {
                     job.cancel_and_wait().await;
                 }
-                let mut pids_to_kill = std::collections::HashSet::new();
-                if let Ok(db_pids) = sqlite.get_running_task_pids() {
-                    for (task_id, pid) in db_pids {
-                        pids_to_kill.insert(pid);
-                        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-                            self.repo_root,
-                            "task_blocked",
-                            &task_id,
-                            "dev",
-                            "aborted_by_operator",
-                            "Task aborted by operator force-stop",
-                            "warning",
-                        );
-                    }
-                }
-                for job in self.run_state.active_jobs.values() {
-                    if let Some(pid) = job.pid {
-                        pids_to_kill.insert(pid);
-                    }
-                }
-
-                let grace_secs = ctrl.force_grace_seconds.unwrap_or(10);
-                for pid in &pids_to_kill {
-                    if let Some(log) = self.logger {
-                        let _ =
-                            log.note(format!("- Sending TERM to performer process group {}", pid));
-                    }
-                    #[cfg(unix)]
-                    if *pid > 0 {
-                        unsafe {
-                            let _ = libc::killpg(*pid as libc::pid_t, libc::SIGTERM);
-                        }
-                    }
-                }
-                if !pids_to_kill.is_empty() {
-                    tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
-                    for pid in &pids_to_kill {
-                        if let Some(log) = self.logger {
-                            let _ = log
-                                .note(format!("- Sending KILL to performer process group {}", pid));
-                        }
-                        #[cfg(unix)]
-                        if *pid > 0 {
-                            unsafe {
-                                let _ = libc::killpg(*pid as libc::pid_t, libc::SIGKILL);
-                            }
-                        }
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    for pid in &pids_to_kill {
-                        if crate::coordinator::helpers::is_pid_running(*pid) {
-                            if let Some(log) = self.logger {
-                                let _ = log.note(format!(
-                                    "- Warning: performer process group {} survived SIGKILL [E416]",
-                                    pid
-                                ));
-                            }
-                        }
-                    }
+                let grace = Duration::from_secs(ctrl.force_grace_seconds.unwrap_or(10));
+                for (task_id, _) in terminate_active_jobs(&self.run_state, false, grace)? {
+                    crate::coordinator::helpers::append_coordinator_event_with_severity(
+                        self.repo_root,
+                        "task_blocked",
+                        &task_id,
+                        "dev",
+                        "aborted_by_operator",
+                        "Task aborted by operator force-stop",
+                        "warning",
+                    )?;
                 }
 
                 if ctrl.cleanup_after_force.unwrap_or(false) {
@@ -2111,7 +2065,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
 
         // Actual merge conflict — pause all other performers and wait for
         // an operator to resolve the conflict before continuing.
-        for (tid, pid) in terminate_active_jobs(&self.run_state) {
+        for (tid, pid) in terminate_active_jobs(&self.run_state, true, Duration::ZERO)? {
             if let Some(log) = self.logger {
                 let _ = log.note(format!("- Sent TERM to active task={} pid={}", tid, pid));
             }
@@ -2878,7 +2832,7 @@ pub(crate) async fn run_single_prd_control_plane(
                 "blocking",
             );
         }
-        for (_tid, _pid) in terminate_active_jobs(&backend.run_state) {}
+        terminate_active_jobs(&backend.run_state, true, Duration::ZERO)?;
         backend.run_state.active_jobs.clear();
         backend.run_state.join_set.abort_all();
         backend.run_state.active_merge_jobs.clear();

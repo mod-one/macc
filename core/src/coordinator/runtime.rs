@@ -5,6 +5,7 @@ use crate::coordinator::model::Task;
 use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::git;
+pub use crate::process_ownership::launched_group::{LaunchedGroup, Scope};
 use crate::service::process_ownership::RegisteredProcessGuard;
 use crate::{MaccError, Result};
 use merge_hook::{coordinator_log_dir, run_merge_hook_with_timeout, HookRunResult};
@@ -21,7 +22,7 @@ pub struct CoordinatorJob {
     pub worktree_path: PathBuf,
     pub attempt: usize,
     pub started_at: std::time::Instant,
-    pub pid: Option<i64>,
+    pub group: Option<LaunchedGroup>,
     /// Set when an IPC `phase_result status=failed` or `Failed` event is
     /// received for this job.  If the performer process does not exit within
     /// [`FORCE_KILL_GRACE_SECONDS`] after this instant, the coordinator will
@@ -65,17 +66,6 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
         }
     }
     let _ = child.kill().await;
-}
-
-/// Kill a performer process group by PGID.  Used by [`force_kill_stale_failures`]
-/// in control_plane.rs when a failure-signaled process exceeds the grace period.
-pub fn kill_process_group_sync(pid: i64) {
-    #[cfg(unix)]
-    if pid > 0 {
-        unsafe {
-            let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1232,7 +1222,7 @@ pub fn spawn_performer_job(
     // Extra env vars to forward (e.g. MACC_MODEL_TIER, MACC_REASONING_DEPTH).
     extra_env: &[(&str, String)],
     exit_wake: std::sync::Arc<tokio::sync::Notify>,
-) -> Result<Option<i64>> {
+) -> Result<Option<LaunchedGroup>> {
     let effective_ipc_addr = performer_ipc_addr
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.to_string());
@@ -1330,12 +1320,16 @@ pub fn spawn_performer_job(
     for (key, val) in extra_env {
         run_cmd.env(*key, val);
     }
+    let generation = uuid::Uuid::new_v4();
+    run_cmd.env(Scope::PerformerGroup.env(), generation.to_string());
     let mut child = run_cmd.spawn().map_err(|e| MaccError::Io {
         path: worktree_path.to_string_lossy().into(),
         action: "spawn performer process".into(),
         source: e,
     })?;
     let pid = child.id().map(|v| v as i64);
+    let group =
+        pid.map(|pid| LaunchedGroup::from_child(pid as i32, generation, Scope::PerformerGroup));
     let repo_root_owned = repo_root.to_path_buf();
     let task_id_owned = task_id.to_string();
     let base_branch_owned = base_branch.to_string();
@@ -1460,7 +1454,7 @@ pub fn spawn_performer_job(
                 .unwrap_or_default(),
         });
     });
-    Ok(pid)
+    Ok(group)
 }
 
 #[derive(Debug, Clone)]
@@ -1719,22 +1713,20 @@ where
     Ok(())
 }
 
-pub fn terminate_active_jobs(state: &CoordinatorRunState) -> Vec<(String, i64)> {
+pub fn terminate_active_jobs(
+    state: &CoordinatorRunState,
+    graceful: bool,
+    grace: std::time::Duration,
+) -> Result<Vec<(String, i32)>> {
     let mut terminated = Vec::new();
     for (task_id, job) in &state.active_jobs {
-        let Some(pid) = job.pid else {
-            continue;
-        };
-        #[cfg(unix)]
-        if pid > 0 {
-            unsafe {
-                let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+        if let Some(group) = &job.group {
+            if group.stop(graceful, grace)? > 0 {
+                terminated.push((task_id.clone(), group.leader));
             }
         }
-        terminated.push((task_id.clone(), pid));
     }
-    terminated
+    Ok(terminated)
 }
 
 pub fn summarize_output(text: &str) -> String {
@@ -2322,24 +2314,6 @@ pub fn report_branch_cleanup_outcome<FE, FW>(
                     attempts: 0,
                 },
             );
-        }
-    }
-}
-
-pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
-    #[cfg(unix)]
-    {
-        if pgid <= 0 {
-            return;
-        }
-        unsafe {
-            let _ = libc::killpg(pgid as libc::pid_t, libc::SIGTERM);
-        }
-
-        std::thread::sleep(std::time::Duration::from_secs(grace_secs));
-
-        unsafe {
-            let _ = libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
         }
     }
 }

@@ -341,6 +341,38 @@ pub(crate) fn skip_retained_phase(
     replace_phase_task(paths, args, expected, &next)
 }
 
+/// Publish the identity of a retried worker only while its assignment still matches.
+pub(crate) fn record_retry_group(
+    root: &Path,
+    args: &BTreeMap<String, String>,
+    task_id: &str,
+    claim: &str,
+    epoch: i64,
+    group: Option<&crate::process_ownership::launched_group::LaunchedGroup>,
+) -> Result<()> {
+    let Some(group) = group else { return Ok(()) };
+    let update = || {
+        let snapshot = coordinator_state_snapshot(root, args)?;
+        let task = snapshot
+            .registry
+            .find_task(task_id)
+            .filter(|t| {
+                t.task_runtime.claim_id.as_deref().unwrap_or_default() == claim
+                    && t.task_runtime.coordinator_epoch.unwrap_or_default() == epoch
+            })
+            .ok_or_else(|| MaccError::Validation(format!("Assignment changed for {task_id}")))?;
+        let mut next = task.clone();
+        next.task_runtime.performer_group = Some(group.clone());
+        next.task_runtime.pid = Some(group.leader.into());
+        replace_phase_task(&ProjectPaths::from_root(root), args, task, &next)
+    };
+    if let Err(error) = update() {
+        group.stop(false, std::time::Duration::ZERO)?;
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(crate) fn replace_phase_task(
     paths: &ProjectPaths,
     args: &BTreeMap<String, String>,

@@ -1816,9 +1816,18 @@ impl AppState {
             return;
         }
 
-        let stop_result = self
+        let result = match self
             .engine
-            .coordinator_stop_managed_command_process(&paths, false);
+            .coordinator_stop_managed_command_process(&paths, false)
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let message = format!("Coordinator stop failed: {err}");
+                self.coordinator_last_result = Some(message.clone());
+                self.set_status(UiStatusLevel::Error, message, Some(Duration::from_secs(6)));
+                return;
+            }
+        };
 
         self.coordinator_pause_next_action = None;
         self.coordinator_running_command = None;
@@ -1832,36 +1841,17 @@ impl AppState {
 
         self.refresh_coordinator_snapshot();
         self.refresh_coordinator_events();
-        match stop_result {
-            Ok(result) => {
-                self.release_coordinator_ownership();
-                let mode = if result.used_group {
-                    "process-group"
-                } else {
-                    "process-tree"
-                };
-                self.coordinator_last_result = Some(format!(
-                    "Coordinator stopped via {} ({} process target(s)).",
-                    mode, result.targets
-                ));
-                self.set_status(
-                    UiStatusLevel::Success,
-                    format!("Coordinator stopped via {}.", mode),
-                    Some(Duration::from_secs(4)),
-                );
-            }
-            Err(err) => {
-                self.coordinator_last_result = Some(format!(
-                    "Coordinator process stopped with fallback: {}",
-                    err
-                ));
-                self.set_status(
-                    UiStatusLevel::Warning,
-                    "Coordinator stopped, but child cleanup may be incomplete.",
-                    Some(Duration::from_secs(6)),
-                );
-            }
-        }
+        self.release_coordinator_ownership();
+        let message = format!(
+            "Coordinator stop: {} verified processes signaled.",
+            result.targets
+        );
+        self.coordinator_last_result = Some(message.clone());
+        self.set_status(
+            UiStatusLevel::Success,
+            message,
+            Some(Duration::from_secs(4)),
+        );
     }
 
     pub fn open_coordinator_stop_dialog(&mut self) {
@@ -6568,10 +6558,7 @@ mod tests {
             _graceful: bool,
         ) -> macc_core::Result<macc_core::service::coordinator::CoordinatorStopResult> {
             *self.stop_calls.lock().unwrap() += 1;
-            Ok(macc_core::service::coordinator::CoordinatorStopResult {
-                targets: 0,
-                used_group: false,
-            })
+            Ok(macc_core::service::coordinator::CoordinatorStopResult { targets: 0 })
         }
     }
 

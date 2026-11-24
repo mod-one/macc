@@ -1,7 +1,5 @@
 use crate::coordinator::approval_prompt;
-use crate::coordinator::legacy_helpers::{
-    stop_coordinator_process_groups, NativeCoordinatorLogger,
-};
+use crate::coordinator::legacy_helpers::NativeCoordinatorLogger;
 use crate::coordinator::render::print_status_summary;
 #[cfg(unix)]
 use libc;
@@ -395,10 +393,6 @@ Performers cannot commit without it. Fix this first:\n\
             // --attach loop from detecting the coordinator is gone and triggering
             // an unwanted recovery/restart.
             macc_core::service::supervisor_launch::stop_attached(&paths.root)?;
-            let coordinator_path = paths.automation_coordinator_path();
-            let stopped =
-                stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
-            println!("Coordinator process groups signaled: {}", stopped);
         }
     }
 

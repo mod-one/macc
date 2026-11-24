@@ -92,7 +92,7 @@ pub(super) fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
             engine.coordinator_state_increment_retries(&paths.root, &args)?;
             let claim_id = task.task_runtime.claim_id.clone().unwrap_or_default();
             let epoch = task.task_runtime.coordinator_epoch.unwrap_or(0);
-            let pid = coordinator_runtime::spawn_performer_job(
+            let group = coordinator_runtime::spawn_performer_job(
                 &current_exe,
                 &paths.root,
                 task_id,
@@ -107,6 +107,14 @@ pub(super) fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
                 &[],
                 state.activity_wake.clone(),
             )?;
+            crate::coordinator::state::record_retry_group(
+                &paths.root,
+                state_args,
+                task_id,
+                &claim_id,
+                epoch,
+                group.as_ref(),
+            )?;
             state.active_jobs.insert(
                 task_id.to_string(),
                 coordinator_runtime::CoordinatorJob {
@@ -115,7 +123,7 @@ pub(super) fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
                     worktree_path: worktree.to_owned(),
                     attempt: 1,
                     started_at: std::time::Instant::now(),
-                    pid,
+                    group,
                     failure_signaled_at: None,
                 },
             );

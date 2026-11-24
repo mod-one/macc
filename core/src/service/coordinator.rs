@@ -1,13 +1,13 @@
 use crate::config::CoordinatorConfig;
 use crate::coordinator::managed_command_registry::{
     list_managed_commands, managed_command_result_dir, managed_command_result_path,
-    remove_managed_command, upsert_managed_command_with_result,
+    ManagedCommandKey, ManagedCommandRecord, ManagedCommandRegistry, ManagedCommandStore,
 };
+use crate::process_ownership::launched_group::{LaunchedGroup, Scope};
 use crate::{ensure_embedded_automation_scripts, MaccError, ProjectPaths, Result};
 #[cfg(unix)]
 use libc;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -25,7 +25,6 @@ pub enum CoordinatorProcessPoll {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoordinatorStopResult {
     pub targets: usize,
-    pub used_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +68,7 @@ pub enum CoordinatorManagedCommandState {
 
 struct ManagedCoordinatorProcess {
     child: Child,
+    group: LaunchedGroup,
 }
 
 fn process_table() -> &'static Mutex<HashMap<u64, ManagedCoordinatorProcess>> {
@@ -150,14 +150,31 @@ fn start_managed_inner(
         )));
     }
 
-    let (handle, pid) =
+    let (handle, group) =
         coordinator_start_command_process_with_pid(paths, command, args, cfg, client_id, true)?;
-    upsert_managed_command_with_result(paths, command, pid)?;
+    let pid = group.leader;
+    let mut record = ManagedCommandRecord::new(paths, command, pid);
+    record.result_expected = true;
+    record.group = Some(group);
+    if let Err(error) = ManagedCommandRegistry::new(&paths.root).upsert(record) {
+        coordinator_stop_command_process(handle, false)?;
+        return Err(error);
+    }
     local_handles_by_root()
         .lock()
         .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
         .insert(key, handle);
     Ok(pid)
+}
+
+fn remove_completed_instance(paths: &ProjectPaths, record: &ManagedCommandRecord) -> Result<()> {
+    ManagedCommandStore::load_and_modify(&paths.root, |store| {
+        let key = ManagedCommandKey::new(paths, &record.kind);
+        if store.get(key) == Some(record) {
+            store.remove(key);
+        }
+        Ok(())
+    })
 }
 
 pub fn coordinator_poll_managed_command_process(
@@ -175,6 +192,13 @@ pub fn coordinator_poll_managed_command_process(
         .get(&key)
         .copied();
 
+    let local_handle = local_handle.filter(|handle| {
+        process_table().lock().is_ok_and(|table| {
+            table
+                .get(&handle.0)
+                .is_some_and(|local| Some(&local.group) == record.group.as_ref())
+        })
+    });
     if let Some(handle) = local_handle {
         match coordinator_poll_command_process(handle)? {
             CoordinatorProcessPoll::Running => {
@@ -184,7 +208,7 @@ pub fn coordinator_poll_managed_command_process(
                 });
             }
             CoordinatorProcessPoll::Exited { success, code } => {
-                let _ = remove_managed_command(paths, &record.kind)?;
+                remove_completed_instance(paths, &record)?;
                 let _ = std::fs::remove_file(managed_command_result_path(
                     &paths.root,
                     &record.kind,
@@ -207,7 +231,11 @@ pub fn coordinator_poll_managed_command_process(
         }
     }
 
-    if pid_is_alive(record.pid) {
+    if record
+        .group
+        .as_ref()
+        .map_or_else(|| Ok(pid_is_alive(record.pid)), |g| g.is_running())?
+    {
         Ok(CoordinatorManagedCommandPoll::Running {
             command,
             elapsed_secs,
@@ -231,7 +259,7 @@ pub fn coordinator_poll_managed_command_process(
             })
             .map(|ran| ran.as_secs())
             .unwrap_or(elapsed_secs);
-        let _ = remove_managed_command(paths, &record.kind)?;
+        remove_completed_instance(paths, &record)?;
         let _ = std::fs::remove_file(result_path);
         Ok(CoordinatorManagedCommandPoll::Exited {
             command,
@@ -309,31 +337,22 @@ pub fn coordinator_stop_managed_command_process(
     graceful: bool,
 ) -> Result<CoordinatorStopResult> {
     let Some(record) = active_managed_command(paths)? else {
-        return Ok(CoordinatorStopResult {
-            targets: 0,
-            used_group: false,
-        });
+        return Ok(CoordinatorStopResult { targets: 0 });
     };
-    let key = handle_key(paths, &record.kind);
-    let local_handle = local_handles_by_root()
-        .lock()
-        .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
-        .remove(&key);
-    let Some(record) = remove_managed_command(paths, &record.kind)? else {
-        return Ok(CoordinatorStopResult {
-            targets: 0,
-            used_group: false,
-        });
+    let Some(group) = record.group.as_ref() else {
+        if pid_is_alive(record.pid) {
+            return Err(MaccError::Validation("Coordinator registration has no verifiable launch identity; inspect the legacy process before stopping it manually".into()));
+        }
+        return Ok(CoordinatorStopResult { targets: 0 });
     };
-    if let Some(handle) = local_handle {
-        coordinator_stop_command_process(handle, graceful)
-    } else {
-        let (targets, used_group) = stop_coordinator_process_group_or_tree(record.pid)?;
-        Ok(CoordinatorStopResult {
-            targets,
-            used_group,
-        })
+    if group.leader != record.pid || group.scope != Scope::CoordinatorSession {
+        return Err(MaccError::Validation(
+            "Coordinator registration has an inconsistent process group".into(),
+        ));
     }
+    // Polling consumes the exit result and reaps locally owned children.
+    let targets = group.stop(graceful, Duration::from_millis(800))?;
+    Ok(CoordinatorStopResult { targets })
 }
 
 pub fn coordinator_start_command_process(
@@ -368,7 +387,7 @@ fn coordinator_start_command_process_with_pid(
     cfg: Option<&CoordinatorConfig>,
     client_id: Option<&str>,
     persist_exit_code: bool,
-) -> Result<(CoordinatorProcessHandle, i32)> {
+) -> Result<(CoordinatorProcessHandle, LaunchedGroup)> {
     let root = &paths.root;
     if command == "run" {
         if crate::git::git_common_dir(root).is_ok() {
@@ -461,6 +480,8 @@ fn coordinator_start_command_process_with_pid(
         }
     }
 
+    let generation = uuid::Uuid::new_v4();
+    cmd.env(Scope::CoordinatorSession.env(), generation.to_string());
     let child = cmd.spawn().map_err(|e| MaccError::Io {
         path: root.to_string_lossy().into(),
         action: format!("spawn coordinator command '{}'", command),
@@ -473,8 +494,15 @@ fn coordinator_start_command_process_with_pid(
     let mut table = process_table()
         .lock()
         .map_err(|_| MaccError::Validation("coordinator process table lock poisoned".into()))?;
-    table.insert(id, ManagedCoordinatorProcess { child });
-    Ok((handle, pid))
+    let group = LaunchedGroup::from_child(pid, generation, Scope::CoordinatorSession);
+    table.insert(
+        id,
+        ManagedCoordinatorProcess {
+            child,
+            group: group.clone(),
+        },
+    );
+    Ok((handle, group))
 }
 
 fn apply_reference_policy_args(cmd: &mut Command, cfg: Option<&CoordinatorConfig>) {
@@ -594,171 +622,23 @@ pub fn coordinator_poll_command_process(
 
 pub fn coordinator_stop_command_process(
     handle: CoordinatorProcessHandle,
-    _graceful: bool,
+    graceful: bool,
 ) -> Result<CoordinatorStopResult> {
-    let mut table = process_table()
+    let group = process_table()
         .lock()
-        .map_err(|_| MaccError::Validation("coordinator process table lock poisoned".into()))?;
-    let Some(mut proc_state) = table.remove(&handle.0) else {
-        return Ok(CoordinatorStopResult {
-            targets: 0,
-            used_group: false,
-        });
+        .map_err(|_| MaccError::Validation("coordinator process table lock poisoned".into()))?
+        .get(&handle.0)
+        .map(|p| p.group.clone());
+    let targets = match group {
+        Some(group) => group.stop(graceful, Duration::from_millis(800))?,
+        None => 0,
     };
-    let coordinator_pid = proc_state.child.id() as i32;
-    let (count, used_group) = stop_coordinator_process_group_or_tree(coordinator_pid)?;
-    let _ = proc_state.child.kill();
-    let _ = proc_state.child.wait();
-    Ok(CoordinatorStopResult {
-        targets: count,
-        used_group,
-    })
-}
-
-fn stop_coordinator_process_group_or_tree(pid: i32) -> Result<(usize, bool)> {
-    let current_pgid = pgid_for_pid(std::process::id() as i32).unwrap_or(-1);
-    if let Some(target_pgid) = pgid_for_pid(pid) {
-        if target_pgid > 0 && target_pgid != current_pgid {
-            let _ = signal_process_group(target_pgid, "-TERM");
-            std::thread::sleep(Duration::from_millis(800));
-            if pgid_is_alive(target_pgid) {
-                let _ = signal_process_group(target_pgid, "-KILL");
-            }
-            return Ok((1, true));
-        }
-    }
-
-    let descendants = collect_descendant_pids(pid);
-    let mut targets = descendants;
-    targets.push(pid);
-    targets.sort_unstable();
-    targets.dedup();
-
-    let mut signaled = 0usize;
-    for target in &targets {
-        if signal_pid(*target, "-TERM") {
-            signaled += 1;
-        }
-    }
-
-    for _ in 0..20 {
-        if targets.iter().all(|target| !pid_is_alive(*target)) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(120));
-    }
-
-    for target in &targets {
-        if pid_is_alive(*target) {
-            let _ = signal_pid(*target, "-KILL");
-        }
-    }
-    Ok((signaled, false))
-}
-
-fn collect_descendant_pids(root_pid: i32) -> Vec<i32> {
-    let mut stack = vec![root_pid];
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-
-    while let Some(pid) = stack.pop() {
-        for child in child_pids(pid) {
-            if !seen.insert(child) {
-                continue;
-            }
-            out.push(child);
-            stack.push(child);
-        }
-    }
-    out
-}
-
-fn child_pids(pid: i32) -> Vec<i32> {
-    let output = Command::new("pgrep")
-        .arg("-P")
-        .arg(pid.to_string())
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<i32>().ok())
-        .collect()
-}
-
-fn pgid_for_pid(pid: i32) -> Option<i32> {
-    let output = Command::new("ps")
-        .arg("-o")
-        .arg("pgid=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<i32>()
-        .ok()
-}
-
-fn signal_process_group(pgid: i32, signal: &str) -> bool {
-    if pgid <= 0 {
-        return false;
-    }
-    Command::new("kill")
-        .arg(signal)
-        .arg("--")
-        .arg(format!("-{}", pgid))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn pgid_is_alive(pgid: i32) -> bool {
-    if pgid <= 0 {
-        return false;
-    }
-    Command::new("kill")
-        .arg("-0")
-        .arg("--")
-        .arg(format!("-{}", pgid))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn signal_pid(pid: i32, signal: &str) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    Command::new("kill")
-        .arg(signal)
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    coordinator_poll_command_process(handle)?;
+    Ok(CoordinatorStopResult { targets })
 }
 
 fn pid_is_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    let proc_cwd = PathBuf::from(format!("/proc/{}/cwd", pid));
-    if !proc_cwd.exists() {
-        return false;
-    }
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::process_ownership::process_identity(pid.into()).is_some()
 }
 
 /// Check whether the most recent coordinator run ended because the dispatch

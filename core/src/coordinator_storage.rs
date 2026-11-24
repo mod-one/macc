@@ -2098,22 +2098,6 @@ impl SqliteStorage {
             .or_insert_with(|| json!({}));
         Ok(registry)
     }
-
-    pub fn get_running_task_pids(&self) -> Result<Vec<(String, i64)>> {
-        let conn = self.open()?;
-        self.init_schema(&conn)?;
-        let mut stmt = conn
-            .prepare("SELECT task_id, pid FROM task_runtime WHERE status = 'running' AND pid IS NOT NULL")
-            .map_err(sql_err)?;
-        let mut rows = stmt.query([]).map_err(sql_err)?;
-        let mut pids = Vec::new();
-        while let Some(row) = rows.next().map_err(sql_err)? {
-            let task_id: String = row.get(0).map_err(sql_err)?;
-            let pid: i64 = row.get(1).map_err(sql_err)?;
-            pids.push((task_id, pid));
-        }
-        Ok(pids)
-    }
 }
 
 impl SqliteStorage {

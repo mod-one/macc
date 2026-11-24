@@ -1,5 +1,6 @@
 pub mod events;
 pub mod heartbeat;
+pub mod launched_group;
 pub mod store;
 pub mod types;
 

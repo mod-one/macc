@@ -1230,61 +1230,34 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                         requested_by: Some("cli".to_string()),
                         drain_snapshot_json: None,
                         force_grace_seconds: Some(10),
-                        cleanup_after_force: Some(remove_worktrees),
+                        cleanup_after_force: Some(false),
                         reason: Some(reason.clone()),
                     },
                 )?;
 
-                let mut term_count = 0;
-                let mut kill_count = 0;
-                let mut aborted_count = 0;
-
-                if let Ok(db_pids) = sqlite.get_running_task_pids() {
-                    for (task_id, pid) in db_pids {
-                        if let Some(log) = request.logger {
-                            let _ = log.note(format!(
-                                "Force-terminating performer process group {} for task {}...",
-                                pid, task_id
-                            ));
-                        }
-                        #[cfg(unix)]
-                        if pid > 0 {
-                            unsafe {
-                                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
-                            }
-                        }
-                        term_count += 1;
-
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-
-                        let is_running = crate::coordinator::helpers::is_pid_running(pid);
-                        if is_running {
-                            #[cfg(unix)]
-                            if pid > 0 {
-                                unsafe {
-                                    let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-                                }
-                            }
-                            kill_count += 1;
-                        }
-
-                        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-                            &paths.root,
-                            "task_blocked",
-                            &task_id,
-                            "dev",
-                            "aborted_by_operator",
-                            "Task aborted by operator force-stop",
-                            "warning",
-                        );
-                        aborted_count += 1;
-                    }
-                }
-
-                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(
-                    paths, false,
+                let mut signaled = 0;
+                let mut storage_args = BTreeMap::new();
+                apply_storage_mode_args(
+                    &mut storage_args,
+                    request.env_cfg,
+                    request.coordinator_cfg,
                 );
-
+                let registry = engine
+                    .coordinator_state_snapshot(&paths.root, &storage_args)?
+                    .registry;
+                for task in registry.tasks {
+                    let Some(pid) = task.runtime_pid() else {
+                        continue;
+                    };
+                    if task.runtime_status() != crate::coordinator::RuntimeStatus::Running {
+                        continue;
+                    }
+                    signaled += stop_task_process(&task, pid)?;
+                }
+                signaled += crate::service::coordinator::coordinator_stop_managed_command_process(
+                    paths, false,
+                )?
+                .targets;
                 if remove_worktrees {
                     if let Some(log) = request.logger {
                         let _ = log.note("Cleaning up worktrees...".to_string());
@@ -1296,7 +1269,6 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     let _ = crate::prune_worktrees(&paths.root);
                 }
 
-                let term_exited = term_count - kill_count;
                 let worktree_msg = if remove_worktrees {
                     "Worktrees were cleaned up."
                 } else {
@@ -1306,17 +1278,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 let output_lines = [
                     "Force stop requested.".to_string(),
                     "Dispatch disabled.".to_string(),
-                    format!("Sent SIGTERM to {} process groups.", term_count),
-                    format!("{} exited within 10s.", term_exited),
-                    format!(
-                        "Sent SIGKILL to {} remaining process group{}.",
-                        kill_count,
-                        if kill_count == 1 { "" } else { "s" }
-                    ),
-                    format!(
-                        "Marked {} task runtimes as aborted_by_operator.",
-                        aborted_count
-                    ),
+                    format!("Signaled {signaled} verified processes."),
                     worktree_msg.to_string(),
                     "Next: run `macc coordinator recover --dry-run`.".to_string(),
                 ];
@@ -1334,9 +1296,12 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     },
                 )?;
 
-                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(
-                    paths, graceful,
-                );
+                let stopped =
+                    crate::service::coordinator::coordinator_stop_managed_command_process(
+                        paths, graceful,
+                    )?;
+                result.runtime_status =
+                    Some(format!("Signaled {} verified processes.", stopped.targets));
 
                 if remove_worktrees {
                     let _ = crate::service::worktree::remove_all_worktrees(
@@ -1509,13 +1474,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             let mut snapshot = sqlite.load_snapshot()?;
             if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
                 if let Some(pid) = task.runtime_pid() {
-                    if let Some(logger) = request.logger {
-                        let _ = logger.note(format!(
-                            "Killing process group {} for task {}...",
-                            pid, task_id
-                        ));
-                    }
-                    coordinator_runtime::terminate_process_group_gracefully(pid, 10);
+                    stop_task_process(task, pid)?;
                 }
                 task.state = "blocked".to_string();
                 task.task_runtime.status = Some("idle".to_string());
@@ -2479,6 +2438,22 @@ pub fn coordinator_cutover_gate(
 #[path = "coordinator_phase_retry.rs"]
 mod phase_retry;
 pub use phase_retry::coordinator_retry_phase;
+
+fn stop_task_process(task: &crate::coordinator::model::Task, pid: i64) -> Result<usize> {
+    match task.task_runtime.performer_group.as_ref() {
+        Some(g)
+            if i64::from(g.leader) == pid
+                && g.scope == crate::process_ownership::launched_group::Scope::PerformerGroup =>
+        {
+            g.stop(false, std::time::Duration::from_secs(10))
+        }
+        _ if !crate::coordinator::helpers::is_pid_running(pid) => Ok(0),
+        _ => Err(MaccError::Validation(format!(
+            "Cannot verify the performer for task {} (PID {pid}); inspect the retained assignment",
+            task.id
+        ))),
+    }
+}
 
 fn parse_retry_phase_args(args: &[String]) -> Result<(String, String, bool)> {
     let mut task_id = None;

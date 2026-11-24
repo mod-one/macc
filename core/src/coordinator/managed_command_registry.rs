@@ -26,6 +26,8 @@ pub struct ManagedCommandRecord {
     /// dead record until the poller consumes that result (or reports it absent).
     #[serde(default)]
     pub result_expected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<crate::process_ownership::launched_group::LaunchedGroup>,
 }
 
 impl ManagedCommandRecord {
@@ -38,6 +40,7 @@ impl ManagedCommandRecord {
             started_at: now.clone(),
             last_heartbeat: now,
             result_expected: false,
+            group: None,
         }
     }
 

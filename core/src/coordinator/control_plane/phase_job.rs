@@ -565,7 +565,7 @@ mod tests {
                 worktree_path: root.path().to_path_buf(),
                 attempt: 1,
                 started_at: Instant::now(),
-                pid: None,
+                group: None,
                 failure_signaled_at: None,
             },
         );

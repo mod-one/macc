@@ -1377,7 +1377,7 @@ pub async fn monitor_active_jobs_native(
     apply_runtime_event_bus_updates(repo_root, env_cfg, coordinator, state, logger)?;
     crate::coordinator::control::drain(repo_root, env_cfg, coordinator, state);
     apply_stale_heartbeat_policy(repo_root, env_cfg, coordinator, logger)?;
-    force_kill_stale_failures(repo_root, env_cfg, coordinator, state, logger);
+    force_kill_stale_failures(repo_root, env_cfg, coordinator, state, logger)?;
     let retry_codes = resolve_error_code_retry_list(env_cfg, coordinator);
     let retry_max = resolve_error_code_retry_max(env_cfg, coordinator);
     loop {
@@ -1774,7 +1774,7 @@ pub async fn monitor_active_jobs_native(
                     } else {
                         (String::new(), 0)
                     };
-                    let retry_pid = coordinator_runtime::spawn_performer_job(
+                    let group = coordinator_runtime::spawn_performer_job(
                         &current_exe,
                         repo_root,
                         &task_id,
@@ -1789,6 +1789,14 @@ pub async fn monitor_active_jobs_native(
                         &[], // retry preserves previous performer env
                         state.activity_wake.clone(),
                     )?;
+                    crate::coordinator::state::record_retry_group(
+                        repo_root,
+                        &BTreeMap::new(),
+                        &task_id,
+                        &claim_id,
+                        epoch,
+                        group.as_ref(),
+                    )?;
                     state.active_jobs.insert(
                         task_id,
                         CoordinatorJob {
@@ -1797,7 +1805,7 @@ pub async fn monitor_active_jobs_native(
                             worktree_path: job.worktree_path,
                             attempt: job.attempt + 1,
                             started_at: std::time::Instant::now(),
-                            pid: retry_pid,
+                            group,
                             failure_signaled_at: None,
                         },
                     );
@@ -2027,7 +2035,9 @@ pub fn apply_runtime_event_bus_updates(
                     if let Some(log) = logger {
                         let _ = log.note(format!(
                             "- Force-kill grace timer started task={} pid={:?} grace={}s",
-                            task_id, job.pid, grace_seconds,
+                            task_id,
+                            job.group.as_ref().map(|g| g.leader),
+                            grace_seconds,
                         ));
                     }
                 }
@@ -2065,7 +2075,7 @@ fn force_kill_stale_failures(
     coordinator: Option<&crate::config::CoordinatorConfig>,
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
-) {
+) -> Result<()> {
     let grace_seconds = resolve_force_kill_grace_seconds(env_cfg, coordinator);
     let grace = std::time::Duration::from_secs(grace_seconds);
     let mut killed: Vec<String> = Vec::new();
@@ -2077,11 +2087,11 @@ fn force_kill_stale_failures(
         if signaled_at.elapsed() < grace {
             continue;
         }
-        if let Some(pid) = job.pid {
-            // Kill the entire process group (PGID == PID because we spawn
-            // with process_group(0)).  This ensures orphaned tool subprocesses
-            // are also killed, not just the shell wrapper.
-            crate::coordinator::runtime::kill_process_group_sync(pid);
+        if let Some(group) = &job.group {
+            let pid = group.leader;
+            if group.stop(false, std::time::Duration::ZERO)? == 0 {
+                continue;
+            }
             if let Some(log) = logger {
                 let _ = log.note(format!(
                     "- Force-killed performer task={} pid={} reason=failure_signaled_grace_expired elapsed={:.1}s",
@@ -2135,6 +2145,7 @@ fn force_kill_stale_failures(
             job.failure_signaled_at = None;
         }
     }
+    Ok(())
 }
 
 pub fn consume_heartbeat_events(

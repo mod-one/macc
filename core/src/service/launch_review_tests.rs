@@ -85,10 +85,7 @@ impl Engine for RecordingEngine {
         _: bool,
     ) -> Result<crate::service::coordinator::CoordinatorStopResult> {
         self.stops.set(self.stops.get() + 1);
-        Ok(crate::service::coordinator::CoordinatorStopResult {
-            targets: 1,
-            used_group: false,
-        })
+        Ok(crate::service::coordinator::CoordinatorStopResult { targets: 1 })
     }
 }
 fn git(root: &std::path::Path, args: &[&str]) {
