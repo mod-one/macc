@@ -2893,6 +2893,9 @@ impl AppState {
             self.project_paths.as_ref().map(|p| p.root.clone()),
             decisions_busy,
         );
+        if let Some(warning) = self.decision_center.new_draft_warning() {
+            self.set_status(UiStatusLevel::Error, warning, Some(Duration::from_secs(12)));
+        }
         self.poll_apply_preparation();
         self.poll_preview();
         self.poll_launch_start();

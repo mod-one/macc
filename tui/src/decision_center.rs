@@ -1,5 +1,7 @@
 //! Nonblocking decision inbox; drafts are keyed by immutable request version.
 mod actions;
+mod drafts;
+use drafts::Drafts;
 #[cfg(test)]
 mod form_tests;
 mod interaction;
@@ -54,11 +56,12 @@ pub struct Center {
     pub open: bool,
     manual: bool,
     current: Option<dm::Decision>,
-    drafts: BTreeMap<String, Draft>,
+    drafts: Drafts<Draft>,
     deferred: BTreeSet<String>,
     scroll: u16,
     message: String,
     notice_success: bool,
+    reported_draft_warning: Option<String>,
     feedback: bool,
     submitting: bool,
     answer_in_flight: Option<(String, u64)>,
@@ -131,31 +134,37 @@ impl Center {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default()
     }
-    fn save_drafts(&self) {
+    pub(crate) fn draft_warnings(&self) -> impl Iterator<Item = &str> {
+        [
+            self.drafts.warning.as_deref(),
+            self.actions.drafts.warning.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+    pub(crate) fn new_draft_warning(&mut self) -> Option<String> {
+        let warnings = self.draft_warnings().collect::<Vec<_>>().join("\n");
+        let current = (!warnings.is_empty()).then_some(warnings);
+        if self.reported_draft_warning == current {
+            return None;
+        }
+        self.reported_draft_warning = current.clone();
+        current
+    }
+    fn save_drafts(&mut self) {
         if let Some(root) = &self.root {
-            self.actions.save(root);
-            if let Ok(bytes) = serde_json::to_vec(&self.drafts) {
-                let _ = macc_core::atomic_write(
-                    &macc_core::ProjectPaths::from_root(root),
-                    &root.join(".macc/cache/decision-drafts.json"),
-                    &bytes,
-                );
-            }
+            self.drafts.save(root);
+            self.actions.drafts.save(root);
         }
     }
     pub fn tick(&mut self, root: Option<PathBuf>, busy: bool) {
         if self.root != root {
-            self.save_drafts();
             *self = Self::default();
             self.root = root.clone();
             if let Some(root) = &root {
-                self.actions.load(root);
-                let file = root.join(".macc/cache/decision-drafts.json");
-                if std::fs::metadata(&file).is_ok_and(|m| m.len() < 1048576) {
-                    if let Ok(bytes) = std::fs::read(file) {
-                        self.drafts = serde_json::from_slice(&bytes).unwrap_or_default();
-                    }
-                }
+                let cache = root.join(".macc/cache");
+                self.drafts = Drafts::load(cache.join("decision-drafts.json"));
+                self.actions.drafts = Drafts::load(cache.join("decision-action-drafts.json"));
             }
         }
         if let Some(rx) = &self.rx {
@@ -692,6 +701,9 @@ impl Center {
 impl Drop for Center {
     fn drop(&mut self) {
         self.save_drafts();
+        for warning in self.draft_warnings() {
+            eprintln!("{warning}");
+        }
     }
 }
 

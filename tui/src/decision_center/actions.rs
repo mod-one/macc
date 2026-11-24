@@ -2,7 +2,7 @@
 use super::*;
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-struct ActionDraft {
+pub(super) struct ActionDraft {
     actor: String,
     role: String,
     created: String,
@@ -23,7 +23,7 @@ pub(super) struct Panel {
     mode: String,
     index: usize,
     field: usize,
-    drafts: BTreeMap<String, ActionDraft>,
+    pub(super) drafts: Drafts<ActionDraft>,
     notice: String,
     operation: Option<Value>,
     gate: Option<Value>,
@@ -64,23 +64,6 @@ impl Panel {
         self.mode = "menu".into();
         self.index = 0;
         self.field = 0;
-    }
-    pub fn save(&self, root: &std::path::Path) {
-        if let Ok(bytes) = serde_json::to_vec(&self.drafts) {
-            let _ = macc_core::atomic_write(
-                &macc_core::ProjectPaths::from_root(root),
-                &root.join(".macc/cache/decision-action-drafts.json"),
-                &bytes,
-            );
-        }
-    }
-    pub fn load(&mut self, root: &std::path::Path) {
-        let file = root.join(".macc/cache/decision-action-drafts.json");
-        if std::fs::metadata(&file).is_ok_and(|m| m.len() < 1048576) {
-            if let Ok(bytes) = std::fs::read(file) {
-                self.drafts = serde_json::from_slice(&bytes).unwrap_or_default();
-            }
-        }
     }
     fn key(&self, d: Option<&dm::Decision>) -> String {
         if self.mode == "gates" {

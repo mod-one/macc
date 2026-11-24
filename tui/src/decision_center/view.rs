@@ -64,10 +64,12 @@ impl Center {
         if inner.height == 0 || inner.width == 0 {
             return;
         }
+        let warning = self.draft_warnings().next();
+        let notice = warning.unwrap_or(&self.message);
         let parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if self.message.is_empty() {
+                Constraint::Length(if notice.is_empty() {
                     0
                 } else {
                     2.min(inner.height / 3)
@@ -81,14 +83,16 @@ impl Center {
                 Constraint::Length(if inner.height < 10 { 1 } else { 3 }),
             ])
             .split(inner);
-        if !self.message.is_empty() {
+        if !notice.is_empty() {
             frame.render_widget(
-                Paragraph::new(self.message.as_str())
-                    .style(Style::default().fg(if self.notice_success {
-                        crate::ui::theme().good
-                    } else {
-                        crate::ui::theme().warn
-                    }))
+                Paragraph::new(notice)
+                    .style(
+                        Style::default().fg(if self.notice_success && warning.is_none() {
+                            crate::ui::theme().good
+                        } else {
+                            crate::ui::theme().warn
+                        }),
+                    )
                     .wrap(Wrap { trim: false }),
                 parts[0],
             );
