@@ -213,7 +213,7 @@ impl Editor {
         }
         if self.files.is_empty() {
             lines.push(Line::from(
-                "Queue empty: legacy prd_file remains in use. Press a to add a PRD.",
+                "Empty queue: save to use the default prd.json, or press a to add a PRD.",
             ));
         }
         if let Some(input) = &self.input {

@@ -34,10 +34,9 @@ pub(super) fn capture(paths: &ProjectPaths, config: &Path, bundle: &Path) -> Res
         .automation
         .coordinator
         .unwrap_or_default();
-    let files = if config.prd_files.is_empty() {
+    let files = if config.configured_prds().is_empty() {
         let file = prd_queue::active_path(&paths.root, Some(&config), None)?;
-        if config.prd_file.is_none()
-            && !file.try_exists().map_err(|e| io_error(&file, e))?
+        if !file.try_exists().map_err(|e| io_error(&file, e))?
             && paths.macc_dir.join("prd.json").is_file()
         {
             vec![paths.macc_dir.join("prd.json")]
@@ -46,7 +45,7 @@ pub(super) fn capture(paths: &ProjectPaths, config: &Path, bundle: &Path) -> Res
         }
     } else {
         config
-            .prd_files
+            .configured_prds()
             .iter()
             .map(|file| paths.root.join(file))
             .collect()

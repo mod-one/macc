@@ -189,7 +189,7 @@ pub(super) fn widget_input(state: &mut AppState, key: KeyCode) {
                                 .automation
                                 .coordinator
                                 .get_or_insert_with(Default::default)
-                                .prd_files = files;
+                                .set_prd_queue(files);
                         }
                         state.prd_queue_editor = None;
                     }

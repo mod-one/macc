@@ -601,6 +601,25 @@ pub fn load_canonical_config<P: AsRef<Path>>(path: P) -> crate::Result<Canonical
     Ok(config)
 }
 
+impl CoordinatorConfig {
+    /// Explicit inputs in execution order, excluding the implicit prd.json default.
+    pub fn configured_prds(&self) -> &[String] {
+        if self.prd_files.is_empty() {
+            self.prd_file.as_slice()
+        } else {
+            &self.prd_files
+        }
+    }
+
+    pub fn set_prd_queue(&mut self, files: Vec<String>) {
+        if files.is_empty() {
+            // Clearing the queue must also clear any shadowed single-file selection.
+            self.prd_file = None;
+        }
+        self.prd_files = files;
+    }
+}
+
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {

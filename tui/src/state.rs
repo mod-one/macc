@@ -3927,7 +3927,7 @@ impl AppState {
         match index {
             0 => "Fixed tool for coordinator phase hooks (review/fix). Empty means task/default tool.",
             1 => "Default git branch used when task.base_branch is not set (default: main).",
-            2 => "Enter: edit ordered PRD queue; add files/directories, Space + arrows to reorder. Accept then s to save config. Empty queue uses legacy prd_file.",
+            2 => "Enter: edit ordered PRD queue; add files/directories, Space + arrows to reorder. Accept then s to save config. Clearing the queue restores the prd.json default.",
             3 => "Tool priority order as comma-separated values, e.g. tool-a,tool-b,tool-c.",
             4 => "Omit a tool to use the global limit. Use 0 to stop new task assignments, e.g. {\"tool-a\":3,\"tool-b\":0}.",
             5 => "Category routing as JSON object, e.g. {\"frontend\":[\"tool-b\",\"tool-c\"]}.",
@@ -4038,15 +4038,14 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             1 => coordinator
                 .and_then(|c| c.reference_branch.clone())
                 .unwrap_or_else(|| "main".to_string()),
-            2 => coordinator
-                .map(|c| {
-                    if c.prd_files.is_empty() {
-                        c.prd_file.clone().unwrap_or_else(|| "prd.json".into())
-                    } else {
-                        format!("{} PRDs: {}", c.prd_files.len(), c.prd_files.join(" -> "))
-                    }
-                })
-                .unwrap_or_else(|| "prd.json".to_string()),
+            2 => match coordinator
+                .map(CoordinatorConfig::configured_prds)
+                .unwrap_or_default()
+            {
+                [] => "prd.json (default)".into(),
+                [file] => file.clone(),
+                files => format!("{} PRDs: {}", files.len(), files.join(" -> ")),
+            },
             3 => coordinator
                 .map(|c| c.tool_priority.join(", "))
                 .unwrap_or_default(),
@@ -4369,13 +4368,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                         .automation
                         .coordinator
                         .as_ref()
-                        .map(|c| {
-                            if c.prd_files.is_empty() {
-                                c.prd_file.iter().cloned().collect()
-                            } else {
-                                c.prd_files.clone()
-                            }
-                        })
+                        .map(|c| c.configured_prds().to_vec())
                         .unwrap_or_default();
                     self.prd_queue_editor =
                         Some(crate::prd_queue::Editor::new(paths.root.clone(), files));
@@ -4708,7 +4701,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         let idx = self.automation_field_index;
         let input = self.automation_field_input.trim().to_string();
         let result = match idx {
-            0..=2 | 23 => {
+            0..=1 | 23 => {
                 if input.is_empty() && idx != 23 {
                     Err("Value cannot be empty.".to_string())
                 } else {
@@ -4842,7 +4835,6 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             match idx {
                 0 => coordinator.coordinator_tool = Some(value),
                 1 => coordinator.reference_branch = Some(value),
-                2 => coordinator.prd_file = Some(value),
                 13 => coordinator.stale_action = Some(value),
                 23 => coordinator.error_code_retry_list = Some(value),
                 32 => coordinator.safety_policy = Some(value),

@@ -116,3 +116,56 @@ fn public_sync_accepts_a_completed_series_and_retains_its_git_delivery_proof() {
         .find_task("NEW")
         .is_some());
 }
+
+#[test]
+fn removing_last_prd_clears_legacy_selection_and_reports_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join(".macc")).unwrap();
+    std::fs::create_dir_all(root.join("docs/prd")).unwrap();
+    let legacy = "docs/prd/a.json";
+    let content = r#"{"tasks":[{"id":"A"}]}"#;
+    std::fs::write(root.join(legacy), content).unwrap();
+    std::fs::write(root.join("docs/prd/other.json"), content).unwrap();
+    let paths = ProjectPaths::from_root(root);
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_macc"))
+            .current_dir(root)
+            .args(["coordinator", "prds"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    for explicit_queue in ["", "    prd_files: [docs/prd/other.json]\n"] {
+        let yaml = format!(
+            "tools:\n  enabled: []\nautomation:\n  coordinator:\n    prd_file: {legacy}\n{explicit_queue}"
+        );
+        std::fs::write(&paths.config_path, yaml).unwrap();
+        assert!(run(&["list"]).contains(if explicit_queue.is_empty() {
+            legacy
+        } else {
+            "docs/prd/other.json"
+        }));
+        assert!(run(&["remove", "1"]).contains("prd.json"));
+        let listed = run(&["list"]);
+        assert!(listed.contains("prd.json"));
+        assert!(!listed.contains("docs/prd/"));
+        let config = macc_core::load_canonical_config(&paths.config_path)
+            .unwrap()
+            .automation
+            .coordinator
+            .unwrap();
+        assert!(config.prd_file.is_none() && config.prd_files.is_empty());
+        assert_eq!(
+            prd_queue::active_path(root, Some(&config), None).unwrap(),
+            root.join("prd.json")
+        );
+        assert_eq!(std::fs::read_to_string(root.join(legacy)).unwrap(), content);
+    }
+}

@@ -66,7 +66,7 @@ fn save_files(paths: &ProjectPaths, opened: &CoordinatorConfig, files: Vec<Strin
                     .into(),
             ));
         }
-        current.prd_files = files;
+        current.set_prd_queue(files);
         Ok(())
     })?;
     Ok(())
@@ -82,11 +82,7 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
         .automation
         .coordinator
         .unwrap_or_default();
-    let mut files = if coordinator.prd_files.is_empty() {
-        coordinator.prd_file.iter().cloned().collect()
-    } else {
-        coordinator.prd_files.clone()
-    };
+    let mut files = coordinator.configured_prds().to_vec();
     if action == "status" {
         let progress = prd_queue::load(&paths.root)?;
         if args.get(1).is_some_and(|arg| arg == "--json") {
@@ -202,7 +198,12 @@ pub fn handle(paths: &ProjectPaths, args: &[String]) -> Result<()> {
             ))
         }
     }
+    let empty = files.is_empty();
     save_files(paths, &coordinator, files)?;
+    if empty {
+        println!("PRD queue cleared. The coordinator falls back to prd.json.");
+        return Ok(());
+    }
     println!("PRD queue saved. Run coordinator prds check before launching. Existing progress is preserved.");
     Ok(())
 }
