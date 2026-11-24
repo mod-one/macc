@@ -121,13 +121,18 @@ pub fn handle(
     engine: &crate::services::engine_provider::SharedEngine,
     mut input: CoordinatorCommandInput,
 ) -> Result<()> {
-    // Intercept "sessions" subcommand before normal coordinator dispatch.
+    let context = ProjectContext::load(absolute_cwd, engine)?;
+    if input.preflight_only {
+        return run_reference_branch_preflight(
+            engine,
+            &context.paths,
+            context.coordinator_cfg.as_ref(),
+            &input,
+        );
+    }
     if input.command_name == "sessions" {
-        let context = ProjectContext::load(absolute_cwd, engine)?;
         return handle_sessions_command(&context.paths.root, &input.extra_args);
     }
-
-    let context = ProjectContext::load(absolute_cwd, engine)?;
     if input.command_name == "prds" {
         if !matches!(
             input
@@ -922,7 +927,6 @@ fn run_reference_branch_preflight(
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
     input: &CoordinatorCommandInput,
 ) -> Result<()> {
-    #[allow(unused_imports)]
     use macc_core::coordinator::preflight::{self, BranchCreateSource, ReferencePreflightAction};
 
     let repo_root = &paths.root;
@@ -960,6 +964,19 @@ fn run_reference_branch_preflight(
         .inspect_reference_preflight(paths, &reference_branch, &cfg)
         .map_err(|e| MaccError::Validation(e.to_string()))?;
 
+    // --preflight-only: print result and exit.
+    if input.preflight_only {
+        println!("{}", preflight::format_report_cli(&report));
+        return if matches!(report.recommended_action, ReferencePreflightAction::Proceed) {
+            Ok(())
+        } else {
+            Err(MaccError::Validation(format!(
+                "Preflight failed for reference branch \"{}\".",
+                reference_branch
+            )))
+        };
+    }
+
     // Log preflight result to coordinator log if available.
     let log_event =
         preflight::build_preflight_log_event(&report, "pending", input.allow_dirty_reference);
@@ -977,19 +994,6 @@ fn run_reference_branch_preflight(
             }
             let _ = std::fs::write(&log_path, log_json);
         }
-    }
-
-    // --preflight-only: print result and exit.
-    if input.preflight_only {
-        println!("{}", preflight::format_report_cli(&report));
-        return if matches!(report.recommended_action, ReferencePreflightAction::Proceed) {
-            Ok(())
-        } else {
-            Err(MaccError::Validation(format!(
-                "Preflight failed for reference branch \"{}\".",
-                reference_branch
-            )))
-        };
     }
 
     match &report.status {
