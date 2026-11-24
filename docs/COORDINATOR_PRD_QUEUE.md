@@ -33,7 +33,7 @@ API: `GET /api/v1/coordinator/prd-queue`; `POST /api/v1/coordinator/prd-queue/ac
 
 ### After editing a registered PRD
 
-When `sync` detects a manual edit to a registered plan, it names the file, affected tasks and changed fields. Copy the `macc decisions graph reconcile-file --plan …` command from the error to preview the proposed revision. Review the operations, then run the confirmation command printed in `next`. If the file or plan changes in the meantime, generate a fresh preview. Projects using signed approval also require an attestation for the displayed challenge.
+When `sync` detects a manual edit to a registered plan, it names the file, affected tasks and changed fields. In a terminal, `sync` shows the proposed values and asks for confirmation. Answer `y` to save the reviewed revision and continue syncing. Press Enter to keep the edit for later. Use `--no-interactive` to disable prompting or `--interactive` to request it explicitly. For a separate review, copy the `macc decisions graph reconcile-file --plan …` command from the error to preview the proposed revision. Review the operations, then run the confirmation command printed in `next`. If the file or plan changes in the meantime, generate a fresh preview. Projects using signed approval also require an attestation for the displayed challenge.
 
 After confirmation, run `macc coordinator sync`. The revision preserves the edited file's formatting. Existing delivery and task-state guards still apply. Use `prds reset` for queue progress and fresh task IDs for new contracts.
 

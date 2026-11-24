@@ -102,4 +102,30 @@ fn sync_identifies_drift_then_accepts_only_the_reviewed_file() {
         .unwrap();
     assert_eq!(saved.graph_version, plan.graph_version + 1);
     assert_eq!(saved.graph, graph("second edit"));
+
+    assert_eq!(message.matches("PRD edits awaiting approval").count(), 1);
+    fs::write(&file, graph("interactive edit").to_string()).unwrap();
+    let interactive = |answer: &[u8]| {
+        use std::{io::Write, process::Stdio};
+        let mut child = Command::new(env!("CARGO_BIN_EXE_macc"))
+            .current_dir(root)
+            .args(["coordinator", "sync", "--interactive"])
+            .env("MACC_INTERNAL_INVOCATION", "1")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(answer).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let cancelled = interactive(b"\n");
+    assert!(!cancelled.status.success());
+    assert!(
+        String::from_utf8_lossy(&cancelled.stderr).contains("Sync cancelled"),
+        "{cancelled:?}"
+    );
+    let approved = interactive(b"yes\n");
+    assert!(approved.status.success(), "{approved:?}");
+    assert_eq!(preview()["status"], "already in sync");
 }

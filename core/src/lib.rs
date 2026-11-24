@@ -67,6 +67,9 @@ pub use worktree::{
 
 #[derive(Error, Debug)]
 pub enum MaccError {
+    #[error("{message}")]
+    PrdPlanDrift { plan_id: String, message: String },
+
     #[error("{source}")]
     ApplyPreparation {
         report: Box<service::preparation::Report>,

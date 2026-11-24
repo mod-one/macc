@@ -1,6 +1,7 @@
 mod file_review;
 use super::AppContext;
 use clap::Subcommand;
+pub(crate) use file_review::confirm_sync_edits;
 use macc_core::{coordinator::decisions as dm, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};

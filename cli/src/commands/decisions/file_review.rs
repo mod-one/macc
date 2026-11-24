@@ -55,3 +55,69 @@ pub(super) fn reconcile_file(
     }
     Ok(report)
 }
+
+pub(crate) fn confirm_sync_edits(root: &Path, id: &str) -> Result<()> {
+    use std::io::{self, Write};
+    let preview = reconcile_file(root, id, None, None)?;
+    let Some(token) = preview["confirmation"].as_str() else {
+        return Ok(());
+    };
+    if preview.get("challenge").is_some() {
+        return Err(dm::error(format!("A signed approval is required. Review the challenge with macc decisions graph reconcile-file --plan {id}")));
+    }
+    eprintln!("\nProposed values");
+    for op in preview["operations"].as_array().into_iter().flatten() {
+        if let (Some(id), Some(fields)) = (op["task_id"].as_str(), op["changes"].as_object()) {
+            eprintln!("  {id}");
+            for (field, value) in fields {
+                print_field(field, value);
+            }
+        } else {
+            eprintln!("  {op:#}");
+        }
+    }
+    if let Some(fields) = preview["metadata_changes"].as_object() {
+        for (field, value) in fields {
+            print_field(field, value);
+        }
+    }
+    eprint!("\nApprove these edits and continue sync? [y/N] ");
+    io::stderr().flush().map_err(|e| dm::error(e.to_string()))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| dm::error(e.to_string()))?;
+    if !matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes" | "o" | "oui"
+    ) {
+        return Err(dm::error(
+            "Sync cancelled. Your file edits are preserved and the plan was not updated.",
+        ));
+    }
+    let result = reconcile_file(root, id, Some(token), None)?;
+    eprintln!("Plan updated. Continuing sync for {}.", result["source"]);
+    Ok(())
+}
+
+fn print_field(field: &str, value: &Value) {
+    eprintln!("    {field}");
+    if let Some(items) = value.as_array().filter(|items| !items.is_empty()) {
+        for item in items {
+            eprintln!(
+                "      - {}",
+                item.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| item.to_string())
+            );
+        }
+    } else {
+        eprintln!(
+            "      {}",
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string())
+        );
+    }
+}

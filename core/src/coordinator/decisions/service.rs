@@ -50,7 +50,7 @@ pub fn active_plan(root: &Path) -> Result<(Store, Plan)> {
 }
 
 /// Read an existing active plan without importing requests or preparing storage.
-pub(crate) fn read_active_plan(root: &Path) -> Result<(Store, Plan)> {
+pub fn read_active_plan(root: &Path) -> Result<(Store, Plan)> {
     let (store, plan) =
         stored_plan_for_display(root)?.ok_or_else(|| error("No stored plan for the active PRD"))?;
     let disk = store.projection_diff(root, &plan)?;

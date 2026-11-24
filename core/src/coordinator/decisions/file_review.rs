@@ -12,6 +12,12 @@ pub(super) fn drift_error(plan: &Plan, actual: &Value) -> crate::MaccError {
                 row["task"].as_str().unwrap_or("?"),
                 row["change"].as_str().unwrap_or("?"),
                 row["fields"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if rows.len() > 12 {
@@ -27,8 +33,11 @@ pub(super) fn drift_error(plan: &Plan, actual: &Value) -> crate::MaccError {
     if details.is_empty() {
         details.push("Task order or structure changed".into());
     }
-    error(format!("{} differs from durable plan v{} on {}. {}. Sync stopped before accepting these changes. 'prds reset' only resets queue progress. Review the edits with: macc decisions graph reconcile-file --plan {}",
-        plan.source, plan.graph_version, plan.reference_branch, details.join("; "), plan.id))
+    crate::MaccError::PrdPlanDrift {
+        plan_id: plan.id.clone(),
+        message: format!("PRD edits awaiting approval\n  File: {}\n  Registered plan: version {} on {}\n\nChanges since approval\n  - {}\n\nThe coordinator uses the approved task definitions. Confirm the file edits to sync them.\n'prds reset' only resets queue progress.\n\nReview command: macc decisions graph reconcile-file --plan {}",
+            plan.source, plan.graph_version, plan.reference_branch, details.join("\n  - "), plan.id),
+    }
 }
 
 pub struct FileReview {

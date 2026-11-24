@@ -271,6 +271,16 @@ impl From<MaccError> for ApiError {
                 response.body.error.preparation = Some(report);
                 response
             }
+            MaccError::PrdPlanDrift { plan_id, message } => ApiError::new(
+                StatusCode::CONFLICT,
+                "prd_plan_drift",
+                "Conflict",
+                message,
+                false,
+                Some("Run macc coordinator sync in a terminal to review the edits".into()),
+                Some(serde_json::json!({"plan_id":plan_id})),
+                None,
+            ),
             MaccError::ConfigRevisionConflict => ApiError::new(
                 StatusCode::CONFLICT,
                 "config_revision_conflict",

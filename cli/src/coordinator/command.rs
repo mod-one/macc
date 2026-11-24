@@ -167,6 +167,16 @@ pub fn handle(
             return handle_interactive_approval(engine, paths, canonical, coordinator_cfg, &input);
         }
     }
+    let interactive_sync = if input.command_name == "sync" {
+        let (interactive, rest) = approval_prompt::split_interactive_flags(
+            &input.extra_args,
+            approval_prompt::stdio_is_terminal(),
+        );
+        input.extra_args = rest;
+        interactive
+    } else {
+        false
+    };
     let command = coordinator_command_from_name(
         &input.command_name,
         &input.extra_args,
@@ -410,16 +420,39 @@ Performers cannot commit without it. Fix this first:\n\
         .as_ref()
         .map(|adapter| adapter as &dyn macc_core::coordinator::control_plane::CoordinatorLog);
 
-    let response = engine.coordinator_execute_command(
-        paths,
-        command.clone(),
-        CoordinatorCommandRequest {
-            canonical: Some(canonical),
-            coordinator_cfg,
-            env_cfg: &input.env_cfg,
-            logger: core_logger,
-        },
-    )?;
+    let execute = || {
+        engine.coordinator_execute_command(
+            paths,
+            command.clone(),
+            CoordinatorCommandRequest {
+                canonical: Some(canonical),
+                coordinator_cfg,
+                env_cfg: &input.env_cfg,
+                logger: core_logger,
+            },
+        )
+    };
+    let first = execute().map_err(|err| {
+        // The queue fingerprint can detect the very same edit before decision control.
+        if command == CoordinatorCommand::SyncRegistry
+            && input.env_cfg.prd.is_none()
+            && coordinator_cfg.and_then(|c| c.decisions.as_ref()).is_some_and(|p| p.enabled)
+            && matches!(&err, MaccError::Validation(msg) if msg.contains(macc_core::prd_queue::transition::CODE)) {
+            if let Err(drift @ MaccError::PrdPlanDrift { .. }) =
+                macc_core::coordinator::decisions::read_active_plan(&paths.root) {
+                return drift;
+            }
+        }
+        err
+    });
+    let response = match first {
+        Err(MaccError::PrdPlanDrift { plan_id, message }) if interactive_sync => {
+            eprintln!("{message}");
+            crate::commands::decisions::confirm_sync_edits(&paths.root, &plan_id)?;
+            execute()?
+        }
+        result => result?,
+    };
 
     match &command {
         CoordinatorCommand::BlockTask { task_id, .. } => {
