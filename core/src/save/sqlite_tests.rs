@@ -687,6 +687,45 @@ fn nested_phase_logs_round_trip_with_deterministic_budget_omissions() {
 }
 
 #[test]
+fn log_checksum_paths_preserve_spaces_on_restore() {
+    let (_tmp, paths, saves) = setup();
+    let logs = paths.macc_dir.join("log/coordinator");
+    fs::create_dir_all(&logs).unwrap();
+    let files = [
+        ("review  final.txt", "review"),
+        #[cfg(unix)]
+        ("review  final.txt ", "distinct trailing space"),
+    ];
+    for (name, content) in files {
+        fs::write(logs.join(name), content).unwrap();
+    }
+    let opts = SaveOptions {
+        only: Some("logs".into()),
+        ..options()
+    };
+    bundle::create_in(&paths, "spaced", &opts, &saves).unwrap();
+    let restore_opts = RestoreOptions {
+        include_logs: true,
+        ..restore_options()
+    };
+    restore::restore_from(&paths, "spaced", &restore_opts, &saves).unwrap();
+    let restored = paths.macc_dir.join("restored-logs/spaced/coordinator");
+    for (name, content) in files {
+        assert_eq!(fs::read(restored.join(name)).unwrap(), content.as_bytes());
+    }
+
+    fs::write(
+        saves.join("spaced/logs/coordinator/review  final.txt"),
+        "changed",
+    )
+    .unwrap();
+    let error = restore::restore_from(&paths, "spaced", &restore_opts, &saves).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("File is corrupted: logs/coordinator/review  final.txt"));
+}
+
+#[test]
 fn log_archive_io_failure_identifies_the_path() {
     let (_tmp, paths, saves) = setup();
     let log = paths.macc_dir.join("log");

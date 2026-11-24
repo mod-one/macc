@@ -82,19 +82,14 @@ pub(super) fn restore_from(
         })?;
 
         for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            if line.trim().is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = line.split("  ").collect();
-            if parts.len() != 2 {
-                return Err(MaccError::Validation(format!(
-                    "MACC-RESTORE-2003: Checksum file format is invalid: {}",
-                    line
-                )));
-            }
-            let expected_sha = parts[0];
-            let rel_path = parts[1];
+            let (expected_sha, rel_path) = line.split_once("  ").ok_or_else(|| {
+                MaccError::Validation(format!(
+                    "MACC-RESTORE-2003: Checksum file format is invalid: {line}"
+                ))
+            })?;
 
             let target_path = super::sessions::payload(&target_save_dir, rel_path)?;
 
