@@ -80,6 +80,7 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
         .or_else(|| coordinator_cfg.and_then(|c| c.phase_runner_max_attempts))
         .unwrap_or(1)
         .max(1);
+    let expected = task.clone();
     if phase == "review" {
         let limit = env_cfg
             .max_review_cycles
@@ -94,7 +95,7 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     );
     task.set_workflow_state(retry_state);
     let assignment = task.clone();
-    engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
+    crate::coordinator::state::replace_phase_task(paths, &state_args, &expected, &assignment)?;
     let tool = env_cfg
         .coordinator_tool
         .as_deref()
@@ -138,6 +139,7 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
             "Task {task_id} changed state during {phase} retry; outcome discarded"
         )));
     }
+    let expected = task.clone();
     if let Some(count) = review_attempts {
         task.task_runtime.settle_review_attempts(count);
     }
@@ -172,7 +174,7 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
             Err(MaccError::Validation(reason))
         }
     };
-    engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
+    crate::coordinator::state::replace_phase_task(paths, &state_args, &expected, task)?;
     outcome
 }
 
@@ -253,3 +255,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "coordinator_phase_retry_concurrency_tests.rs"]
+mod concurrency_tests;

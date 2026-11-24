@@ -7,7 +7,7 @@ pub use reader::CoordinatorReader;
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -321,6 +321,39 @@ impl JsonStorage {
     pub fn new(paths: CoordinatorStoragePaths) -> Self {
         Self { paths }
     }
+    fn write_locked_snapshot(&self, snapshot: &CoordinatorSnapshot) -> Result<()> {
+        ensure_parent_dir(&self.paths.registry_json_path)?;
+        ensure_parent_dir(&self.paths.events_jsonl_path)?;
+        ensure_parent_dir(&self.paths.cursor_json_path)?;
+
+        write_json_atomic(&self.paths.registry_json_path, &snapshot.registry)?;
+
+        let mut events_buf = String::new();
+        for event in &snapshot.events {
+            let line = serde_json::to_string(event).map_err(|e| MaccError::Storage {
+                backend: "json",
+                message: format!("Failed to serialize event json: {}", e),
+            })?;
+            events_buf.push_str(&line);
+            events_buf.push('\n');
+        }
+        write_text_atomic(&self.paths.events_jsonl_path, &events_buf)?;
+
+        match &snapshot.cursor {
+            Some(cursor) => write_json_atomic(&self.paths.cursor_json_path, cursor)?,
+            None => {
+                if self.paths.cursor_json_path.exists() {
+                    fs::remove_file(&self.paths.cursor_json_path).map_err(|e| MaccError::Io {
+                        path: self.paths.cursor_json_path.to_string_lossy().into(),
+                        action: "remove coordinator cursor json".into(),
+                        source: e,
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn replace_registry(&self, registry: &TaskRegistry) -> Result<()> {
         ensure_parent_dir(&self.paths.registry_json_path)?;
         let _guard = lock_json_registry(&self.paths.registry_json_path)?;
@@ -371,36 +404,8 @@ impl CoordinatorStorage for JsonStorage {
     }
 
     fn save_snapshot(&self, snapshot: &CoordinatorSnapshot) -> Result<()> {
-        ensure_parent_dir(&self.paths.registry_json_path)?;
-        ensure_parent_dir(&self.paths.events_jsonl_path)?;
-        ensure_parent_dir(&self.paths.cursor_json_path)?;
-
-        self.replace_registry(&snapshot.registry)?;
-
-        let mut events_buf = String::new();
-        for event in &snapshot.events {
-            let line = serde_json::to_string(event).map_err(|e| MaccError::Storage {
-                backend: "json",
-                message: format!("Failed to serialize event json: {}", e),
-            })?;
-            events_buf.push_str(&line);
-            events_buf.push('\n');
-        }
-        write_text_atomic(&self.paths.events_jsonl_path, &events_buf)?;
-
-        match &snapshot.cursor {
-            Some(cursor) => write_json_atomic(&self.paths.cursor_json_path, cursor)?,
-            None => {
-                if self.paths.cursor_json_path.exists() {
-                    fs::remove_file(&self.paths.cursor_json_path).map_err(|e| MaccError::Io {
-                        path: self.paths.cursor_json_path.to_string_lossy().into(),
-                        action: "remove coordinator cursor json".into(),
-                        source: e,
-                    })?;
-                }
-            }
-        }
-        Ok(())
+        let _guard = lock_json_registry(&self.paths.registry_json_path)?;
+        self.write_locked_snapshot(snapshot)
     }
 }
 
@@ -1527,7 +1532,7 @@ impl SqliteStorage {
 
     /// Compare the complete retained assignment under the SQLite write lock.
     /// Only the affected task and its runtime projection belong to this write.
-    pub(crate) fn requeue_if_unchanged(
+    pub(crate) fn replace_phase_task_if_unchanged(
         &self,
         expected: &Task,
         next: &Task,
@@ -1548,7 +1553,15 @@ impl SqliteStorage {
             .as_deref()
             .map(|s| parse_task_payload(&expected.id, s))
             .transpose()?;
-        if current.as_ref() != Some(expected) {
+        if current.is_none() {
+            // Historical snapshots may store all tasks in registry_json only.
+            // Materialize that exact registry under the same write transaction.
+            let registry = self.load_registry_with_conn(&tx)?;
+            if registry.find_task(&expected.id) != Some(expected) {
+                return Ok(false);
+            }
+            self.write_registry_rows(&tx, &registry, now)?;
+        } else if current.as_ref() != Some(expected) {
             return Ok(false);
         }
         let payload =
@@ -1560,13 +1573,74 @@ impl SqliteStorage {
         .map_err(sql_err)?;
         self.upsert_task_runtime_row(&tx, next, now)?;
         tx.execute(
-            "DELETE FROM jobs WHERE task_id=?1 AND job_type='performer'",
+            "DELETE FROM jobs WHERE task_id=?1 AND job_type IN ('performer','merge_worker')",
             [&expected.id],
         )
         .map_err(sql_err)?;
+        self.insert_task_jobs(&tx, next, now)?;
         tx.execute("UPDATE metadata SET value=json_set(value, '$.updated_at', ?1), updated_at=?1 WHERE key='registry_json'", [now]).map_err(sql_err)?;
         tx.commit().map_err(sql_err)?;
         Ok(true)
+    }
+
+    fn insert_task_jobs(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        task: &Task,
+        now: &str,
+    ) -> Result<()> {
+        let runtime = &task.task_runtime;
+        let status = runtime.status.as_deref().unwrap_or("idle");
+        for (kind, suffix, pid) in [
+            ("performer", "performer", runtime.pid),
+            ("merge_worker", "merge", runtime.merge_worker_pid),
+        ] {
+            let Some(pid) = pid else { continue };
+            let payload = json!({"task_id":task.id,"job_type":kind,"pid":pid,"status":status});
+            tx.execute("INSERT INTO jobs (job_key, task_id, job_type, pid, status, payload_json, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![format!("{}:{suffix}", task.id), task.id, kind, pid, status, payload.to_string(), now]).map_err(sql_err)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unlock_resources(
+        &self,
+        resource: Option<&str>,
+        clear_all: bool,
+    ) -> Result<usize> {
+        let mut conn = self.open()?;
+        self.init_schema(&conn)?;
+        let tx = write_transaction(&mut conn)?;
+        let mut locks = Self::read_lock_rows(&tx)?;
+        if locks.is_empty() {
+            use rusqlite::OptionalExtension;
+            let raw: Option<String> = tx.query_row(
+                "SELECT coalesce(json_extract(value, '$.resource_locks'), '{}') FROM metadata WHERE key='registry_json'",
+                [], |row| row.get(0),
+            ).optional().map_err(sql_err)?;
+            if let Some(raw) = raw {
+                locks = serde_json::from_str(&raw).map_err(|e| {
+                    MaccError::Validation(format!("Invalid stored resource locks: {e}"))
+                })?;
+            }
+        }
+        let removed =
+            crate::coordinator::model::release_resource_locks(&mut locks, resource, clear_all);
+        if removed > 0 {
+            tx.execute(
+                "DELETE FROM resource_locks WHERE ?1 OR resource=?2",
+                params![clear_all, resource],
+            )
+            .map_err(sql_err)?;
+            // Older snapshots can still supply locks from registry metadata.
+            let locks =
+                serde_json::to_string(&locks).map_err(|e| MaccError::Validation(e.to_string()))?;
+            tx.execute("UPDATE metadata SET value=json_set(value,'$.resource_locks',json(?1)), updated_at=?2 WHERE key='registry_json'",
+                params![locks,now_iso_string()]).map_err(sql_err)?;
+        }
+        tx.commit().map_err(sql_err)?;
+        Ok(removed)
     }
 
     pub fn set_merge_pending(&self, change: &MergePendingMutation) -> Result<()> {
@@ -1963,6 +2037,30 @@ impl SqliteStorage {
         Ok(())
     }
 
+    fn read_lock_rows(conn: &Connection) -> Result<BTreeMap<String, ResourceLock>> {
+        let mut locks = BTreeMap::new();
+        let mut stmt = conn
+            .prepare("SELECT resource, payload_json FROM resource_locks ORDER BY resource")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let resource: String = row.get(0)?;
+                let payload: String = row.get(1)?;
+                Ok((resource, payload))
+            })
+            .map_err(sql_err)?;
+        for row in rows {
+            let (resource, payload) = row.map_err(sql_err)?;
+            let lock =
+                serde_json::from_str::<ResourceLock>(&payload).map_err(|e| MaccError::Storage {
+                    backend: "sqlite",
+                    message: format!("Invalid coordinator lock {resource}: {e}"),
+                })?;
+            locks.insert(resource, lock);
+        }
+        Ok(locks)
+    }
+
     fn load_registry_from_tables(&self, conn: &Connection) -> Result<TaskRegistry> {
         let mut registry = TaskRegistry::default();
         let mut stmt = conn
@@ -1985,25 +2083,7 @@ impl SqliteStorage {
             registry.tasks.push(task);
         }
 
-        let mut stmt = conn
-            .prepare("SELECT resource, payload_json FROM resource_locks ORDER BY resource")
-            .map_err(sql_err)?;
-        let rows = stmt
-            .query_map([], |row| {
-                let resource: String = row.get(0)?;
-                let payload: String = row.get(1)?;
-                Ok((resource, payload))
-            })
-            .map_err(sql_err)?;
-        for row in rows {
-            let (resource, payload) = row.map_err(sql_err)?;
-            let lock =
-                serde_json::from_str::<ResourceLock>(&payload).map_err(|e| MaccError::Storage {
-                    backend: "sqlite",
-                    message: format!("Invalid coordinator lock {resource}: {e}"),
-                })?;
-            registry.resource_locks.insert(resource, lock);
-        }
+        registry.resource_locks = Self::read_lock_rows(conn)?;
         registry.updated_at = Some(now_iso_string());
         registry
             .extra
@@ -2253,10 +2333,11 @@ impl CoordinatorStorage for SqliteStorage {
     fn load_snapshot(&self) -> Result<CoordinatorSnapshot> {
         let conn = self.open()?;
         self.init_schema(&conn)?;
-        let registry = self.load_registry_with_conn(&conn)?;
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        let registry = self.load_registry_with_conn(&tx)?;
 
         let mut events = Vec::new();
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare("SELECT raw_json FROM events ORDER BY seq ASC, event_id ASC")
             .map_err(sql_err)?;
         let rows = stmt
@@ -2269,7 +2350,9 @@ impl CoordinatorStorage for SqliteStorage {
             }
         }
 
-        let cursor = self.load_cursor_with_conn(&conn)?;
+        drop(stmt);
+        let cursor = self.load_cursor_with_conn(&tx)?;
+        tx.commit().map_err(sql_err)?;
 
         Ok(CoordinatorSnapshot {
             registry,
@@ -2370,8 +2453,6 @@ impl SqliteStorage {
                 backend: "sqlite",
                 message: format!("Failed to serialize task payload: {}", e),
             })?;
-            let runtime_status = task.task_runtime.status.as_deref().unwrap_or("idle");
-            let pid = task.task_runtime.pid;
             let runtime_updated = task
                 .task_runtime
                 .extra
@@ -2388,48 +2469,7 @@ impl SqliteStorage {
                 self.upsert_task_runtime_row(tx, task, runtime_updated)?;
             }
 
-            if let Some(pid) = pid {
-                let job_payload = json!({
-                    "task_id": task_id,
-                    "job_type": "performer",
-                    "pid": pid,
-                    "status": runtime_status,
-                });
-                tx.execute(
-                    "INSERT INTO jobs (job_key, task_id, job_type, pid, status, payload_json, updated_at)
-                     VALUES (?1, ?2, 'performer', ?3, ?4, ?5, ?6)",
-                    params![
-                        format!("{}:performer", task_id),
-                        task_id,
-                        pid,
-                        runtime_status,
-                        serde_json::to_string(&job_payload).unwrap_or_else(|_| "{}".to_string()),
-                        runtime_updated
-                    ],
-                )
-                .map_err(sql_err)?;
-            }
-            if let Some(merge_pid) = task.task_runtime.merge_worker_pid {
-                let job_payload = json!({
-                    "task_id": task_id,
-                    "job_type": "merge_worker",
-                    "pid": merge_pid,
-                    "status": runtime_status,
-                });
-                tx.execute(
-                    "INSERT INTO jobs (job_key, task_id, job_type, pid, status, payload_json, updated_at)
-                     VALUES (?1, ?2, 'merge_worker', ?3, ?4, ?5, ?6)",
-                    params![
-                        format!("{}:merge", task_id),
-                        task_id,
-                        merge_pid,
-                        runtime_status,
-                        serde_json::to_string(&job_payload).unwrap_or_else(|_| "{}".to_string()),
-                        runtime_updated
-                    ],
-                )
-                .map_err(sql_err)?;
-            }
+            self.insert_task_jobs(tx, task, runtime_updated)?;
         }
 
         for (resource, lock_value) in &registry.resource_locks {
@@ -2686,8 +2726,9 @@ pub fn coordinator_storage_export_sqlite_to_json(project_paths: &ProjectPaths) -
     let paths = CoordinatorStoragePaths::from_project_paths(project_paths);
     let json_store = JsonStorage::new(paths.clone());
     let sqlite_store = SqliteStorage::new(paths);
+    let _guard = lock_json_registry(&json_store.paths.registry_json_path)?;
     let sqlite_snapshot = sqlite_store.load_snapshot()?;
-    json_store.save_snapshot(&sqlite_snapshot)
+    json_store.write_locked_snapshot(&sqlite_snapshot)
 }
 
 pub fn coordinator_storage_verify_parity(project_paths: &ProjectPaths) -> Result<()> {

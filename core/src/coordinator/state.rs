@@ -52,6 +52,7 @@ pub fn coordinator_state_apply_transition(
     }
 
     let registry_path = coordinator_registry_path(repo_root);
+    let _guard = crate::coordinator_storage::lock_json_registry(&registry_path)?;
     let mut typed = TaskRegistry::from_value(&load_registry(&registry_path)?)?;
     let Some(task) = typed.find_task_mut(&task_id) else {
         return Err(MaccError::Validation(format!(
@@ -85,7 +86,7 @@ pub fn coordinator_state_apply_transition(
 
     typed.recompute_resource_locks(&now);
     typed.updated_at = Some(now);
-    save_registry(&registry_path, &typed.to_value()?)?;
+    write_registry(&registry_path, &typed.to_value()?)?;
     Ok(())
 }
 
@@ -139,6 +140,7 @@ pub fn coordinator_state_set_runtime(
     }
 
     let registry_path = coordinator_registry_path(repo_root);
+    let _guard = crate::coordinator_storage::lock_json_registry(&registry_path)?;
     let mut typed = TaskRegistry::from_value(&load_registry(&registry_path)?)?;
     let Some(task) = typed.find_task_mut(&task_id) else {
         return Err(MaccError::Validation(format!(
@@ -227,7 +229,7 @@ pub fn coordinator_state_set_runtime(
     }
     task.updated_at = Some(now.clone());
     typed.updated_at = Some(now);
-    save_registry(&registry_path, &typed.to_value()?)?;
+    write_registry(&registry_path, &typed.to_value()?)?;
     Ok(())
 }
 
@@ -336,6 +338,16 @@ pub(crate) fn skip_retained_phase(
     next.set_workflow_state(WorkflowState::Todo);
     next.touch_state_changed(&now);
     reset_runtime_to_idle_typed(&mut next);
+    replace_phase_task(paths, args, expected, &next)
+}
+
+pub(crate) fn replace_phase_task(
+    paths: &ProjectPaths,
+    args: &BTreeMap<String, String>,
+    expected: &Task,
+    next: &Task,
+) -> Result<()> {
+    let now = now_iso();
     let storage = CoordinatorStoragePaths::from_project_paths(paths);
     match resolve_storage_mode(args)? {
         CoordinatorStorageMode::Json => {
@@ -346,12 +358,12 @@ pub(crate) fn skip_retained_phase(
                 .find_task_mut(&expected.id)
                 .filter(|current| **current == *expected)
                 .ok_or_else(|| stale_phase_assignment(expected))?;
-            *task = next;
+            *task = next.clone();
             registry.updated_at = Some(now);
             write_registry(path, &registry.to_value()?)
         }
         CoordinatorStorageMode::Sqlite | CoordinatorStorageMode::DualWrite => {
-            if !SqliteStorage::new(storage).requeue_if_unchanged(expected, &next, &now)? {
+            if !SqliteStorage::new(storage).replace_phase_task_if_unchanged(expected, next, &now)? {
                 return Err(stale_phase_assignment(expected));
             }
             maybe_mirror_json(paths, args)
@@ -390,22 +402,34 @@ pub fn coordinator_state_unlock_resource(
     resource: Option<&str>,
     clear_all: bool,
 ) -> Result<usize> {
-    let mut snapshot = load_snapshot_view(repo_root, args)?;
-    let removed = if clear_all {
-        let count = snapshot.registry.resource_locks.len();
-        snapshot.registry.resource_locks.clear();
-        count
-    } else if let Some(name) = resource {
-        if snapshot.registry.resource_locks.remove(name).is_some() {
-            1
-        } else {
-            0
+    let paths = ProjectPaths::from_root(repo_root);
+    let storage = CoordinatorStoragePaths::from_project_paths(&paths);
+    match resolve_storage_mode(args)? {
+        CoordinatorStorageMode::Json => {
+            let path = &storage.registry_json_path;
+            let _guard = crate::coordinator_storage::lock_json_registry(path)?;
+            if !path.exists() {
+                return Ok(0);
+            }
+            let mut registry = TaskRegistry::from_value(&load_registry(path)?)?;
+            let removed = crate::coordinator::model::release_resource_locks(
+                &mut registry.resource_locks,
+                resource,
+                clear_all,
+            );
+            if removed > 0 {
+                write_registry(path, &registry.to_value()?)?;
+            }
+            Ok(removed)
         }
-    } else {
-        0
-    };
-    coordinator_state_save_snapshot(repo_root, args, &snapshot)?;
-    Ok(removed)
+        CoordinatorStorageMode::Sqlite | CoordinatorStorageMode::DualWrite => {
+            let removed = SqliteStorage::new(storage).unlock_resources(resource, clear_all)?;
+            if removed > 0 {
+                maybe_mirror_json(&paths, args)?;
+            }
+            Ok(removed)
+        }
+    }
 }
 
 pub fn coordinator_state_set_merge_pending(
@@ -529,13 +553,7 @@ pub fn coordinator_state_registry_save(
         CoordinatorStorageMode::DualWrite | CoordinatorStorageMode::Sqlite => {
             let sqlite = SqliteStorage::new(store_paths.clone());
             if sqlite.has_snapshot_data()? {
-                // The coordinator saves the registry many times per tick; only
-                // the JSON mirror needs the event log in hand.
-                if should_mirror_json(args) {
-                    sqlite.load_snapshot()?
-                } else {
-                    sqlite.load_snapshot_without_events()?
-                }
+                sqlite.load_snapshot_without_events()?
             } else if store_paths.registry_json_path.exists() {
                 JsonStorage::new(store_paths.clone()).load_snapshot()?
             } else {
@@ -549,9 +567,9 @@ pub fn coordinator_state_registry_save(
             JsonStorage::new(store_paths).save_snapshot(&snapshot)?;
         }
         CoordinatorStorageMode::DualWrite | CoordinatorStorageMode::Sqlite => {
-            SqliteStorage::new(store_paths.clone()).save_snapshot(&snapshot)?;
+            SqliteStorage::new(store_paths).save_snapshot(&snapshot)?;
             if should_mirror_json(args) {
-                let _ = JsonStorage::new(store_paths).save_snapshot(&snapshot);
+                coordinator_storage_export_sqlite_to_json(&project_paths)?;
             }
         }
     }
@@ -592,11 +610,6 @@ fn load_registry(path: &Path) -> Result<Value> {
             e
         ))
     })
-}
-
-fn save_registry(path: &Path, value: &Value) -> Result<()> {
-    let _guard = crate::coordinator_storage::lock_json_registry(path)?;
-    write_registry(path, value)
 }
 
 fn write_registry(path: &Path, value: &Value) -> Result<()> {

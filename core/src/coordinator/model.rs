@@ -800,6 +800,16 @@ fn is_default_task_runtime(runtime: &TaskRuntime) -> bool {
     runtime == &TaskRuntime::default()
 }
 
+pub(crate) fn release_resource_locks(
+    locks: &mut BTreeMap<String, ResourceLock>,
+    resource: Option<&str>,
+    clear_all: bool,
+) -> usize {
+    let before = locks.len();
+    locks.retain(|name, _| !clear_all && Some(name.as_str()) != resource);
+    before - locks.len()
+}
+
 impl TaskRegistry {
     pub fn from_value(value: &Value) -> Result<Self> {
         serde_json::from_value::<Self>(value.clone()).map_err(|e| MaccError::Coordinator {
