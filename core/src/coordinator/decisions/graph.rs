@@ -179,7 +179,7 @@ impl Store {
         if let Some(old) = old {
             let plan: Plan = decode(&old)?;
             if digest(&graph) != plan.source_digest {
-                return Err(error("PRD differs from the durable plan. Preview/reconcile an explicit graph patch; no dispatch allowed"));
+                return Err(super::file_review::drift_error(&plan, &graph));
             }
             sql(tx.commit())?;
             return Ok(plan);

@@ -31,7 +31,11 @@ CLI reset explains the action and requires confirmation. The TUI queue editor re
 
 API: `GET /api/v1/coordinator/prd-queue`; `POST /api/v1/coordinator/prd-queue/accept` with `{ "revision": "...", "confirmed": true }`. The POST requires the existing project owner gate.
 
-Queue acceptance does not overwrite durable decision plans or waive decision approvals. For an existing PRD managed by decision control, use the existing native graph-change/reconciliation workflow for contract edits. New series should use new PRD files and fresh task IDs for new contracts.
+### After editing a registered PRD
+
+When `sync` detects a manual edit to a registered plan, it names the file, affected tasks and changed fields. Copy the `macc decisions graph reconcile-file --plan …` command from the error to preview the proposed revision. Review the operations, then run the confirmation command printed in `next`. If the file or plan changes in the meantime, generate a fresh preview. Projects using signed approval also require an attestation for the displayed challenge.
+
+After confirmation, run `macc coordinator sync`. The revision preserves the edited file's formatting. Existing delivery and task-state guards still apply. Use `prds reset` for queue progress and fresh task IDs for new contracts.
 
 ## History and diagnostics
 

@@ -63,6 +63,17 @@ impl Store {
             "decision mutation/publication",
         )
     }
+    pub fn inspect_registered(root: &Path) -> crate::Result<Option<Self>> {
+        let directory = crate::persistent::directory(root)?;
+        let path = directory.join("control.sqlite");
+        crate::persistent::no_symlink(&directory)?;
+        crate::persistent::no_symlink(&path)?;
+        if !path.try_exists().map_err(|e| error(e.to_string()))? {
+            return Ok(None);
+        }
+        Self::open_read_only(root, &path).map(Some)
+    }
+
     pub fn location(root: &Path) -> crate::Result<PathBuf> {
         Ok(crate::persistent::prepare(root)?.join("control.sqlite"))
     }

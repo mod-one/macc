@@ -1,3 +1,4 @@
+mod file_review;
 use super::AppContext;
 use clap::Subcommand;
 use macc_core::{coordinator::decisions as dm, Result};
@@ -337,6 +338,15 @@ pub enum OperationAction {
 }
 #[derive(Subcommand)]
 pub enum GraphAction {
+    /// Review a hand-edited PRD, then accept the exact preview with its confirmation token.
+    ReconcileFile {
+        #[arg(long)]
+        plan: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long, requires = "confirm")]
+        attestation_file: Option<PathBuf>,
+    },
     Show,
     Preview {
         file: PathBuf,
@@ -446,6 +456,22 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
     }
     if let Action::ContextBudget { task, phase } = action {
         return Ok(json!(dm::context_budget(root, task, phase)?));
+    }
+    if let Action::Graph {
+        action:
+            GraphAction::ReconcileFile {
+                plan,
+                confirm,
+                attestation_file,
+            },
+    } = action
+    {
+        return file_review::reconcile_file(
+            root,
+            plan,
+            confirm.as_deref(),
+            attestation_file.as_deref(),
+        );
     }
     let p = dm::policy(root)?;
     if let Action::Transport {

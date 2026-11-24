@@ -53,25 +53,21 @@ pub fn active_plan(root: &Path) -> Result<(Store, Plan)> {
 pub(crate) fn read_active_plan(root: &Path) -> Result<(Store, Plan)> {
     let (store, plan) =
         stored_plan_for_display(root)?.ok_or_else(|| error("No stored plan for the active PRD"))?;
-    if store.projection_diff(root, &plan)?["changed"] == true {
-        return Err(error("Active PRD differs from its stored decision plan"));
+    let disk = store.projection_diff(root, &plan)?;
+    if disk["changed"] == true {
+        return Err(super::file_review::drift_error(&plan, &disk["actual"]));
     }
     Ok((store, plan))
 }
 
 fn stored_plan_for_display(root: &Path) -> Result<Option<(Store, Plan)>> {
-    let directory = crate::persistent::directory(root)?;
-    let path = directory.join("control.sqlite");
-    crate::persistent::no_symlink(&directory)?;
-    crate::persistent::no_symlink(&path)?;
-    if !path.try_exists().map_err(|e| error(e.to_string()))? {
+    let Some(store) = Store::inspect_registered(root)? else {
         return Ok(None);
-    }
+    };
     let config = crate::load_canonical_config(&ProjectPaths::from_root(root).config_path)?;
     let cfg = config.automation.coordinator.as_ref();
     let source = crate::prd_queue::current(root, cfg).path;
     let reference = crate::config::CoordinatorConfigResolved::resolve(cfg).reference_branch;
-    let store = Store::open_read_only(root, &path)?;
     let plan = store
         .plans()?
         .into_iter()
@@ -193,7 +189,7 @@ pub fn poll_snapshot(root: &Path) -> Result<Value> {
         if let Some((store, plan)) = stored_plan_for_display(root)? {
             let projection_error = match store.projection_diff(root, &plan) {
                 Ok(diff) if diff["changed"] == true => {
-                    Some("Active PRD differs from its stored decision plan".into())
+                    Some(super::file_review::drift_error(&plan, &diff["actual"]).to_string())
                 }
                 Err(err) => Some(err.to_string()),
                 _ => None,
@@ -1258,13 +1254,21 @@ impl Store {
         Ok(decision)
     }
     pub fn project(&mut self, root: &Path) -> Result<()> {
+        self.project_selected(root, None)
+    }
+
+    pub fn project_selected(&mut self, root: &Path, selected_plan: Option<&str>) -> Result<()> {
         let cfg = crate::load_canonical_config(&ProjectPaths::from_root(root).config_path)?;
         let reference =
             crate::config::CoordinatorConfigResolved::resolve(cfg.automation.coordinator.as_ref())
                 .reference_branch;
         // A missing exported PRD is recoverable even when the original outbox
         // was already acknowledged before clear/crash.
-        for plan in self.plans()? {
+        for plan in self
+            .plans()?
+            .into_iter()
+            .filter(|p| selected_plan.is_none_or(|id| p.id == id))
+        {
             if plan.reference_branch == reference && !root.join(&plan.source).exists() {
                 sql(self.db.execute("INSERT INTO outbox(plan_id,kind,payload) SELECT ?1,'graph',?2 WHERE NOT EXISTS(SELECT 1 FROM outbox WHERE plan_id=?1 AND applied=0)",rusqlite::params![plan.id,encode(&plan)?]))?;
             }
@@ -1272,8 +1276,8 @@ impl Store {
         let pending: Vec<(i64, String)> = {
             let mut stmt = sql(self
                 .db
-                .prepare("SELECT id,plan_id FROM outbox WHERE applied=0 ORDER BY id"))?;
-            let rows = sql(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))))?;
+                .prepare("SELECT id,plan_id FROM outbox WHERE applied=0 AND (?1 IS NULL OR plan_id=?1) ORDER BY id"))?;
+            let rows = sql(stmt.query_map([selected_plan], |r| Ok((r.get(0)?, r.get(1)?))))?;
             rows.map(sql).collect::<Result<_>>()?
         };
         for (id, plan_id) in pending {
@@ -1290,10 +1294,17 @@ impl Store {
             }
             let paths = ProjectPaths::from_root(root);
             let target = super::graph::projection_path(root, &plan.source)?;
-            if let Ok(bytes) = std::fs::read(&target) {
+            let bytes = match std::fs::read(&target) {
+                Ok(bytes) => Some(bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(error(format!("Cannot read {}: {e}", target.display()))),
+            };
+            let mut needs_write = true;
+            if let Some(bytes) = bytes.as_deref() {
                 let disk: Value =
-                    serde_json::from_slice(&bytes).map_err(|e| error(e.to_string()))?;
-                if digest(&disk) != plan.source_digest {
+                    serde_json::from_slice(bytes).map_err(|e| error(e.to_string()))?;
+                needs_write = digest(&disk) != plan.source_digest;
+                if needs_write {
                     // Only replace the previous accepted projection, never a
                     // hand-edited PRD competing with an outbox replay.
                     let mut stmt=sql(tx.prepare("SELECT payload FROM events WHERE plan_id=?1 AND kind IN ('plan.imported','graph.patch.committed','graph.source.reconciled') ORDER BY seq"))?;
@@ -1306,26 +1317,23 @@ impl Store {
                         }
                     }
                     if !known {
-                        return Err(error(
-                            "PRD projection has out-of-band edits; recovery did not overwrite it",
-                        ));
+                        return Err(super::file_review::drift_error(&plan, &disk));
                     }
                 }
             }
-            crate::atomic_write(
-                &paths,
-                &target,
-                serde_json::to_string_pretty(&plan.graph)
-                    .map_err(|e| error(e.to_string()))?
-                    .as_bytes(),
-            )?;
+            let projected_bytes = match bytes {
+                Some(bytes) if !needs_write => bytes,
+                _ => {
+                    let bytes =
+                        serde_json::to_vec_pretty(&plan.graph).map_err(|e| error(e.to_string()))?;
+                    crate::atomic_write(&paths, &target, &bytes)?;
+                    bytes
+                }
+            };
             let mut queue = crate::prd_queue::load(root)?;
             if let Some(entry) = queue.entries.iter_mut().find(|e| e.path == plan.source) {
                 use sha2::Digest;
-                entry.fingerprint = format!(
-                    "{:x}",
-                    sha2::Sha256::digest(std::fs::read(&target).map_err(|e| error(e.to_string()))?)
-                );
+                entry.fingerprint = format!("{:x}", sha2::Sha256::digest(&projected_bytes));
                 entry.task_ids = super::graph::tasks(&plan.graph)?
                     .iter()
                     .filter_map(|t| t["id"].as_str().map(str::to_owned))
