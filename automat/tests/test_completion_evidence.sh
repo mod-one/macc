@@ -76,7 +76,7 @@ git log -1 --format=%B | grep -Fq '[macc:gate_verdict accepted]'
 # Exercise the real runner success transaction with a deterministic tool stub.
 # Terminal success must follow commit creation and select the merge lane.
 eval "$(sed -n '/^run_tool()/,/^}/p' "$AUTOMAT/performer.sh")"
-for fn in extract_task_result_marker extract_task_result_exp extract_task_gate_verdict resolve_task_result_exp validate_terminal_result_contract detect_success_result_kind extract_task_preconditions task_preconditions_json; do
+for fn in classify_provider_failure extract_task_result_marker extract_task_result_exp extract_task_gate_verdict resolve_task_result_exp validate_terminal_result_contract detect_success_result_kind extract_task_preconditions task_preconditions_json; do
   eval "$(sed -n "/^${fn}()/,/^}/p" "$AUTOMAT/performer.sh")"
 done
 mkdir -p .macc
@@ -181,3 +181,14 @@ if run_tool .macc/prompt 1 1; then exit 1; fi
 jq -e '.error_code == "E103" and .origin == "output_protocol" and (.result_kind == null) and (.result_exp | contains("Missing explicit MACC_TASK_RESULT"))' .macc/protocol-payload >/dev/null
 [[ -f unfinished-task.txt ]]
 printf 'Protocol failure preserves partial work and native diagnostic.\n'
+
+# A terminal checkpoint failure supersedes an earlier model result.
+cat > .macc/fake-tool <<'RUNNER'
+#!/usr/bin/env bash
+echo 'MACC_TASK_RESULT: success_with_changes'
+echo 'MACC_RUNNER_ERROR: E103' >&2
+echo 'MACC_TASK_RESULT_EXP: Missing checkpoint fixture task=T-1 phase=dev' >&2
+exit 1
+RUNNER
+if run_tool .macc/prompt 1 1; then exit 1; fi
+[[ "$LAST_ERROR_CODE" == E103 && "$LAST_ERROR_MESSAGE" == "Missing checkpoint fixture task=T-1 phase=dev" ]]

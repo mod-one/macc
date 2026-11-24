@@ -121,10 +121,10 @@ MACC_TASK_RESULT: precondition_unmet
   local invocation_rc="$rc"
   rc="$(provider_exit_code "$rc")"
   local acknowledged=true result=success
-  if [[ "$checkpoint_enabled" == true && "$sid_is_new" == 1 ]] && ! checkpoint_acknowledged; then
+  if [[ "$checkpoint_enabled" == true && "$sid_is_new" == 1 ]] && { [[ "$rc" != 0 ]] || ! checkpoint_acknowledged; }; then
     acknowledged=false
     if [[ "$rc" == 0 ]]; then
-      runner_failure E103 "Fresh session did not acknowledge the current checkpoint task and phase"
+      runner_failure E103 "Missing expected acknowledgement in assistant output for this invocation: $checkpoint_ack"
       rc=1
     fi
   fi

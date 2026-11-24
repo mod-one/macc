@@ -951,8 +951,9 @@ run_tool() {
     local trailer
     trailer="$(tail -n 2 "$output_capture")"
     case "$trailer" in
-      "MACC_RUNNER_ERROR: E901"$'\n'"MACC_TASK_RESULT_EXP: "*)
-        runner_code=E901
+      "MACC_RUNNER_ERROR: E901"$'\n'"MACC_TASK_RESULT_EXP: "*|"MACC_RUNNER_ERROR: E103"$'\n'"MACC_TASK_RESULT_EXP: "*)
+        runner_code="${trailer%%$'\n'*}"
+        runner_code="${runner_code#MACC_RUNNER_ERROR: }"
         runner_detail="${trailer#*$'\n'MACC_TASK_RESULT_EXP: }"
         ;;
     esac

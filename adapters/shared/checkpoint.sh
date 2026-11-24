@@ -45,7 +45,7 @@ finish_checkpoint() {
 
 checkpoint_acknowledged() {
   if [[ -n "${final_message_file:-}" ]]; then
-    grep -Fxq -- "$checkpoint_ack" "$final_protocol_file"
+    [[ "${checkpoint_event_ack:-false}" == true ]] || grep -Fxq -- "$checkpoint_ack" "$final_protocol_file"
     return
   fi
   grep -Fxq -- "$checkpoint_ack" "$output_capture" && return 0

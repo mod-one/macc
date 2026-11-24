@@ -178,7 +178,7 @@ run_and_capture() {
   provider_pid=$!
   wait "$provider_pid" || rc=$?
   provider_pid=""
-  drain_provider_output
+  drain_provider_output "$output_file"
   if [[ -n "$final_message_file" ]]; then
     publish_final_message "$output_file" "$rc"
   else

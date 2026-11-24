@@ -91,6 +91,13 @@ drain_provider_output() {
     wait "$provider_tee_pid" 2>/dev/null || provider_capture_ok=false
     provider_tee_pid=""
   fi
+  # Inspect only this invocation's drained stdout, before appending stderr.
+  checkpoint_event_ack=false
+  if [[ -n "${1:-}" && "${checkpoint_enabled:-false}" == true && "${sid_is_new:-0}" == 1 &&
+        "$provider_quiesced" == true && "$provider_capture_ok" == true ]] &&
+     declare -F provider_checkpoint_ack >/dev/null && provider_checkpoint_ack "$1" "$checkpoint_ack"; then
+    checkpoint_event_ack=true
+  fi
   if [[ -n "$provider_capture_dir" ]]; then
     if [[ -f "$provider_capture_dir/stderr" ]]; then
       # Append stderr after draining stdout so a diagnostic cannot split a JSON event.

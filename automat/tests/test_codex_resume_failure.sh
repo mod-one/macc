@@ -23,6 +23,18 @@ printf 'invoked\n' >> "${CALL_LOG:?}"
 while (($#)) && [[ "$1" != --output-last-message ]]; do shift; done
 message="${2:?last-message path required}"
 case "${SCENARIO:?}" in
+  checkpoint_*)
+    text="$ACK"
+    kind=agent_message
+    case "$SCENARIO" in
+      checkpoint_tool) kind=command_execution ;;
+      checkpoint_stale) text="$ACK-old" ;;
+    esac
+    event="$(jq -nc --arg t "$text" --arg kind "$kind" '{type:"item.completed",item:{type:$kind,text:($t+"\n\nStarting work.")}}')"
+    if [[ "$SCENARIO" == checkpoint_stderr ]]; then echo "$event" >&2; else echo "$event"; fi
+    if [[ "$SCENARIO" == checkpoint_failed ]]; then echo '{"type":"turn.failed","error":{"message":"Quota exceeded"}}'; fi
+    echo 'MACC_TASK_RESULT: success_with_changes' > "$message"
+    ;;
   transport)
     echo 'ERROR: connection closed while resuming' >&2
     exit 23
@@ -107,4 +119,36 @@ for attempt in 1 2; do
       "$WORK/repo/.macc/state/tool-sessions.json" >/dev/null
     echo "PASS: attempt=$attempt scenario=$scenario; one invocation, status and diagnostics preserved, lease released"
   done
+done
+
+# Drive fresh-session finalization through the same process and protocol readers.
+export ACK='MACC_CHECKPOINT_ACK: checkpoint-1 task=T-1 phase=dev'
+export FINISH="$WORK/finish.json"
+export MACC_SESSION_SERVICE_BIN="$WORK/bin/test-session"
+cat > "$MACC_SESSION_SERVICE_BIN" <<'SERVICE'
+#!/usr/bin/env bash
+set -eu
+if [[ "$1" == runner-process ]]; then exec "$MACC_PROTOCOL_CLI" "$@"; fi
+case "${4:?session operation}" in
+  checkpoint-prepare) jq -nc --arg ack "$ACK" '{enabled:true,checkpoint_id:"checkpoint-1",acknowledgement:$ack,prompt:$ack}' ;;
+  acquire) echo '{"session_id":"fixture","lease_token":"token","generation":1,"is_new":true,"heartbeat_seconds":60}' ;;
+  checkpoint-finish) cat > "$FINISH"; echo '{}' ;;
+  *) cat >/dev/null; echo '{}' ;;
+esac
+SERVICE
+chmod +x "$MACC_SESSION_SERVICE_BIN"
+jq -nc --arg root "$WORK/repo" '{session_store:{version:1,mode:"sqlite",project_root:$root}}' > "$WORK/repo/.macc/state/tool-sessions.json"
+for scenario in checkpoint_valid checkpoint_tool checkpoint_stale checkpoint_stderr checkpoint_failed; do
+  rc=0
+  : > "$FINISH"
+  SCENARIO="$scenario" CALL_LOG="$WORK/calls" bash "$REPO_ROOT/adapters/codex/codex.performer.sh" \
+    --prompt-file "$WORK/prompt.txt" --tool-json "$WORK/repo/.macc/tool.json" \
+    --repo "$WORK/repo" --worktree "$WORK/repo" --task-id T-1 > "$WORK/check.log" 2>&1 || rc=$?
+  if [[ "$scenario" == checkpoint_valid ]]; then
+    [[ "$rc" == 0 && -s "$FINISH" ]] && jq -e '.acknowledged and .result=="success"' "$FINISH" >/dev/null || { cat "$WORK/check.log"; exit 1; }
+    grep -qx 'MACC_TASK_RESULT: success_with_changes' "$WORK/check.log"
+  else
+    [[ "$rc" != 0 && -s "$FINISH" ]] && jq -e '.acknowledged==false and .result!="success"' "$FINISH" >/dev/null || { cat "$WORK/check.log"; exit 1; }
+  fi
+  echo "PASS: $scenario"
 done
