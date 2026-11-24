@@ -8,6 +8,66 @@ use crate::coordinator::{
 use crate::{MaccError, ProjectPaths, Result};
 use std::collections::BTreeMap;
 
+fn review_worktree(
+    paths: &ProjectPaths,
+    task: &crate::coordinator::model::Task,
+) -> Result<std::path::PathBuf> {
+    if task
+        .runtime_pid()
+        .is_some_and(crate::coordinator::helpers::is_pid_running)
+    {
+        return Err(MaccError::Validation(format!(
+            "task {} still has an active worker",
+            task.id
+        )));
+    }
+    let path = task
+        .worktree_path()
+        .ok_or_else(|| MaccError::Validation("missing retained worktree path".into()))?;
+    let path = paths.root.join(path);
+    let path = path.canonicalize().map_err(|source| MaccError::Io {
+        path: path.display().to_string(),
+        action: "inspect retained review worktree".into(),
+        source,
+    })?;
+    let branch = crate::git::current_branch_name(&path)?;
+    if task.branch().is_some_and(|expected| expected != branch)
+        || !crate::git::worktrees_for_branch(&paths.root, &branch)?
+            .iter()
+            .any(|p| p.canonicalize().is_ok_and(|p| p == path))
+    {
+        return Err(MaccError::Validation(format!(
+            "{} does not match the retained Git assignment for {}",
+            path.display(),
+            task.id
+        )));
+    }
+    crate::coordinator::runtime::review_candidate_head(task, &path)?;
+    Ok(path)
+}
+
+fn review_not_started(
+    paths: &ProjectPaths,
+    task_id: &str,
+    reason: impl std::fmt::Display,
+) -> MaccError {
+    let message = format!("Review retry for {task_id} did not start: {reason}. Original diagnostic and retry budget preserved.");
+    if let Err(error) = crate::coordinator::helpers::append_coordinator_event_with_severity(
+        &paths.root,
+        "retry_preflight_failed",
+        task_id,
+        "review",
+        "not_started",
+        &message,
+        "warning",
+    ) {
+        return MaccError::Validation(format!(
+            "{message} Could not record preflight event: {error}"
+        ));
+    }
+    MaccError::Validation(message)
+}
+
 pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     engine: &E,
     paths: &ProjectPaths,
@@ -80,13 +140,18 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
         .or_else(|| coordinator_cfg.and_then(|c| c.phase_runner_max_attempts))
         .unwrap_or(1)
         .max(1);
-    let expected = task.clone();
-    if phase == "review" {
+    let before_retry = task.clone();
+    let review_path = if phase == "review" {
+        let path =
+            review_worktree(paths, task).map_err(|err| review_not_started(paths, &task_id, err))?;
         let limit = env_cfg
             .max_review_cycles
             .or_else(|| coordinator_cfg.and_then(|c| c.max_review_cycles));
         crate::coordinator::review_budget::reserve(task, limit, attempts)?;
-    }
+        Some(path)
+    } else {
+        None
+    };
     task.task_runtime.retries = Some(
         task.task_runtime
             .retries
@@ -95,23 +160,21 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     );
     task.set_workflow_state(retry_state);
     let assignment = task.clone();
-    crate::coordinator::state::replace_phase_task(paths, &state_args, &expected, &assignment)?;
+    crate::coordinator::state::replace_phase_task(paths, &state_args, &before_retry, &assignment)?;
     let tool = env_cfg
         .coordinator_tool
         .as_deref()
         .or_else(|| coordinator_cfg.and_then(|cfg| cfg.coordinator_tool.as_deref()));
     let mut review_attempts = None;
-    let reviewed_commit = if phase == "review" && assignment.task_runtime.retained_review.is_some()
-    {
-        assignment
-            .worktree_path()
-            .and_then(|path| crate::git::head_commit(&paths.root.join(path)).ok())
-    } else {
-        None
-    };
-    let result = if phase == "review" {
+    let mut reviewed_commit = None;
+    let result = if let Some(path) = review_path {
+        let mut reviewer = assignment.clone();
+        reviewer.ensure_worktree().worktree_path = Some(path.to_string_lossy().into_owned());
+        if reviewer.task_runtime.retained_review.is_some() {
+            reviewed_commit = crate::git::head_commit(&path).ok();
+        }
         engine
-            .coordinator_run_review_phase_for_task_native(&paths.root, &assignment, tool, logger)
+            .coordinator_run_review_phase_for_task_native(&paths.root, &reviewer, tool, logger)
             .map(|execution| {
                 review_attempts = Some(execution.attempts);
                 execution.outcome.map(Some)
@@ -140,6 +203,13 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
         )));
     }
     let expected = task.clone();
+    if let (Some(0), Ok(Err(reason))) = (review_attempts, &result) {
+        task.state = before_retry.state;
+        task.task_runtime.retries = before_retry.task_runtime.retries;
+        task.task_runtime.review_usage = before_retry.task_runtime.review_usage;
+        crate::coordinator::state::replace_phase_task(paths, &state_args, &expected, task)?;
+        return Err(review_not_started(paths, &task_id, reason));
+    }
     if let Some(count) = review_attempts {
         task.task_runtime.settle_review_attempts(count);
     }

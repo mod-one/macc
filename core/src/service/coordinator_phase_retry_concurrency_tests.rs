@@ -100,11 +100,35 @@ fn retry_preserves_other_clients_progress_and_new_tasks() {
             let tmp = tempfile::tempdir().unwrap();
             let paths = ProjectPaths::from_root(tmp.path());
             let args = BTreeMap::from([("storage-mode".into(), mode.into())]);
+            if phase == "review" {
+                for args in [
+                    vec!["init", "-qb", "main"],
+                    vec!["config", "user.name", "Fixture"],
+                    vec!["config", "user.email", "test@example.invalid"],
+                    vec!["commit", "--allow-empty", "-qm", "base"],
+                    vec!["worktree", "add", "-qb", "candidate", "worker"],
+                    vec![
+                        "-C",
+                        "worker",
+                        "commit",
+                        "--allow-empty",
+                        "-qm",
+                        "candidate",
+                    ],
+                ] {
+                    assert!(
+                        crate::git::run_git_output_mapped(tmp.path(), &args, "review fixture")
+                            .unwrap()
+                            .status
+                            .success()
+                    );
+                }
+            }
             state::coordinator_state_registry_save(
                 tmp.path(),
                 &args,
                 &json!({"tasks":[
-                    {"id":"A","state":"blocked","task_runtime":{"current_phase":phase}},
+                    {"id":"A","state":"blocked","worktree":{"worktree_path":"worker","branch":"candidate","base_branch":"main"},"task_runtime":{"current_phase":phase}},
                     {"id":"B","state":"todo"}
                 ]}),
             )

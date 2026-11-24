@@ -1035,7 +1035,7 @@ pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
 }
 
 fn git_status_clean(worktree: &Path) -> Result<bool> {
-    Ok(git::status_porcelain(worktree)?.trim().is_empty())
+    Ok(git::status_porcelain_v1(worktree, true)?.is_empty())
 }
 
 fn git_head_commit(worktree: &Path) -> Result<String> {
@@ -1050,10 +1050,15 @@ fn git_ahead_count(worktree: &Path, base: &str) -> Result<usize> {
         "count ahead commits for review checks",
     )?;
     if !output.status.success() {
-        return Ok(0);
+        return Err(MaccError::Git {
+            operation: format!("inspect review base {base}"),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    Ok(raw.trim().parse::<usize>().unwrap_or(0))
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|e| MaccError::Validation(format!("Invalid Git commit count: {e}")))
 }
 
 pub fn run_phase<E: PhaseExecutor>(
@@ -1066,6 +1071,31 @@ pub fn run_phase<E: PhaseExecutor>(
     executor.run_phase(task, mode, coordinator_tool_override, max_attempts)
 }
 
+pub(crate) fn review_candidate_head(task: &Task, worktree: &Path) -> Result<String> {
+    let task_id = &task.id;
+    if task_id.is_empty() || worktree.as_os_str().is_empty() {
+        return Err(MaccError::Validation(
+            "missing task id or worktree path".into(),
+        ));
+    }
+    let base_branch = task.base_branch("master");
+    let clean_before = git_status_clean(worktree)?;
+    if !clean_before {
+        return Err(MaccError::Validation(format!(
+            "review precheck failed for task {}: worktree not clean before review",
+            task_id
+        )));
+    }
+    let ahead = git_ahead_count(worktree, &base_branch)?;
+    if ahead == 0 {
+        return Err(MaccError::Validation(format!(
+            "review precheck failed for task {}: no committed diff to review against base '{}'",
+            task_id, base_branch
+        )));
+    }
+    git_head_commit(worktree)
+}
+
 pub fn run_review_phase<E: PhaseExecutor>(
     executor: &E,
     task: &Task,
@@ -1074,30 +1104,9 @@ pub fn run_review_phase<E: PhaseExecutor>(
     if task.task_runtime.reserved_review_attempts() == 0 {
         return Ok(Err("Review dispatch has no reserved slot".into()));
     }
-    let task_id = task.id.as_str();
-    let worktree_path = task.worktree_path().unwrap_or_default();
-    let base_branch = task.base_branch("master");
-    if task_id.is_empty() || worktree_path.is_empty() {
-        return Ok(Err(
-            "review cannot run: missing task id or worktree path".to_string()
-        ));
-    }
-    let worktree = PathBuf::from(worktree_path);
-    let clean_before = git_status_clean(&worktree)?;
-    if !clean_before {
-        return Ok(Err(format!(
-            "review precheck failed for task {}: worktree not clean before review",
-            task_id
-        )));
-    }
-    let ahead = git_ahead_count(&worktree, &base_branch)?;
-    if ahead == 0 {
-        return Ok(Err(format!(
-            "review precheck failed for task {}: no committed diff to review against base '{}'",
-            task_id, base_branch
-        )));
-    }
-    let head_before = git_head_commit(&worktree)?;
+    let task_id = &task.id;
+    let worktree = Path::new(task.worktree_path().unwrap_or_default());
+    let head_before = review_candidate_head(task, worktree)?;
     // Each possible runner invocation already holds a durable slot.
     let phase = run_phase(
         executor,
@@ -1112,14 +1121,14 @@ pub fn run_review_phase<E: PhaseExecutor>(
     };
     // A review is read-only. Unexpected files are evidence to preserve, not
     // proof that deleting them is safe; fail the postcheck without cleaning.
-    let clean_after = git_status_clean(&worktree)?;
+    let clean_after = git_status_clean(worktree)?;
     if !clean_after {
         return Ok(Err(format!(
             "review postcheck failed for task {}: worktree not clean after review",
             task_id
         )));
     }
-    let head_after = git_head_commit(&worktree)?;
+    let head_after = git_head_commit(worktree)?;
     if head_after != head_before {
         return Ok(Err(format!(
             "review postcheck failed for task {}: review changed commit {} -> {}",

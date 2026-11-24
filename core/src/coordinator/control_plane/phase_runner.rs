@@ -260,6 +260,7 @@ fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
 /// Drain both pipes while waiting, so large tool output cannot stall exit.
 /// Cancellation is owned by the phase job; never kill a PID loaded from state.
 fn phase_output(
+    attempts_started: &std::cell::Cell<usize>,
     command: &mut std::process::Command,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<std::process::Output> {
@@ -275,6 +276,7 @@ fn phase_output(
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
     let mut child = command.spawn()?;
+    attempts_started.set(attempts_started.get() + 1);
     std::thread::scope(|scope| {
         let mut stdout = child.stdout.take().expect("piped stdout");
         let mut stderr = child.stderr.take().expect("piped stderr");
@@ -615,8 +617,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 "MACC_PROVIDER_TRACE_FILE",
                 evidence_dir.join("provider.log"),
             );
-            self.attempts_started.set(attempt);
-            let output = phase_output(&mut command, self.cancelled);
+            let output = phase_output(&self.attempts_started, &mut command, self.cancelled);
             let Ok(out) = output else {
                 last_reason = format!(
                     "phase '{}' failed to execute runner '{}'",
@@ -1036,7 +1037,7 @@ mod cancellation_tests {
         let worker = std::thread::spawn(move || {
             let mut command = Command::new("sh");
             command.arg("-c").arg("trap 'printf released > \"$2\"; printf \"cleanup evidence\\n\"; exit 143' TERM; touch \"$1\"; sleep 30 & wait").arg("fixture").arg(marker).arg(released);
-            phase_output(&mut command, Some(&flag)).unwrap()
+            phase_output(&Default::default(), &mut command, Some(&flag)).unwrap()
         });
         for _ in 0..100 {
             if ready.exists() {
@@ -1066,7 +1067,7 @@ mod cancellation_tests {
                 .arg("sleep 30 & printf '%s %s' \"$$\" \"$!\" > \"$1\"; wait")
                 .arg("phase-test")
                 .arg(pid_file);
-            phase_output(&mut command, Some(&cancel)).unwrap()
+            phase_output(&Default::default(), &mut command, Some(&cancel)).unwrap()
         });
         for _ in 0..100 {
             if pids.exists()
@@ -1117,7 +1118,7 @@ mod cancellation_tests {
                 .arg("sleep 30 & printf '%s' \"$$\" > \"$1\"; exit 0")
                 .arg("phase-test")
                 .arg(file);
-            phase_output(&mut command, Some(&cancel)).unwrap()
+            phase_output(&Default::default(), &mut command, Some(&cancel)).unwrap()
         });
         for _ in 0..100 {
             let pid = std::fs::read_to_string(&parent)
@@ -1143,7 +1144,7 @@ mod cancellation_tests {
         command
             .arg("-c")
             .arg("head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2; exit 7");
-        let output = phase_output(&mut command, None).unwrap();
+        let output = phase_output(&Default::default(), &mut command, None).unwrap();
         assert_eq!(output.status.code(), Some(7));
         assert_eq!(output.stdout.len(), 131072);
         assert_eq!(output.stderr.len(), 131072);
