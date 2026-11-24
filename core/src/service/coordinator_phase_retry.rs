@@ -100,6 +100,14 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
         .as_deref()
         .or_else(|| coordinator_cfg.and_then(|cfg| cfg.coordinator_tool.as_deref()));
     let mut review_attempts = None;
+    let reviewed_commit = if phase == "review" && assignment.task_runtime.retained_review.is_some()
+    {
+        assignment
+            .worktree_path()
+            .and_then(|path| crate::git::head_commit(&paths.root.join(path)).ok())
+    } else {
+        None
+    };
     let result = if phase == "review" {
         engine
             .coordinator_run_review_phase_for_task_native(&paths.root, &assignment, tool, logger)
@@ -136,6 +144,13 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     let now = crate::coordinator::helpers::now_iso_coordinator();
     let outcome = match result.unwrap_or_else(|error| Err(error.to_string())) {
         Ok(Some(verdict)) => {
+            if let Some(review) = &mut task.task_runtime.retained_review {
+                review.approved_commit = if verdict == coordinator_engine::ReviewVerdict::Ok {
+                    reviewed_commit
+                } else {
+                    None
+                };
+            }
             coordinator_engine::apply_review_phase_success_typed(task, verdict, &now).map(|_| ())
         }
         Ok(None) => coordinator_engine::apply_phase_success_typed(

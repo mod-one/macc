@@ -49,3 +49,47 @@ pub fn attach_reference_completion(
     }
     Ok(())
 }
+
+/// A retry may acknowledge an existing delivery, never publish an unreviewed tip.
+/// Bind the registry proof to both the exact local branch and the task on its base.
+pub(crate) fn retained_tip_delivered(
+    root: &Path,
+    task: &Task,
+    branch: &str,
+    base: &str,
+) -> Result<bool> {
+    let Some(proof) = task
+        .task_runtime
+        .extra
+        .get("completion_commit_sha")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    if branch == base
+        || crate::git::resolve_ref(root, &format!("refs/heads/{branch}")).as_deref() != Some(proof)
+    {
+        return Ok(false);
+    }
+    if let Some(path) = task
+        .worktree_path()
+        .or(task.task_runtime.last_worktree_path.as_deref())
+    {
+        let path = root.join(path);
+        if !path.is_dir()
+            || crate::git::current_branch(&path)? != branch
+            || crate::git::head_commit(&path)? != proof
+            || !crate::git::status_porcelain(&path)?.is_empty()
+        {
+            return Ok(false);
+        }
+    }
+    let base_ref = format!("refs/heads/{base}");
+    if crate::git::latest_commit_with_task_trailer(root, &base_ref, &task.id)?.as_deref()
+        != Some(proof)
+    {
+        return Ok(false);
+    }
+    crate::coordinator::decisions::merge_ready(root, &task.id)?;
+    Ok(true)
+}

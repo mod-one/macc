@@ -61,6 +61,7 @@ fn add_task_branch(repo: &Path, branch: &str, file: &str, contents: &str) {
 
 fn merge_context() -> MergeTaskContext {
     MergeTaskContext {
+        retained_review: None,
         tool: "test".into(),
         worktree_path: String::new(),
         title: "test task".into(),

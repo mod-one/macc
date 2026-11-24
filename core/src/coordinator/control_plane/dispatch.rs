@@ -237,7 +237,24 @@ fn resume_attached_worktree(
     if crate::coordinator::worktree_roles::reserved(&path) {
         return Err(crate::coordinator::worktree_roles::conflict(format!("Task {task_id} retains reserved path {}; recover its worktree ownership before resuming", path.display())));
     }
-    if !ensure_expected_worktree_branch(&path, &resume.branch).unwrap_or(false) {
+    let canonical = path.canonicalize().map_err(|source| MaccError::Io {
+        path: path.display().to_string(),
+        action: "resolve retained checkout".into(),
+        source,
+    })?;
+    if canonical
+        == repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_owned())
+        || !crate::git::worktrees_for_branch(repo_root, &resume.branch)?
+            .iter()
+            .any(|registered| {
+                registered
+                    .canonicalize()
+                    .is_ok_and(|other| other == canonical)
+            })
+        || !ensure_expected_worktree_branch(&path, &resume.branch).unwrap_or(false)
+    {
         return Ok(None);
     }
     if !coordinator_engine::is_worktree_healthy(&path) {
@@ -607,6 +624,9 @@ pub(super) async fn run_dispatch_pipeline(
             }
             break;
         };
+        if !super::decision_preflight::ready(repo_root, &mut registry, &candidate.task.id)? {
+            continue;
+        }
         // Merge-gate: for retry tasks, check if the task branch is already
         // cleanly merged — if so, mark merged and skip dispatch.
         if cfg.merge_gate_on_dispatch && retry_count_for_task(&registry, &candidate.task.id) > 0 {
@@ -626,7 +646,11 @@ pub(super) async fn run_dispatch_pipeline(
             if let Some(log) = logger {
                 let _ = log.note(format!("- {}", attempt_msg));
             }
-            match merge_gate_check(&candidate.task.id, &candidate.task.base_branch, repo_root) {
+            let typed = crate::coordinator::model::TaskRegistry::from_value(&registry)?;
+            let task = typed
+                .find_task(&candidate.task.id)
+                .ok_or_else(|| MaccError::Validation("Selected retry task missing".into()))?;
+            match merge_gate_check(task, &candidate.task.base_branch, repo_root)? {
                 MergeGateResult::Merged => {
                     let now = now_iso_coordinator();
                     mark_task_merged_from_merge_gate(&mut registry, &candidate.task.id, &now)?;
@@ -653,14 +677,51 @@ pub(super) async fn run_dispatch_pipeline(
                     }
                     continue;
                 }
-                MergeGateResult::ConflictProceed => {
+                MergeGateResult::Retained => {
+                    let mut retained = typed;
+                    let validation_checkout = if let Some(resume) = &candidate.task.resume_worktree
+                    {
+                        resume_attached_worktree(
+                            repo_root,
+                            &candidate.task.id,
+                            &candidate.task.tool,
+                            resume,
+                            logger,
+                        )?
+                    } else {
+                        None
+                    };
+                    let resume_validation = match validation_checkout {
+                        Some(worker) => {
+                            crate::git::status_porcelain(&worker.path)?.is_empty()
+                                && !crate::git::commits_between(
+                                    repo_root,
+                                    &format!("refs/heads/{}", candidate.task.base_branch),
+                                    &format!("refs/heads/{}", worker.branch),
+                                )?
+                                .is_empty()
+                        }
+                        None => false,
+                    };
+                    if let Some(task) = retained.find_task_mut(&candidate.task.id) {
+                        task.ensure_runtime().retained_review = Some(Default::default());
+                        if resume_validation {
+                            task.set_workflow_state(crate::coordinator::WorkflowState::InProgress);
+                            let runtime = task.ensure_runtime();
+                            runtime.set_status(crate::coordinator::RuntimeStatus::PhaseDone);
+                            runtime.current_phase = Some("dev".into());
+                            runtime.pid = None;
+                            task.touch_state_changed(&now_iso_coordinator());
+                        }
+                    }
+                    registry = retained.to_value()?;
                     let msg = format!(
-                        "merge-gate could not merge task={} base={}; proceeding with dispatch",
+                        "Retained task={} has no accepted delivery on {}; resuming validation",
                         candidate.task.id, candidate.task.base_branch
                     );
                     let _ = append_coordinator_event_with_severity(
                         repo_root,
-                        "merge_gate_conflict",
+                        "merge_gate_retained",
                         &candidate.task.id,
                         "merge",
                         "warning",
@@ -669,6 +730,16 @@ pub(super) async fn run_dispatch_pipeline(
                     );
                     if let Some(log) = logger {
                         let _ = log.note(format!("- {}", msg));
+                    }
+                    if resume_validation {
+                        recompute_resource_locks_from_tasks(&mut registry);
+                        set_registry_updated_at(&mut registry);
+                        crate::coordinator::state::coordinator_state_registry_save(
+                            repo_root,
+                            &BTreeMap::new(),
+                            &registry,
+                        )?;
+                        continue;
                     }
                 }
                 MergeGateResult::NoBranchProceed => {
@@ -690,9 +761,6 @@ pub(super) async fn run_dispatch_pipeline(
                     }
                 }
             }
-        }
-        if !super::decision_preflight::ready(repo_root, &mut registry, &candidate.task.id)? {
-            continue;
         }
         let acquired =
             acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger)

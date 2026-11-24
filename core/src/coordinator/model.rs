@@ -613,6 +613,9 @@ pub struct TaskRuntime {
     /// Number of completed reviews; each rejected review still owns its correction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cycles: Option<usize>,
+    /// A retained retry needs an independent verdict on its exact Git revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_review: Option<RetainedReview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_usage: Option<super::review_budget::ReviewUsage>,
     /// Active AI tool session ID currently associated with this task lifecycle.
@@ -658,6 +661,11 @@ pub struct TaskRuntime {
     pub approval: Option<ApprovalState>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetainedReview {
+    pub approved_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

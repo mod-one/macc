@@ -730,7 +730,7 @@ git_command!(
     list_branches_by_prefix_async,
     (prefix: &str),
     -> Vec<String>,
-    ["branch", "--list"],
+    ["for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"],
     "list branches by prefix",
     |repo_root, output| {
         if !output.status.success() {
@@ -747,8 +747,8 @@ git_command!(
         let branches = String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(str::trim)
-            .map(|line| line.trim_start_matches("* ").to_string())
             .filter(|line| line.starts_with(prefix))
+            .map(str::to_owned)
             .filter(|line| !line.is_empty())
             .collect();
         Ok(branches)

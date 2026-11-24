@@ -922,14 +922,9 @@ async fn advance_owned(
                 }
                 if mode == "review" {
                     let reviewed_commit = job.reviewed_commit.clone();
-                    let mut review_result = match outcome? {
+                    let (mut review_result, attempts) = match outcome? {
                         super::phase_job::PhaseOutcome::Review(execution) => {
-                            let mut current = TaskRegistry::from_value(&registry)?;
-                            if let Some(task) = current.find_task_mut(&task_id) {
-                                task.task_runtime.settle_review_attempts(execution.attempts);
-                            }
-                            registry = current.to_value()?;
-                            execution.outcome
+                            (execution.outcome, execution.attempts)
                         }
                         _ => {
                             return Err(MaccError::Validation(
@@ -949,6 +944,17 @@ async fn advance_owned(
                             review_result = Err(error.to_string());
                         }
                     }
+                    let mut current = TaskRegistry::from_value(&registry)?;
+                    if let Some(task) = current.find_task_mut(&task_id) {
+                        task.task_runtime.settle_review_attempts(attempts);
+                        if let Some(review) = &mut task.task_runtime.retained_review {
+                            review.approved_commit = match &review_result {
+                                Ok(coordinator_engine::ReviewVerdict::Ok) => reviewed_commit,
+                                _ => None,
+                            };
+                        }
+                    }
+                    registry = current.to_value()?;
                     match review_result {
                         Ok(verdict) => {
                             let verdict_status = match verdict {
@@ -2901,18 +2907,24 @@ mod tests {
         ));
     }
 
+    fn retry_gate(repo: &Path, id: &str, branch: Option<&str>) -> MergeGateResult {
+        let task: Task =
+            serde_json::from_value(json!({"id":id,"worktree":{"branch":branch}})).unwrap();
+        merge_gate_check(&task, "main", repo).unwrap()
+    }
+
     #[test]
     fn merge_gate_check_returns_no_branch_when_task_branch_missing() {
         let repo = make_test_repo();
         assert_eq!(
-            merge_gate_check("TASK-MISSING-001", "main", &repo),
+            retry_gate(&repo, "TASK-MISSING-001", None),
             MergeGateResult::NoBranchProceed
         );
         let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]
-    fn merge_gate_check_returns_merged_for_clean_retry_branch() {
+    fn merge_gate_retains_clean_but_unreviewed_branch() {
         let repo = make_test_repo();
         run_git(&repo, &["checkout", "-b", "task/task-merge-001"]);
         fs::write(repo.join("task.txt"), "task work\n").expect("write task file");
@@ -2921,8 +2933,8 @@ mod tests {
         run_git(&repo, &["checkout", "main"]);
 
         assert_eq!(
-            merge_gate_check("TASK-MERGE-001", "main", &repo),
-            MergeGateResult::Merged
+            retry_gate(&repo, "TASK-MERGE-001", Some("task/task-merge-001")),
+            MergeGateResult::Retained
         );
         let output = Command::new("git")
             .args(["log", "--oneline", "main", "--", "task.txt"])
@@ -2935,8 +2947,58 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
-            "expected merged task commit to be reachable from main"
+            String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+            "unverified retry commit reached main"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn retry_requires_the_assigned_tip_and_its_task_proof_on_base() {
+        let repo = make_test_repo();
+        let worker = tempfile::tempdir().unwrap();
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "task/t-1",
+                worker.path().to_str().unwrap(),
+                "main",
+            ],
+        );
+        run_git(
+            worker.path(),
+            &["commit", "--allow-empty", "-m", "[macc:task T-1]"],
+        );
+        let sha = crate::git::head_commit(worker.path()).unwrap();
+        run_git(&repo, &["branch", "task/t-10", "main"]);
+        run_git(&repo, &["checkout", "task/t-10"]);
+        run_git(
+            &repo,
+            &["commit", "--allow-empty", "-m", "[macc:task T-10]"],
+        );
+        run_git(&repo, &["checkout", "main"]);
+        assert!(crate::git::list_branches_by_prefix(&repo, "task/t-1")
+            .unwrap()
+            .contains(&"task/t-1".to_owned()));
+        let before = crate::git::head_commit(&repo).unwrap();
+        let mut task: Task = serde_json::from_value(json!({"id":"T-1","worktree":{"branch":"task/t-1"},"task_runtime":{"completion_commit_sha":sha}})).unwrap();
+        assert_eq!(
+            merge_gate_check(&task, "main", &repo).unwrap(),
+            MergeGateResult::Retained
+        );
+        assert_eq!(crate::git::head_commit(&repo).unwrap(), before);
+        run_git(&repo, &["merge", "--ff-only", "task/t-1"]);
+        assert_eq!(
+            merge_gate_check(&task, "main", &repo).unwrap(),
+            MergeGateResult::Merged
+        );
+        task.id = "T-10".into();
+        assert_eq!(
+            merge_gate_check(&task, "main", &repo).unwrap(),
+            MergeGateResult::Retained
         );
         let _ = fs::remove_dir_all(&repo);
     }
@@ -2955,8 +3017,8 @@ mod tests {
         fs::write(repo.join("base.txt"), "operator wip\n").expect("write wip");
 
         assert_eq!(
-            merge_gate_check("TASK-DIRTY-001", "main", &repo),
-            MergeGateResult::Merged
+            retry_gate(&repo, "TASK-DIRTY-001", Some("task/task-dirty-001")),
+            MergeGateResult::Retained
         );
         assert_eq!(
             fs::read_to_string(repo.join("base.txt")).expect("read"),
@@ -2977,8 +3039,8 @@ mod tests {
         run_git(&repo, &["checkout", "-b", "operator/wip"]);
 
         assert_eq!(
-            merge_gate_check("TASK-BRANCH-001", "main", &repo),
-            MergeGateResult::Merged
+            retry_gate(&repo, "TASK-BRANCH-001", Some("task/task-branch-001")),
+            MergeGateResult::Retained
         );
         let head = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -3006,8 +3068,8 @@ mod tests {
         run_git(&repo, &["commit", "-m", "main conflicting commit"]);
 
         assert_eq!(
-            merge_gate_check("TASK-CONFLICT-001", "main", &repo),
-            MergeGateResult::ConflictProceed
+            retry_gate(&repo, "TASK-CONFLICT-001", Some("task/task-conflict-001")),
+            MergeGateResult::Retained
         );
         let status = Command::new("git")
             .args(["status", "--porcelain"])

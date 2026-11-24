@@ -175,7 +175,7 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 **Reliability feature toggles** (all default to enabled):
 - `salvage_before_retry` (bool, default `true`): attempt to salvage partial work before retrying a failed task.
 - `retry_on_same_worktree` (bool, default `true`): retry a failed task on the same worktree slot when possible.
-- `merge_gate_on_dispatch` (bool, default `true`): gate dispatch behind a merge-health check to prevent cascading failures.
+- `merge_gate_on_dispatch` (bool, default `true`): on retry, check whether the assigned branch tip already has recorded delivery evidence for this task on the reference branch. Retained commits awaiting delivery go through validation and review.
 - `tag_abandoned_branches` (bool, default `true`): tag branches for abandoned tasks so they are discoverable after cleanup.
 - `sync_unmerged_branches` (bool, default `true`): scan unmerged branches during sync to recover partially-complete work.
 - `remove_worktree_on_sanitize_failure` (bool, default `true`): when sanitize fails on a newly created worktree, remove that orphan worktree automatically.

@@ -189,6 +189,7 @@ pub enum AdvanceTaskAction {
 /// without needing to read the task registry from disk.
 #[derive(Debug, Clone, Default)]
 pub struct MergeTaskContext {
+    pub retained_review: Option<crate::coordinator::model::RetainedReview>,
     pub tool: String,
     pub worktree_path: String,
     pub title: String,
@@ -449,6 +450,7 @@ pub fn build_advance_actions(
                 }
                 let base = task.base_branch("master");
                 let merge_context = MergeTaskContext {
+                    retained_review: task.task_runtime.retained_review.clone(),
                     tool: task.tool.clone().unwrap_or_default(),
                     worktree_path: task.worktree_path().unwrap_or_default().to_string(),
                     title: task.title.clone().unwrap_or_default(),
@@ -1111,17 +1113,15 @@ where
     FE: FnMut(&str, &str, &str, &str, &str, &str),
 {
     let runtime = &task.task_runtime;
-    let worktree_path = runtime
-        .last_worktree_path
-        .as_deref()
-        .or_else(|| task.worktree_path())
+    let worktree_path = task
+        .worktree_path()
+        .or(runtime.last_worktree_path.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let branch = runtime
-        .last_branch
-        .as_deref()
-        .or_else(|| task.branch())
+    let branch = task
+        .branch()
+        .or(runtime.last_branch.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
@@ -1132,17 +1132,20 @@ where
         return Ok(SalvageResult::NoCommitsProceedRetry);
     };
     let base_branch = task.base_branch("master").to_string();
-    let commits = match crate::git::commits_containing_pattern(
-        Path::new(&worktree_path),
+    // A failed attempt is not authority to publish a branch. Retry validation on
+    // the retained checkout unless this exact task tip is already delivered.
+    if !crate::coordinator::delivery_evidence::retained_tip_delivered(
+        repo_root,
+        task,
+        &branch,
         &base_branch,
-        &task.id,
-    ) {
-        Ok(commits) => commits,
-        Err(_) => return Ok(SalvageResult::NoCommitsProceedRetry),
-    };
-    if commits.is_empty() {
+    )? {
+        task.ensure_runtime().retained_review = Some(Default::default());
         return Ok(SalvageResult::NoCommitsProceedRetry);
     }
+    let Some(delivered_commit) = task.task_runtime.extra["completion_commit_sha"].as_str() else {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    };
 
     let description = task
         .extra
@@ -1157,6 +1160,9 @@ where
         .unwrap_or_default()
         .to_string();
     let merge_context = MergeTaskContext {
+        retained_review: Some(crate::coordinator::model::RetainedReview {
+            approved_commit: Some(delivered_commit.into()),
+        }),
         tool: task.tool.clone().unwrap_or_default(),
         worktree_path,
         title: task.title.clone().unwrap_or_default(),
@@ -5268,6 +5274,17 @@ mod tests {
     fn salvage_check_merged_marks_task_merged_and_skips_retry() {
         let task_id = "SALVAGE-MERGED-001";
         let (repo, branch, worktree) = make_salvage_repo("main", task_id, false);
+        run_git(
+            &worktree,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "[macc:task SALVAGE-MERGED-001]",
+            ],
+        );
+        run_git(&repo, &["merge", "--ff-only", &branch]);
+        let delivered = crate::git::head_commit(&worktree).unwrap();
         let mut registry = json!({
             "tasks": [{
                 "id": task_id,
@@ -5276,7 +5293,8 @@ mod tests {
                 "task_runtime": {
                     "status": "running",
                     "last_worktree_path": worktree.to_string_lossy().to_string(),
-                    "last_branch": branch
+                    "last_branch": branch,
+                    "completion_commit_sha": delivered
                 }
             }],
             "resource_locks": {}
@@ -5329,7 +5347,7 @@ mod tests {
         )
         .expect("salvage check");
 
-        assert_eq!(result, SalvageResult::ConflictProceedRetry);
+        assert_eq!(result, SalvageResult::NoCommitsProceedRetry);
         assert_eq!(registry["tasks"][0]["state"], "claimed");
         let _ = fs::remove_dir_all(&worktree);
         let _ = fs::remove_dir_all(&repo);

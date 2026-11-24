@@ -451,6 +451,30 @@ pub fn sync_unmerged_branches(
             continue;
         }
 
+        // A retained checkout belongs to the phase pipeline. Even an unrelated
+        // eligible trailer in its history must not publish its unreviewed tip.
+        let retained = registry.tasks.iter().find(|task| {
+            !is_terminal_state(&task.state)
+                && (task.branch() == Some(branch.as_str())
+                    || task.task_runtime.last_branch.as_deref() == Some(branch.as_str())
+                    || (discovered_task_ids.contains(&task.id)
+                        && (task.task_runtime.retries_count() > 0
+                            || task.task_runtime.attempt.unwrap_or_default() > 0)))
+        });
+        if let Some(task) = retained {
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::SkippedTaskState,
+                detail: Some(format!(
+                    "Task {} requires retained phase validation",
+                    task.id
+                )),
+            });
+            continue;
+        }
+
         let mut eligible_task_ids = Vec::new();
         for task_id in &discovered_task_ids {
             if let Some(task) = registry.tasks.iter().find(|task| task.id == *task_id) {
@@ -861,6 +885,20 @@ mod tests {
         assert_eq!(results[0].status, SyncBranchStatus::Merged);
         assert_eq!(results[0].merged_task_ids, vec!["L4-SYNC-001".to_string()]);
         assert_eq!(registry.tasks[0].state, "merged");
+    }
+
+    #[test]
+    fn sync_preserves_tagged_work_from_a_retry_for_validation() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "task/t-1"]);
+        create_commit(&repo, "partial", "partial", "feat: T-1\n\n[macc:task T-1]");
+        run_git(&repo, &["checkout", "main"]);
+        let mut registry = make_registry(vec![make_task("T-1", "todo")]);
+        registry.tasks[0].task_runtime.increment_retries();
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").unwrap();
+        assert_eq!(results[0].status, SyncBranchStatus::SkippedTaskState);
+        assert_eq!(registry.tasks[0].state, "todo");
+        assert!(!repo.join("partial").exists());
     }
 
     /// The regression that stranded real work: `create_worktrees` names pool

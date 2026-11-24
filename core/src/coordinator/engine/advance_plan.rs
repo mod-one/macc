@@ -15,7 +15,11 @@ pub(super) fn plan_task(
     let runtime = &task.task_runtime;
     let used = runtime.reviews_used();
     let ordinary = plan_advance(state, limit, used, phases);
-    let needs_review = runtime.review_needs_verdict()
+    let needs_review = runtime
+        .retained_review
+        .as_ref()
+        .is_some_and(|review| review.approved_commit.is_none())
+        || runtime.review_needs_verdict()
         || runtime.extra.contains_key("review_refresh_required")
         || runtime.extra.contains_key("compliance_review_required")
         || (decisions_enabled

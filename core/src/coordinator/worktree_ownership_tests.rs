@@ -278,23 +278,32 @@ fn dedicated_scratch_merge_keeps_the_reviewed_performer_commit_unchanged() {
     git(path, &["commit", "-qm", "implementation"]).unwrap();
     save(root, &task);
     let before = snapshot(path);
-    let result = super::super::runtime::merge_task_with_policy_native(
-        root,
-        &task.id,
-        task.branch().unwrap(),
-        "main",
-        false,
-        None,
-        &super::super::engine::MergeTaskContext {
-            tool: "future".into(),
-            worktree_path: path.to_string_lossy().into(),
-            title: "test".into(),
-            description: String::new(),
-            objective: String::new(),
-        },
-        |_, _, _, _, _, _| {},
-    )
-    .unwrap();
+    let publish = |sha| {
+        super::super::runtime::merge_task_with_policy_native(
+            root,
+            &task.id,
+            task.branch().unwrap(),
+            "main",
+            false,
+            None,
+            &super::super::engine::MergeTaskContext {
+                tool: "future".into(),
+                worktree_path: path.to_string_lossy().into(),
+                retained_review: Some(super::super::model::RetainedReview {
+                    approved_commit: Some(sha),
+                }),
+                title: "test".into(),
+                description: String::new(),
+                objective: String::new(),
+            },
+            |_, _, _, _, _, _| {},
+        )
+        .unwrap()
+    };
+    let base = git(root, &["rev-parse", "main"]).unwrap();
+    assert!(publish(base.clone()).is_err());
+    assert_eq!(git(root, &["rev-parse", "main"]).unwrap(), base);
+    let result = publish(git(path, &["rev-parse", "HEAD"]).unwrap());
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(before, snapshot(path));
     assert_eq!(

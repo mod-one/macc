@@ -1839,10 +1839,25 @@ where
     };
     let merge_dir = integration.path().to_path_buf();
 
+    let candidate = if let Some(review) = &merge_context.retained_review {
+        let head = git::resolve_ref(repo_root, &format!("refs/heads/{branch}"));
+        let Some(sha) = review
+            .approved_commit
+            .as_deref()
+            .filter(|sha| head.as_deref() == Some(*sha))
+        else {
+            return Ok(Err(format!(
+                "Task {task_id} needs a fresh review of the retained branch {branch}"
+            )));
+        };
+        sha
+    } else {
+        branch
+    };
     let merge_msg = crate::commit_message::merge_commit(task_id).format();
     let merge = git::run_git_output_mapped(
         &merge_dir,
-        &["merge", "--no-ff", "-m", &merge_msg, branch],
+        &["merge", "--no-ff", "-m", &merge_msg, candidate],
         "run local merge",
     )?;
     if merge.status.success() {
@@ -1865,7 +1880,9 @@ where
 
     // Decision-aware repair belongs to the task's fix/review pipeline: a
     // detached hook must not change artifacts after their compliance review.
-    if crate::coordinator::decisions::policy(repo_root)?.enabled {
+    if merge_context.retained_review.is_some()
+        || crate::coordinator::decisions::policy(repo_root)?.enabled
+    {
         integration.reset()?;
         return Ok(Err(crate::coordinator::decisions::error(format!("DM_REPAIR: merge {base} into the retained task branch {branch}, resolve [{conflicts}] without discarding work, then run task validation and independent review before retrying publication")).to_string()));
     }
