@@ -40,6 +40,7 @@ pub mod session_manager;
 pub mod state;
 pub mod state_runtime;
 pub mod task_selector;
+pub mod tick_progress;
 pub mod types;
 pub mod view_model;
 pub(crate) mod wait_attribution;

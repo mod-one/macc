@@ -218,40 +218,39 @@ pub fn cleanup_dead_runtime_tasks_in_typed_registry(
     // that could have been requeued costs an operator one command; clearing a
     // worktree that held commits loses the only pointer to them.
     let holds_unmerged_work = |task: &crate::coordinator::model::Task| {
-        let Some(root) = repo_root else {
-            return false;
-        };
+        let root = repo_root?;
         if let Some(branch) = task.branch() {
             let base = task.base_branch(&reference_branch);
-            if !base.is_empty()
-                && base != branch
-                && crate::git::commits_between(root, &base, branch)
-                    .map(|commits| !commits.is_empty())
-                    .unwrap_or(true)
-            {
-                return true;
+            if !base.is_empty() && base != branch {
+                match crate::git::commits_between(root, &base, branch) {
+                    Ok(commits) if !commits.is_empty() => {
+                        return Some("branch has unmerged commits")
+                    }
+                    Err(_) => return Some("could not verify branch history"),
+                    _ => {}
+                }
             }
         }
-        // A crashed tool may not have reached its first commit or terminal IPC.
-        task.worktree_path()
-            .map(Path::new)
-            .filter(|path| path.exists())
-            .is_some_and(|path| {
-                crate::git::run_git_output_mapped(
-                    path,
-                    &[
-                        "status",
-                        "--porcelain",
-                        "--",
-                        ".",
-                        ":!performer.sh",
-                        ":!worktree.prd.json",
-                    ],
-                    "inspect work retained after performer death",
-                )
-                .map(|output| !output.status.success() || !output.stdout.is_empty())
-                .unwrap_or(true)
-            })
+        let path = Path::new(task.worktree_path()?);
+        if !path.exists() {
+            return None;
+        }
+        match crate::git::run_git_output_mapped(
+            path,
+            &[
+                "status",
+                "--porcelain",
+                "--",
+                ".",
+                ":!performer.sh",
+                ":!worktree.prd.json",
+            ],
+            "inspect work retained after performer death",
+        ) {
+            Ok(output) if output.status.success() && output.stdout.is_empty() => None,
+            Ok(output) if output.status.success() => Some("worktree contains uncommitted changes"),
+            _ => Some("could not verify worktree contents"),
+        }
     };
 
     let mut registry_value = registry.to_value()?;
@@ -675,6 +674,16 @@ pub fn execute_startup_recovery_sweep(
             classification = "blocked_preserved".into();
             action = "Keep blocked for native recovery".into();
             proposed_action = None;
+        } else if task.runtime_status() == RuntimeStatus::Failed
+            && !task.runtime_pid().is_some_and(is_pid_running)
+            && task.has_worktree_attached()
+        {
+            situation = task.task_runtime.last_error.clone().unwrap_or_else(|| {
+                "Performer reported failure before the coordinator restarted".into()
+            });
+            classification = "performer_failure_retained".into();
+            action = "Keep worker assignment and inspect the recorded phase failure".into();
+            proposed_action = Some(MutationAction::Blocked);
         } else if task.worktree_path().is_some()
             && task.branch().is_some()
             && !task.runtime_pid().is_some_and(is_pid_running)

@@ -78,7 +78,15 @@ pub fn upgrade(root: &Path, apply: bool, expected: Option<&str>) -> Result<Migra
     )?;
     Ok(report)
 }
-pub(super) fn insert(db: &rusqlite::Connection, c: &super::Checkpoint, limit: u64) -> Result<()> {
+pub(super) fn insert(
+    db: &rusqlite::Connection,
+    c: &super::Checkpoint,
+    limit: u64,
+    inventory: Option<&super::inventory::Inventory>,
+) -> Result<()> {
+    if let Some(inventory) = inventory {
+        inventory.store(db)?;
+    }
     let raw = serde_json::to_string(c).map_err(|e| error(e.to_string()))?;
     check_size(
         c,
@@ -124,8 +132,8 @@ pub(super) fn check_size(c: &super::Checkpoint, limit: u64, setting: &str) -> Re
             .map_err(|e| error(e.to_string()))?
             .len();
         return Err(error(format!(
-            "Checkpoint exceeds configured size: task={} size={} bytes, limit={} bytes, mandatory_task={} bytes; mandatory criteria were not truncated. Review session_management.checkpoints.{} before retrying",
-            c.task_id, bytes, limit, mandatory, setting
+            "{}: Checkpoint exceeds configured size: task={} size={} bytes, limit={} bytes, mandatory_task={} bytes; mandatory criteria were not truncated. Review session_management.checkpoints.{} before retrying",
+            super::recovery::SIZE_LIMIT, c.task_id, bytes, limit, mandatory, setting
         )));
     }
     Ok(())

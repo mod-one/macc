@@ -104,7 +104,7 @@ pub(super) fn coordinator_event_stream(
                             .iter()
                             .any(|e| e.phase.as_deref() == Some("ownership"));
                         if !has_ownership_event {
-                            source_seq_cursor += 1;
+                            // Synthetic notifications share the last delivered database cursor.
                             yield Ok(build_ownership_changed_sse_event(source_seq_cursor));
                         }
                     }
@@ -289,8 +289,11 @@ fn parse_source_seq_from_sse_id(event_id: &str) -> Option<i64> {
         return seq.parse::<i64>().ok();
     }
 
-    if let Some(heartbeat) = event_id.strip_prefix("hb-") {
-        let seq = heartbeat.split('-').next()?;
+    if let Some(notification) = event_id
+        .strip_prefix("hb-")
+        .or_else(|| event_id.strip_prefix("evt-ownership_changed---"))
+    {
+        let seq = notification.split('-').next()?;
         return seq.parse::<i64>().ok();
     }
 

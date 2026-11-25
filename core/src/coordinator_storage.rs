@@ -1,3 +1,4 @@
+pub(crate) mod performer_outbox;
 mod reader;
 use crate::coordinator::model::{ResourceLock, Task, TaskRegistry};
 use crate::coordinator::{CoordinatorCursor, CoordinatorEventPayload, CoordinatorEventRecord};
@@ -699,7 +700,7 @@ impl SqliteStorage {
         Ok(inserted > 0)
     }
 
-    /// Has this task already reported a terminal `phase_result` for the given
+    /// Has this task already reported a terminal phase result or failure for the given
     /// claim?
     ///
     /// The performer's IPC event is persisted here the moment it is received
@@ -722,24 +723,18 @@ impl SqliteStorage {
         let Ok(conn) = self.open() else {
             return false;
         };
-        let mut stmt = match conn.prepare(
-            "SELECT raw_json FROM events WHERE task_id = ?1 AND event_type = 'phase_result'",
-        ) {
-            Ok(stmt) => stmt,
-            Err(_) => return false,
-        };
-        let Ok(rows) = stmt.query_map(params![task_id], |row| row.get::<_, String>(0)) else {
-            return false;
-        };
-        for raw in rows.flatten() {
-            let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-                continue;
-            };
-            if value.get("claim_id").and_then(Value::as_str) == Some(claim_id) {
-                return true;
-            }
-        }
-        false
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events e
+             WHERE e.task_id=?1 AND e.event_type IN ('phase_result','failed')
+               AND json_extract(e.raw_json,'$.claim_id')=?2
+               AND (json_extract(e.raw_json,'$.performer_generation') IS NULL
+                    OR json_extract(e.raw_json,'$.performer_generation')=(
+                        SELECT json_extract(t.payload_json,'$.performer_group.generation')
+                        FROM task_runtime t WHERE t.task_id=?1 AND t.claim_id=?2)))",
+            params![task_id, claim_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
     }
 
     /// A connection to the coordinator database, reused across calls on the
@@ -1056,6 +1051,12 @@ impl SqliteStorage {
             ],
         )
         .map_err(sql_err)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_tick(&self, run_id: &str, epoch: i64) -> Result<()> {
+        self.open()?.execute("UPDATE coordinator_runs SET last_tick_at=?1 WHERE run_id=?2 AND epoch=?3 AND pid=?4 AND status IN ('running','draining')",
+            params![Utc::now().to_rfc3339(),run_id,epoch,std::process::id()]).map_err(sql_err)?;
         Ok(())
     }
 

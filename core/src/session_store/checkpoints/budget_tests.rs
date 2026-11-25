@@ -54,30 +54,65 @@ fn quota_resume_uses_finish_headroom_without_truncating_retained_evidence() {
 }
 
 #[test]
-fn resume_still_enforces_the_configured_finish_budget_with_actionable_sizes() {
+fn large_inventory_is_retrievable_across_finish_preview_and_resume() {
     let temp = fixture();
     let root = temp.path();
     let request = context(root, "A", "performer", "future-tool");
-    prepare(root, &request).unwrap();
-    let view = inspect(root).unwrap();
-    let mut policy = view.policy;
-    policy.checkpoints.max_content_bytes = 2048;
-    policy.checkpoints.max_finish_content_bytes = 2048;
-    update_policy(root, &view.revision, &policy).unwrap();
-    for i in 0..80 {
-        std::fs::write(
-            root.join(format!("proof-{i}-{}.txt", "x".repeat(50))),
-            "retained",
+    let prepared = prepare(root, &request).unwrap();
+    let lease = claim(root, &request, &prepared);
+    let mut names = Vec::new();
+    for i in 0..512 {
+        let path = format!("generated-{i:04}-{}", "x".repeat(140));
+        std::fs::write(root.join(&path), "content").unwrap();
+        names.push(path);
+    }
+    let saved = finish(
+        root,
+        &FinishRequest {
+            key: lease.key.clone(),
+            phase: "dev".into(),
+            result: "failure".into(),
+            acknowledged: true,
+        },
+    )
+    .unwrap();
+    release(root, &lease.key, true).unwrap();
+    let inventory = &saved.validation["changed_file_inventory"];
+    assert_eq!(inventory["count"], names.len());
+    assert_eq!(changed_files(root, &saved.id).unwrap(), names);
+    let (db, _) = db::active(root).unwrap();
+    let raw: Vec<u8> = db
+        .query_row(
+            "SELECT paths_json FROM checkpoint_file_inventories WHERE sha256=?1",
+            [inventory["sha256"].as_str().unwrap()],
+            |row| row.get(0),
         )
         .unwrap();
-    }
-    let message = prepare(root, &request).unwrap_err().to_string();
-    assert!(message.contains("limit=2048 bytes"), "{message}");
-    assert!(message.contains("max_finish_content_bytes"), "{message}");
-    assert!(message.contains("mandatory criteria were not truncated"));
-    assert!(root
-        .join(format!("proof-0-{}.txt", "x".repeat(50)))
-        .exists());
+    assert_eq!(digest(&raw), inventory["sha256"]);
+    assert_eq!(serde_json::from_slice::<Vec<String>>(&raw).unwrap(), names);
+    assert!(serde_json::to_vec(&saved).unwrap().len() <= 65536);
+    let preview = reconcile(root, &saved.id, None).unwrap();
+    assert_eq!(
+        preview["current"]["validation"]["changed_file_inventory"],
+        *inventory
+    );
+    let resumed = prepare(root, &request).unwrap();
+    let next = get(root, resumed.checkpoint_id.as_ref().unwrap()).unwrap();
+    assert_eq!(next.mandatory_task, saved.mandatory_task);
+    assert_eq!(next.validation["changed_file_inventory"], *inventory);
+    assert!(next.blocking_issues.iter().any(|s| s.contains("failure")));
+
+    // Even after the listing has been externalized, mandatory evidence must fit.
+    let mut oversized = next;
+    oversized.review_objections = json!("review objection ".repeat(5000));
+    oversized.changed_files = names;
+    assert!(
+        inventory::Inventory::project(&mut oversized, 65536, "max_finish_content_bytes")
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("limit=65536 bytes")
+    );
 }
 
 #[test]

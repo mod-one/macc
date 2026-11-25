@@ -1392,12 +1392,12 @@ pub(super) fn should_auto_retry_error_code(
 /// performer's result is persisted on receipt, so it is already on record well
 /// before the loop gets round to consuming it.
 ///
-/// `holds_unmerged_work(task)` reports whether the task's branch still carries
+/// The retention check reports the reason to preserve the worktree, including
 /// commits the base branch does not have. Requeuing clears the worktree, and
 /// that attachment is the only record of which branch holds those commits --
 /// once it is gone the work is reachable only by digging through reflogs. Such a
 /// task is blocked instead, keeping the pointer intact for an operator. It
-/// should answer conservatively: when it cannot tell, say yes.
+/// preserves the assignment if Git cannot verify it.
 pub fn cleanup_dead_runtime_tasks_in_registry_with<F, G, H>(
     registry: &mut Value,
     now: &str,
@@ -1409,7 +1409,7 @@ pub fn cleanup_dead_runtime_tasks_in_registry_with<F, G, H>(
 where
     F: FnMut(i64) -> bool,
     G: FnMut(&str, &str) -> bool,
-    H: FnMut(&Task) -> bool,
+    H: FnMut(&Task) -> Option<&'static str>,
 {
     let now_ts = chrono::DateTime::parse_from_rfc3339(now)
         .ok()
@@ -1453,7 +1453,11 @@ where
         let old_state = task.state.clone();
         let branch = task.branch().unwrap_or_default().to_string();
         // Checked before the runtime is borrowed mutably below.
-        let unmerged = !branch.is_empty() && holds_unmerged_work(task);
+        let retained = if branch.is_empty() && !task.has_worktree_attached() {
+            None
+        } else {
+            holds_unmerged_work(task)
+        };
 
         let runtime = task.ensure_runtime();
         runtime.pid = None;
@@ -1461,7 +1465,8 @@ where
         runtime.last_error_code =
             Some(crate::coordinator::error_normalizer::E414_PERFORMER_PROCESS_DEAD.to_string());
 
-        let requeue = old_state == WorkflowState::Claimed.as_str() && phase == "dev" && !unmerged;
+        let requeue =
+            old_state == WorkflowState::Claimed.as_str() && phase == "dev" && retained.is_none();
         let new_state = if requeue {
             runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
             task.set_workflow_state(WorkflowState::Todo);
@@ -1475,14 +1480,17 @@ where
             // commits, and it is what lets later recovery steps (abandonment
             // tagging, `macc coordinator status`) attribute that work to this
             // task rather than reporting it as unknown.
-            let detail = if unmerged {
+            let detail = if let Some(reason) = retained {
                 format!(
-                    "runtime pid {} is not running; committed work is unmerged on branch {} -- blocked instead of requeued so it is not lost",
+                    "runtime pid {} is not running; {reason} (branch {}) -- worktree retained for recovery",
                     pid, branch
                 )
             } else {
-                format!("runtime pid {} is not running; auto-reset", pid)
+                format!(
+                    "runtime pid {pid} is not running; retained phase {phase} requires recovery"
+                )
             };
+            runtime.last_error_message = Some(detail.clone());
             runtime.last_error = Some(detail);
             task.set_workflow_state(WorkflowState::Blocked);
             WorkflowState::Blocked.as_str().to_string()
@@ -1725,6 +1733,8 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
 }
 
 struct NativeControlPlaneBackend<'a> {
+    run_id: &'a str,
+    epoch: i64,
     repo_root: &'a Path,
     canonical: &'a CanonicalConfig,
     coordinator: Option<&'a CoordinatorConfig>,
@@ -1785,6 +1795,10 @@ pub(crate) fn ghost_grace_with_stall(
 }
 
 impl NativeControlPlaneBackend<'_> {
+    fn enter_stage(&self, stage: &str) -> Result<()> {
+        crate::coordinator::tick_progress::enter(self.repo_root, self.run_id, self.epoch, stage)
+    }
+
     fn effective_ghost_grace_seconds(&self) -> i64 {
         ghost_grace_with_stall(self.ghost_heartbeat_grace_seconds, self.last_cycle_seconds)
     }
@@ -1802,6 +1816,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         )
     }
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        self.enter_stage("cycle setup")?;
         if self
             .coordinator
             .and_then(|c| c.decisions.as_ref())
@@ -1826,12 +1841,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         // Observe operator cooldown changes (including clears) without restarting the run.
         self.run_state.throttle_registry = sqlite.load_throttle_registry()?;
 
-        let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
-            if let Some(mut r) = run_opt {
-                r.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
-                let _ = sqlite.upsert_coordinator_run(&r);
-            }
-        });
+        {
+            // Serialize heartbeat publication with the watchdog's final read and signal.
+            let _guard = crate::coordinator::tick_progress::lock(self.repo_root)?;
+            sqlite.record_tick(self.run_id, self.epoch)?;
+        }
 
         if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
             if ctrl.mode == "force_stopping" {
@@ -1934,12 +1948,14 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             self.last_sqlite_heartbeat_at = Some(std::time::Instant::now());
         }
 
+        self.enter_stage("synchronize PRD")?;
         crate::coordinator::control_plane::sync_registry_from_prd_native(
             self.repo_root,
             &self.prd_file,
             self.logger,
         )?;
         let logger = self.logger;
+        self.enter_stage("clean integrated branches")?;
         let _ = process_branch_cleanup_queue(
             self.repo_root,
             |event_type, task_id, phase, status, message, severity| {
@@ -1959,6 +1975,8 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                 }
             }),
         )?;
+        self.enter_stage("recover worker state")?;
+        crate::coordinator_storage::performer_outbox::drain(self.repo_root)?;
         let grace = self.effective_ghost_grace_seconds();
         // Logged when the widened grace changes, not on every cycle.
         static LAST_LOGGED_GRACE: std::sync::atomic::AtomicI64 =
@@ -1989,6 +2007,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn monitor_active_jobs(&mut self) -> Result<Option<(String, String)>> {
+        self.enter_stage("monitor performers")?;
         crate::coordinator::control_plane::monitor_active_jobs_native(
             self.repo_root,
             self.env_cfg,
@@ -2002,6 +2021,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn monitor_merge_jobs(&mut self) -> Result<Option<(String, String)>> {
+        self.enter_stage("monitor merges")?;
         crate::coordinator::control_plane::monitor_merge_jobs_native(
             self.repo_root,
             self.env_cfg,
@@ -2013,6 +2033,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn on_blocked_merge(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        self.enter_stage("merge recovery")?;
         if reason.contains("Decision control:") {
             let mut registry = crate::coordinator::decisions::registry(self.repo_root)?;
             if let Some(task) = registry.find_task_mut(task_id) {
@@ -2104,6 +2125,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn on_integrity_pause(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        self.enter_stage("integrity pause")?;
         if let Some(mut job) = self.run_state.phase_job.take() {
             job.cancel_and_wait().await;
         }
@@ -2139,6 +2161,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn advance_tasks(&mut self) -> Result<AdvanceResult> {
+        self.enter_stage("advance phases")?;
         crate::coordinator::control_plane::advance_tasks_native(
             self.repo_root,
             self.env_cfg,
@@ -2152,6 +2175,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn dispatch_ready_tasks(&mut self) -> Result<usize> {
+        self.enter_stage("dispatch workers")?;
         crate::coordinator::control_plane::dispatch_ready_tasks_native(
             self.repo_root,
             self.canonical,
@@ -2170,6 +2194,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         advance: &AdvanceResult,
         dispatched: usize,
     ) -> Result<CoordinatorCounts> {
+        self.enter_stage("refresh decisions and queue")?;
         self.last_cycle_progressed = advance.progressed || dispatched > 0;
         let mut snapshot = crate::coordinator::state::coordinator_state_snapshot(
             self.repo_root,
@@ -2397,7 +2422,8 @@ pub(crate) async fn run_single_prd_control_plane(
         version: env!("CARGO_PKG_VERSION").to_string(),
         stop_reason: None,
     };
-    let _ = sqlite.upsert_coordinator_run(&current_run);
+    sqlite.upsert_coordinator_run(&current_run)?;
+    crate::coordinator::tick_progress::enter(repo_root, &run_id, next_epoch, "startup recovery")?;
 
     let _ = sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
         mode: "running".to_string(),
@@ -2510,6 +2536,7 @@ pub(crate) async fn run_single_prd_control_plane(
         env_cfg,
         logger,
     )?;
+    crate::coordinator_storage::performer_outbox::drain(repo_root)?;
     let startup_cleaned = if let Some(log) = logger {
         let note = |line: String| {
             let _ = log.note(line);
@@ -2587,21 +2614,14 @@ pub(crate) async fn run_single_prd_control_plane(
     }
 
     // ── Part E: replay unread events from SQLite on startup ─────────────
-    if let Err(e) =
-        crate::coordinator::control_plane::consume_runtime_events(repo_root, &mut run_state, logger)
-    {
-        if let Some(log) = logger {
-            let _ = log.note(format!("- Warning: startup event replay failed: {}", e));
-        }
-    } else {
-        let _ = crate::coordinator::control_plane::apply_runtime_event_bus_updates(
-            repo_root,
-            env_cfg,
-            coordinator,
-            &mut run_state,
-            logger,
-        );
-    }
+    crate::coordinator::control_plane::consume_runtime_events(repo_root, &mut run_state, logger)?;
+    crate::coordinator::control_plane::apply_runtime_event_bus_updates(
+        repo_root,
+        env_cfg,
+        coordinator,
+        &mut run_state,
+        logger,
+    )?;
 
     // ── Part F: §11.1 Steps 7-10 — startup recovery sweep ───────────────
     // Inspects worktree state (step 7), Git branch/merge state (step 8),
@@ -2644,6 +2664,8 @@ pub(crate) async fn run_single_prd_control_plane(
     }
 
     let mut backend = NativeControlPlaneBackend {
+        run_id: &run_id,
+        epoch: next_epoch,
         repo_root,
         canonical,
         coordinator,
@@ -4018,7 +4040,7 @@ mod tests {
             60,
             |_| false,                                             // process gone
             |task, claim| task == "T-GHOST" && claim == "claim-1", // result on record
-            |_| false,
+            |_| None,
         )
         .unwrap();
 
@@ -4044,7 +4066,7 @@ mod tests {
             60,
             |_| false,
             |_, _| false, // nothing on record
-            |_| false,
+            |_| None,
         )
         .unwrap();
 
@@ -4064,7 +4086,7 @@ mod tests {
             60,
             |_| false,
             |_, claim| claim == "claim-1", // stale claim only
-            |_| false,
+            |_| None,
         )
         .unwrap();
 
@@ -4087,7 +4109,7 @@ mod tests {
                 consulted = true;
                 false
             },
-            |_| false,
+            |_| None,
         )
         .unwrap();
         assert!(cleaned.is_empty());
@@ -4150,7 +4172,7 @@ mod tests {
             super::ghost_grace_with_stall(90, 200),
             |_| false,
             |_, _| false,
-            |_| false,
+            |_| None,
         )
         .unwrap();
         assert!(
@@ -4166,7 +4188,7 @@ mod tests {
             super::ghost_grace_with_stall(90, 0),
             |_| false,
             |_, _| false,
-            |_| false,
+            |_| None,
         )
         .unwrap();
         assert_eq!(
@@ -4191,9 +4213,9 @@ mod tests {
             &mut registry,
             "2026-02-21T00:10:00Z",
             60,
-            |_| false,    // process genuinely gone
-            |_, _| false, // no result recorded: a real ghost
-            |_| true,     // ...but its branch holds unmerged commits
+            |_| false,                    // process genuinely gone
+            |_, _| false,                 // no result recorded: a real ghost
+            |_| Some("unmerged commits"), // ...but its branch holds unmerged commits
         )
         .unwrap();
 
@@ -4224,7 +4246,7 @@ mod tests {
             60,
             |_| false,
             |_, _| false,
-            |_| false, // branch has no commits ahead of base
+            |_| None, // branch has no commits ahead of base
         )
         .unwrap();
 
@@ -4259,7 +4281,7 @@ mod tests {
             |_, _| false,
             |_| {
                 asked = true;
-                true
+                Some("retained work")
             },
         )
         .unwrap();
@@ -4288,7 +4310,7 @@ mod tests {
             0,
             |_| false,
             |_, _| false,
-            |_| false,
+            |_| None,
         )
         .unwrap();
         assert_eq!(cleaned.len(), 1);
@@ -4319,7 +4341,7 @@ mod tests {
             60,
             |_| false,
             |_, _| false,
-            |_| false,
+            |_| None,
         )
         .unwrap();
         assert_eq!(cleaned.len(), 0);

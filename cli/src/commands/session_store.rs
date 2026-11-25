@@ -38,6 +38,9 @@ pub enum SessionStoreCommands {
     CheckpointFinish,
     Checkpoint {
         id: String,
+        /// Return the complete, checksum-verified list of changed paths as JSON.
+        #[arg(long)]
+        files: bool,
     },
     Reconcile {
         id: String,
@@ -182,11 +185,16 @@ impl Command for SessionStoreCommand {
             SessionStoreCommands::CheckpointFinish => {
                 emit(store::checkpoints::finish(root, &input()?)?)
             }
-            SessionStoreCommands::Checkpoint { id } => super::o2_format::emit_session_store(
-                "checkpoint",
-                store::checkpoints::get(root, id)?,
-                self.json,
-            ),
+            SessionStoreCommands::Checkpoint { id, files: true } => {
+                emit(store::checkpoints::changed_files(root, id)?)
+            }
+            SessionStoreCommands::Checkpoint { id, files: false } => {
+                super::o2_format::emit_session_store(
+                    "checkpoint",
+                    store::checkpoints::get(root, id)?,
+                    self.json,
+                )
+            }
             SessionStoreCommands::Reconcile {
                 id,
                 expected_sha256,

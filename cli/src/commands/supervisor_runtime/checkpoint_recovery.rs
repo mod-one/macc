@@ -103,9 +103,17 @@ fn run(
             )
         })();
         if let Err(error) = result {
+            use macc_core::session_store::checkpoints::recovery;
+            let message = error.to_string();
+            let code = recovery::diagnostic_code(&message);
+            let next_action = match code {
+                "DM_PENDING" => "Inspect the pending task decision in the Inbox.",
+                recovery::SIZE_LIMIT => "Inspect the checkpoint size, mandatory task bytes and configured budget in the error.",
+                _ => "Review the reported contract, retained files and worktree ownership before reconciling.",
+            };
             super::report::write_json(
                 &dir.join("checkpoint-recovery-blocked.json"),
-                &serde_json::json!({"code":macc_core::session_store::checkpoints::recovery::CODE,"task_id":task.id,"error":error.to_string(),"work_preserved":true,"next_action":"Inspect the exact changed field. For retained content/index drift, confirm all invocation tools have stopped, inspect late or external writes, then reconcile reviewed changes. For changed requirements or ownership, inspect the contract and assigned worker. Do not bypass this guard with application edits or an unchanged restart."}),
+                &serde_json::json!({"code":code,"task_id":task.id,"error":message,"work_preserved":true,"next_action":next_action}),
             )?;
             return Err(error);
         }

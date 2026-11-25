@@ -275,7 +275,7 @@ fn checkpoint_protocol_failure_is_terminal_preserves_work_and_never_retries_or_c
     assert!(failure["payload"]["result_exp"]
         .as_str()
         .unwrap()
-        .contains("did not acknowledge"));
+        .contains("Missing expected acknowledgement in assistant output for this invocation: MACC_CHECKPOINT_ACK:"));
 }
 #[test]
 fn decision_feedback_reaches_the_real_performer_and_receipt_records_assistant_ack() {

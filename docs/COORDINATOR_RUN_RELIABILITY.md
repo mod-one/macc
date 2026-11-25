@@ -103,7 +103,21 @@ policy, TUI Sessions settings and Web Setup → Sessions via the shared catalog.
 No schema migration, silent limit override or mandatory-criteria truncation occurs.
 An actual overflow remains an explicit persistence failure and preserves Git work.
 
+## Stall diagnosis
+
+The watchdog compares two consecutive overdue observations of the same run,
+process, epoch and operation. It rechecks progress under the coordinator tick
+lock before signalling the registered session. An operator pause suspends stall
+detection. The stall report records the operation, its duration and the last
+recorded coordinator and worker heartbeats.
+
 ## Retry and terminal events
+
+During an IPC outage the performer atomically queues terminal events under
+`.macc/state/performer-outbox/`. The coordinator imports them before reclaiming
+dead workers and checks the originating assignment. A superseded event remains
+available as a `.rejected` file. The SQLite event ID makes repeated delivery
+idempotent.
 
 A transient internal execution attempt with another attempt available emits
 `progress/running`, not `phase_result/failed`. A terminal phase failure stops the

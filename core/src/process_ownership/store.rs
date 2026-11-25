@@ -80,7 +80,6 @@ impl OwnershipStore {
             }
         })?;
 
-        super::events::bump_ownership_change_seq();
         Ok(())
     }
 
@@ -162,18 +161,17 @@ fn store_path(repo_root: &Path) -> PathBuf {
     repo_root.join(STORE_RELATIVE_PATH)
 }
 
-/// Lightweight change token combining the in-process publication sequence and
-/// the on-disk ownership store metadata. Callers can compare tokens to refresh
-/// ownership views strictly when the ownership engine publishes a change.
+/// Observe atomic replacement of this project’s ownership store across processes.
 pub fn ownership_change_token(repo_root: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::UNIX_EPOCH;
 
     let mut hasher = DefaultHasher::new();
-    super::events::ownership_change_seq().hash(&mut hasher);
     let path = store_path(repo_root);
     if let Ok(meta) = fs::metadata(&path) {
+        #[cfg(unix)]
+        std::os::unix::fs::MetadataExt::ino(&meta).hash(&mut hasher);
         meta.len().hash(&mut hasher);
         if let Ok(modified) = meta.modified() {
             if let Ok(dur) = modified.duration_since(UNIX_EPOCH) {
@@ -230,6 +228,17 @@ mod tests {
         let store = OwnershipStore::load(repo_root.path()).expect("load missing store");
 
         assert!(store.records.is_empty());
+    }
+
+    #[test]
+    fn ownership_publications_only_invalidate_their_own_project() {
+        let a = temp_repo_root("ownership-a");
+        let b = temp_repo_root("ownership-b");
+        let token_a = super::ownership_change_token(a.path());
+        let token_b = super::ownership_change_token(b.path());
+        OwnershipStore::default().save(a.path()).unwrap();
+        assert_ne!(super::ownership_change_token(a.path()), token_a);
+        assert_eq!(super::ownership_change_token(b.path()), token_b);
     }
 
     #[test]

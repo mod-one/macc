@@ -948,7 +948,11 @@ fn execute(root: &Path, action: &Action) -> Result<Value> {
             Ok(json!({"recovered":true,"plan":store.plan(&plan.id)?}))
         }
         Action::Request { file } => {
-            let mut request: dm::Request = read(file, p.max_request_bytes)?;
+            let mut request: dm::Request = read(file, p.max_request_bytes).inspect_err(|error| {
+                let failure = json!({"code":"DM_REQUEST_INPUT","submitted":false,"error":error.to_string(),
+                    "hint":"Attach registered evidence as artifacts: [{id,digest}], then resubmit the corrected request file."});
+                println!("{failure}");
+            })?;
             let (actor, origin) = if std::env::var_os("MACC_DECISION_ATTEMPT").is_some() {
                 let pinned = store.read_context(
                     &env("MACC_DECISION_PLAN")?,

@@ -452,41 +452,22 @@ async fn restart(
 }
 /// A crashed engine can leave performers alive. Signal only their recorded groups.
 async fn stop_orphan_jobs(incident: &macc_core::supervisor::incident::Incident) -> Result<()> {
-    #[cfg(unix)]
     for task in incident.tasks.iter().filter(|task| task.state != "todo") {
-        if let Some(pid) = task.task_runtime.pid {
-            if !macc_core::coordinator::helpers::is_pid_running(pid) {
-                continue;
-            }
-            let group = task.task_runtime.process_group_id.ok_or_else(|| {
-                MaccError::Validation(format!(
-                    "Live orphan {} has no recorded process group; intervention deferred",
-                    task.id
-                ))
-            })?;
-            if group <= 1
-                || unsafe { libc::getpgid(pid as i32) } as i64 != group
-                || group == unsafe { libc::getpgrp() } as i64
-            {
-                return Err(MaccError::Validation(format!(
-                    "Orphan {} process identity does not match its recorded group",
-                    task.id
-                )));
-            }
-            unsafe {
-                libc::kill(-(group as i32), libc::SIGTERM);
-            }
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-            while macc_core::coordinator::helpers::is_pid_running(pid)
-                && tokio::time::Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if macc_core::coordinator::helpers::is_pid_running(pid) {
-                unsafe {
-                    libc::kill(-(group as i32), libc::SIGKILL);
-                }
-            }
+        let runtime = &task.task_runtime;
+        if let Some(pid) = runtime.pid.or_else(|| {
+            runtime
+                .performer_group
+                .as_ref()
+                .map(|g| i64::from(g.leader))
+        }) {
+            let task = task.clone();
+            tokio::task::spawn_blocking(move || {
+                macc_core::service::coordinator_workflow::stop_task_process(&task, pid)
+            })
+            .await
+            .map_err(|error| {
+                MaccError::Validation(format!("Stopping orphan performer: {error}"))
+            })??;
         }
     }
     Ok(())
@@ -499,4 +480,47 @@ fn ensure_not_stopped(paths: &ProjectPaths) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use macc_core::process_ownership::launched_group::{LaunchedGroup, Scope};
+    use std::{os::unix::process::CommandExt, process::Command};
+
+    #[tokio::test]
+    async fn orphan_recovery_uses_the_registered_group_even_after_the_pid_was_cleared() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let group = LaunchedGroup::from_child(
+            pid,
+            "ff2edfb5-cb3c-4878-815e-a87eddc84513".parse().unwrap(),
+            Scope::PerformerGroup,
+        );
+        let incident = incident::Incident {
+            id: "incident".into(),
+            run_id: "run".into(),
+            epoch: 1,
+            reason: "coordinator exited".into(),
+            run_status: Some("crashed".into()),
+            recent_events: vec![],
+            tasks: vec![serde_json::from_value(json!({
+                "id":"T","state":"claimed","task_runtime":{"performer_group":group}
+            }))
+            .unwrap()],
+        };
+        let result = stop_orphan_jobs(&incident).await;
+        // Reap this fixture even if the regression returns without signalling it.
+        let stopped = child.try_wait().unwrap().is_some();
+        if !stopped {
+            let _ = child.kill();
+        }
+        child.wait().unwrap();
+        result.unwrap();
+        assert!(stopped, "registered performer survived orphan recovery");
+    }
 }

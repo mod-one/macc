@@ -200,7 +200,12 @@ limit). The starting checkpoint pins this separate allowance for evidence added
 during execution. Initial checkpoints obey `max_content_bytes`. On resumption,
 mandatory task context must still fit that limit, while changed paths, retained
 objections and outcome evidence use the current `max_finish_content_bytes` budget.
-No acceptance criteria or retained evidence are truncated to make a resume fit.
+When the changed-file list would exceed the budget, MACC stores the complete JSON
+list in `checkpoint_file_inventories` in the same SQLite transaction. The
+checkpoint records its count and SHA-256 under `validation.changed_file_inventory`.
+Use `macc session-store checkpoint <id> --files` to read the complete verified list.
+The Git content digest, required criteria, decisions and review objections stay
+in the checkpoint. A reconciliation preview computes the same reference in memory.
 Size errors include actual bytes, the budget and the setting to inspect.
 
 A branch change in the same idle execution worktree is recaptured automatically

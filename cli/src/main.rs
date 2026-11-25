@@ -1123,7 +1123,10 @@ fn main() {
     let protocol_stdio = matches!(
         &cli.command,
         Some(Commands::O2 { command, .. }) if command.is_mcp()
-    ) || matches!(&cli.command, Some(Commands::Apply { .. }));
+    ) || matches!(
+        &cli.command,
+        Some(Commands::Apply { .. } | Commands::Decisions { .. } | Commands::SessionStore { .. })
+    );
     init_tracing(cli.verbose, protocol_stdio);
 
     // Propagate debug mode to child processes (coordinator, performers, workers).

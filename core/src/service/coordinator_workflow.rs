@@ -2439,7 +2439,7 @@ pub fn coordinator_cutover_gate(
 mod phase_retry;
 pub use phase_retry::coordinator_retry_phase;
 
-fn stop_task_process(task: &crate::coordinator::model::Task, pid: i64) -> Result<usize> {
+pub fn stop_task_process(task: &crate::coordinator::model::Task, pid: i64) -> Result<usize> {
     match task.task_runtime.performer_group.as_ref() {
         Some(g)
             if i64::from(g.leader) == pid

@@ -420,16 +420,17 @@ fn coordinator_reliability_chain_integration() {
     assert_eq!(sync_results[0].status, SyncBranchStatus::Merged);
     assert_eq!(registry_c.tasks[0].state, "merged");
 
-    // (5): merge-gate merges retry branch before dispatch to prevent duplicate dispatch.
+    // (5): a delivered retry tip is recognized before dispatching the task again.
     let (repo_d, _base_d) = make_test_repo("chain-d");
-    run_git(&repo_d, &["checkout", "-b", "task/L4-INT-001-D"]);
+    let worker_d = add_pool_worktree(&repo_d, "worker-01", "task/L4-INT-001-D");
     create_commit(
-        &repo_d,
+        &worker_d,
         "merge-gate.txt",
         "merged by gate\n",
         "feat: retry branch\n\n[macc:task L4-INT-001-D]",
     );
-    run_git(&repo_d, &["checkout", "main"]);
+    run_git(&repo_d, &["merge", "--ff-only", "task/L4-INT-001-D"]);
+    let delivered_tip = run_git_capture(&repo_d, &["rev-parse", "HEAD"]);
     let registry_d = json!({
         "tasks": [
             {
@@ -437,7 +438,10 @@ fn coordinator_reliability_chain_integration() {
                 "state": "todo",
                 "base_branch": "main",
                 "coordinator_tool": "codex",
+                "worktree": { "branch": "task/L4-INT-001-D", "worktree_path": worker_d },
                 "task_runtime": {
+                    "status": "failed",
+                    "completion_commit_sha": delivered_tip,
                     "retries": 1,
                     "metrics": {
                         "retries": 1
@@ -448,7 +452,11 @@ fn coordinator_reliability_chain_integration() {
     });
     write_registry(&repo_d, &registry_d);
     let prd_path_d = repo_d.join("worktree.prd.json");
-    fs::write(&prd_path_d, "{\"tasks\":[]}\n").expect("write prd");
+    fs::write(
+        &prd_path_d,
+        r#"{"tasks":[{"id":"L4-INT-001-D","title":"Exercise retry delivery"}]}"#,
+    )
+    .expect("write prd");
 
     let mut canonical = CanonicalConfig::default();
     canonical.tools.enabled = vec!["codex".to_string()];
@@ -482,6 +490,10 @@ fn coordinator_reliability_chain_integration() {
         .find_task("L4-INT-001-D")
         .expect("merged task");
     assert_eq!(merged_task.state, "merged");
+    assert_eq!(
+        run_git_capture(&repo_d, &["rev-parse", "HEAD"]),
+        delivered_tip
+    );
 
     // (7): slot with recent activity preferred when pool has a warm session.
     // In the pool model, session warmth is tool-level; the tiebreak is recency.

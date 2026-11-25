@@ -125,8 +125,14 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
     }
     c.blocking_issues.sort();
     c.blocking_issues.dedup();
+    let setting = if c.validation["content_budget_setting"] == "max_finish_content_bytes" {
+        "max_finish_content_bytes"
+    } else {
+        "max_content_bytes"
+    };
+    let inventory = inventory::Inventory::project(&mut c, content_limit, setting)?;
     let optional_context = crate::o2::context::for_checkpoint(&tx, root, &c, &freshness)?;
-    schema::insert(&tx, &c, content_limit)?;
+    schema::insert(&tx, &c, content_limit, inventory.as_ref())?;
     sql(tx.commit())?;
     let acknowledgement = format!(
         "MACC_CHECKPOINT_ACK: {} task={} phase={}",
@@ -281,7 +287,9 @@ pub fn finish(root: &Path, request: &FinishRequest) -> Result<Checkpoint> {
     }
     c.blocking_issues.sort();
     c.blocking_issues.dedup();
-    schema::insert(&tx, &c, content_limit)?;
+    let inventory =
+        inventory::Inventory::project(&mut c, content_limit, "max_finish_content_bytes")?;
+    schema::insert(&tx, &c, content_limit, inventory.as_ref())?;
     db::event(
         &tx,
         &request.key.session_id,

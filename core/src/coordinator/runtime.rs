@@ -127,6 +127,8 @@ pub enum CoordinatorRuntimeEventKind {
     Failed {
         phase: Option<String>,
         message: Option<String>,
+        code: Option<String>,
+        origin: Option<String>,
     },
     /// A pre-retry salvage check was attempted for a task worktree.
     /// Emitted before the coordinator decides whether to retry on the same
@@ -214,6 +216,10 @@ pub struct CoordinatorRunState {
     pub merge_join_set: tokio::task::JoinSet<()>,
     pub merge_event_tx: tokio::sync::mpsc::UnboundedSender<CoordinatorMergeEvent>,
     pub merge_event_rx: tokio::sync::mpsc::UnboundedReceiver<CoordinatorMergeEvent>,
+    /// SQLite replay stays outside the bounded live broadcast channel. Its cursor is
+    /// acknowledged only after the corresponding registry updates are persistent.
+    pub(crate) replay_events: Vec<CoordinatorRuntimeEvent>,
+    pub(crate) replay_cursor: Option<String>,
     pub runtime_event_bus_tx: tokio::sync::broadcast::Sender<CoordinatorRuntimeEvent>,
     pub runtime_event_bus_rx: tokio::sync::broadcast::Receiver<CoordinatorRuntimeEvent>,
     pub control_tx: tokio::sync::mpsc::Sender<crate::coordinator::control::Pending>,
@@ -350,6 +356,8 @@ impl CoordinatorRunState {
         let (merge_event_tx, merge_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (runtime_event_bus_tx, runtime_event_bus_rx) = tokio::sync::broadcast::channel(4096);
         Self {
+            replay_events: Vec::new(),
+            replay_cursor: None,
             phase_job: None,
             activity_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
             pending_job_event: None,
@@ -895,7 +903,14 @@ pub fn raw_event_to_runtime_event(
     let event_type = event.event_type.as_str();
     let event_status = event.status.as_str();
     let event_phase = event.phase.clone().filter(|value| !value.is_empty());
-    let event_message = event.message().map(|value| value.to_string());
+    // A failed wrapper can supply both a generic reason and the provider diagnostic.
+    let event_message = event
+        .payload
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| event_status == "failed" && !s.trim().is_empty())
+        .or_else(|| event.message())
+        .map(str::to_owned);
     let runtime_status = crate::coordinator::runtime_status_from_event(event_type, event_status)
         .as_str()
         .to_string();
@@ -927,14 +942,18 @@ pub fn raw_event_to_runtime_event(
             phase: event_phase,
             message: event_message,
         },
+        "failed" | "phase_result" if event_type == "failed" || event_status == "failed" => {
+            CoordinatorRuntimeEventKind::Failed {
+                phase: event_phase,
+                message: event_message,
+                code: event.payload_error_code(),
+                origin: event.payload_origin(),
+            }
+        }
         "phase_result" => CoordinatorRuntimeEventKind::PhaseResult {
             status: crate::coordinator::runtime_status_from_event(event_type, event_status)
                 .as_str()
                 .to_string(),
-            phase: event_phase,
-            message: event_message,
-        },
-        "failed" => CoordinatorRuntimeEventKind::Failed {
             phase: event_phase,
             message: event_message,
         },

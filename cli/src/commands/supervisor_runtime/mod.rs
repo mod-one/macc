@@ -19,6 +19,7 @@ mod review_protocol_recovery;
 mod scoped_prd_recovery;
 mod shutdown;
 mod task_requeue;
+mod watchdog;
 mod workspace;
 use recovery::intervene;
 pub use report::{record_failure, record_shutdown};
@@ -84,6 +85,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
     } else {
         policy::Ledger::default()
     };
+    let mut stall_observation = None;
     loop {
         let canonical = macc_core::load_canonical_config(&paths.config_path)?;
         let config = canonical.automation.supervisor.clone().unwrap_or_default();
@@ -102,16 +104,16 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                 )
             {
                 if let Ok(raw) = std::fs::read_to_string(&stall_path) {
-                    if serde_json::from_str::<serde_json::Value>(&raw)
-                        .ok()
-                        .and_then(|v| v.get("run_id").and_then(|v| v.as_str()).map(str::to_owned))
-                        .as_deref()
-                        == Some(&r.run_id)
-                    {
-                        r.status = "crashed".into();
-                        r.stop_reason=Some("Supervisor stopped a coordinator whose tick exceeded the stall threshold".into());
-                        SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths))
-                            .upsert_coordinator_run(r)?;
+                    if let Ok(stall) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if stall["run_id"].as_str() == Some(&r.run_id)
+                            && stall["pid"].as_i64() == Some(r.pid)
+                            && stall["epoch"].as_i64() == Some(r.epoch)
+                        {
+                            r.status = "crashed".into();
+                            r.stop_reason = stall["reason"].as_str().map(str::to_owned);
+                            SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths))
+                                .upsert_coordinator_run(r)?;
+                        }
                     }
                 }
             }
@@ -120,23 +122,13 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
             matches!(r.status.as_str(), "running" | "draining")
                 && macc_core::coordinator::helpers::is_pid_running(r.pid)
         });
-        if running
-            && run
-                .as_ref()
-                .and_then(|r| r.last_tick_at.as_ref())
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                .is_some_and(|tick| {
-                    chrono::Utc::now().signed_duration_since(tick).num_seconds()
-                        > config.log_analysis_window_seconds.max(30) as i64
-                })
-        {
-            write_json(
-                &paths.root.join(".macc/log/supervisor/stall.json"),
-                &json!({"timestamp":chrono::Utc::now().to_rfc3339(),"run_id":run.as_ref().map(|r|&r.run_id),"reason":"Coordinator tick exceeded stall threshold; stopping managed runtime before diagnosis"}),
-            )?;
-            macc_core::service::coordinator::coordinator_stop_managed_command_process(
-                &paths, false,
-            )?;
+        if watchdog::inspect(
+            &paths,
+            run.as_ref().filter(|_| running),
+            config.log_analysis_window_seconds,
+            &mut stall_observation,
+        )? {
+            continue; // Re-read the stopped run before reporting health or intervening.
         }
         let status = if running {
             "healthy"

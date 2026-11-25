@@ -7,17 +7,6 @@ use serde_json::{Map, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static OWNERSHIP_CHANGE_SEQ: AtomicU64 = AtomicU64::new(1);
-
-pub fn bump_ownership_change_seq() -> u64 {
-    OWNERSHIP_CHANGE_SEQ.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-pub fn ownership_change_seq() -> u64 {
-    OWNERSHIP_CHANGE_SEQ.load(Ordering::SeqCst)
-}
 
 pub struct OwnershipEventBroadcaster;
 
@@ -28,7 +17,6 @@ impl OwnershipEventBroadcaster {
         handle: &ProcessHandle,
         payload_fields: Map<String, Value>,
     ) {
-        bump_ownership_change_seq();
         let message = serialize_message(handle, payload_fields.clone());
         let raw_event = build_raw_event(event_type, &message, &payload_fields);
         // The coordinator JSONL record is appended below in every mode.

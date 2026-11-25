@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod budget_tests;
 mod git_state;
+mod inventory;
 mod lifecycle;
 mod memory_context;
 pub mod merge_repair;
@@ -191,12 +192,38 @@ pub(crate) fn load(db: &rusqlite::Connection, id: &str) -> Result<Checkpoint> {
 pub fn get(root: &Path, id: &str) -> Result<Checkpoint> {
     let _guard = lock(root)?;
     let (db, a) = db::active(root)?;
-    let c = load(&db, id)?;
-    if c.project_id != a.project_id {
+    owned(&db, id, &a.project_id)
+}
+
+fn owned(db: &rusqlite::Connection, id: &str, project_id: &str) -> Result<Checkpoint> {
+    let c = load(db, id)?;
+    if c.project_id != project_id {
         return Err(error("Foreign checkpoint project"));
     }
     Ok(c)
 }
+/// Read the full path listing only on request, outside the provider prompt budget.
+pub fn changed_files(root: &Path, id: &str) -> Result<Vec<String>> {
+    let _guard = lock(root)?;
+    let (db, a) = db::active(root)?;
+    let c = owned(&db, id, &a.project_id)?;
+    let Some(reference) = c.validation.get("changed_file_inventory") else {
+        return Ok(c.changed_files);
+    };
+    let sha = reference["sha256"]
+        .as_str()
+        .ok_or_else(|| error("Missing checkpoint inventory digest"))?;
+    let bytes: Vec<u8> = sql(db.query_row(
+        "SELECT paths_json FROM checkpoint_file_inventories WHERE sha256=?1",
+        [sha],
+        |row| row.get(0),
+    ))?;
+    if digest(&bytes) != sha {
+        return Err(error("Checkpoint inventory checksum mismatch"));
+    }
+    json(&bytes)
+}
+
 pub(super) fn list(db: &rusqlite::Connection) -> Result<Vec<CheckpointView>> {
     if !ready(db)? {
         return Ok(vec![]);

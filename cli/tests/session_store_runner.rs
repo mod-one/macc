@@ -321,7 +321,7 @@ fn fresh_session_requires_acknowledgement_before_success_can_be_accepted() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("did not acknowledge"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Missing expected acknowledgement in assistant output for this invocation: MACC_CHECKPOINT_ACK:"));
     let status = value(cli(root, &["status"], None));
     assert!(status["sessions"]
         .as_array()

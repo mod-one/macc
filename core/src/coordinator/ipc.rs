@@ -18,6 +18,8 @@ pub const COORDINATOR_IPC_ADDR_REL_PATH: &str = ".macc/state/coordinator.ipc.add
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PerformerIpcAck {
     ok: bool,
+    #[serde(default)]
+    retryable: bool,
     event_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -249,6 +251,7 @@ fn process_ipc_event(
         Err(err) => {
             return PerformerIpcAck {
                 ok: false,
+                retryable: false,
                 event_id: String::new(),
                 error: Some(format!(
                     "Failed to parse IPC event payload as JSON: {}",
@@ -282,6 +285,7 @@ fn process_ipc_event(
         );
         return PerformerIpcAck {
             ok: false,
+            retryable: false,
             event_id,
             error: Some(format!("Rejected performer IPC event: {}", err)),
         };
@@ -289,6 +293,7 @@ fn process_ipc_event(
     if raw_event_identity(&event).is_none() {
         return PerformerIpcAck {
             ok: false,
+            retryable: false,
             event_id,
             error: Some("Rejected performer IPC event: missing identity".to_string()),
         };
@@ -302,6 +307,7 @@ fn process_ipc_event(
             if ev_epoch < cur_epoch {
                 return PerformerIpcAck {
                     ok: false,
+                    retryable: true,
                     event_id,
                     error: Some("E418: Stale event rejected: older coordinator epoch".to_string()),
                 };
@@ -322,6 +328,7 @@ fn process_ipc_event(
                     {
                         return PerformerIpcAck {
                             ok: false,
+                            retryable: false,
                             event_id,
                             error: Some(
                                 "E418: Stale event rejected: mismatched claim ID".to_string(),
@@ -332,15 +339,27 @@ fn process_ipc_event(
             }
         }
     }
-    if let Err(err) = coordinator_storage::append_event_record_sqlite(project_paths, &event) {
-        return PerformerIpcAck {
-            ok: false,
-            event_id,
-            error: Some(format!(
-                "Failed to persist performer IPC event to SQLite: {}",
-                err
-            )),
-        };
+    match coordinator_storage::append_event_record_sqlite(project_paths, &event) {
+        Ok(false) => {
+            return PerformerIpcAck {
+                ok: true,
+                retryable: false,
+                event_id,
+                error: None,
+            }
+        }
+        Ok(true) => {}
+        Err(err) => {
+            return PerformerIpcAck {
+                ok: false,
+                retryable: true,
+                event_id,
+                error: Some(format!(
+                    "Failed to persist performer IPC event to SQLite: {}",
+                    err
+                )),
+            }
+        }
     }
     let _ =
         crate::coordinator::helpers::append_structured_event_record(&project_paths.root, &event);
@@ -349,6 +368,7 @@ fn process_ipc_event(
     }
     PerformerIpcAck {
         ok: true,
+        retryable: false,
         event_id,
         error: None,
     }

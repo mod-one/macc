@@ -13,9 +13,22 @@ use rusqlite::TransactionBehavior;
 
 /// Stable diagnostic identifier under the existing E903 precondition contract.
 pub const CODE: &str = "MACC-CHECKPOINT-CONTEXT-DRIFT";
+pub const SIZE_LIMIT: &str = "MACC-CHECKPOINT-SIZE";
 /// Exact retained bytes/index changed after their checkpoint. This is not
 /// evidence of a missing device, a human decision or a transferred worktree.
 pub const WORKTREE_DRIFT: &str = "MACC-CHECKPOINT-WORKTREE-DRIFT";
+
+/// Preserve a native prerequisite when it is encountered during checkpoint inspection.
+pub fn diagnostic_code(message: &str) -> &'static str {
+    ["DM_PENDING", SIZE_LIMIT, WORKTREE_DRIFT]
+        .into_iter()
+        .find(|code| {
+            message
+                .split_whitespace()
+                .any(|word| word.strip_suffix(':') == Some(*code))
+        })
+        .unwrap_or(CODE)
+}
 
 /// Keep session claims excluded throughout a physical worktree ownership repair.
 pub(crate) fn idle_worktrees(
@@ -95,8 +108,8 @@ fn reconcile_mode(root: &Path, id: &str, expected: Option<&str>, automatic: bool
     current.validation["max_finish_content_bytes"] =
         json!(policy.checkpoints.max_finish_content_bytes);
     current.validation["content_budget_setting"] = json!("max_finish_content_bytes");
-    schema::check_size(
-        &current,
+    let inventory = inventory::Inventory::project(
+        &mut current,
         policy.checkpoints.max_finish_content_bytes,
         "max_finish_content_bytes",
     )?;
@@ -139,7 +152,12 @@ fn reconcile_mode(root: &Path, id: &str, expected: Option<&str>, automatic: bool
             &serde_json::to_vec_pretty(&payload).map_err(|e| error(e.to_string()))?,
         )?;
     }
-    schema::insert(&tx, &current, policy.checkpoints.max_finish_content_bytes)?;
+    schema::insert(
+        &tx,
+        &current,
+        policy.checkpoints.max_finish_content_bytes,
+        inventory.as_ref(),
+    )?;
     sql(tx.execute(
         "UPDATE task_checkpoints SET validation_state='reconciled' WHERE id=?1",
         [id],
@@ -297,7 +315,11 @@ pub fn diagnostics(root: &Path) -> Result<Vec<Value>> {
         let id = checkpoint.id;
         match reconcile(root,&id,None) {
             Ok(v) if checkpoint.validation_state=="needs_reconciliation" || v["diagnostic"]["needs_context_update"]==true || v["diagnostic"]["requires_contract_review"]==true || v["diagnostic"]["previous_worktree"]!=v["diagnostic"]["execution_worktree"] => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"diagnostic":v["diagnostic"],"next_command":format!("macc session-store reconcile {id} --expected-sha256 {}",v["current_sha256"].as_str().unwrap_or_default())})),
-            Err(e) => diagnostics.push(json!({"code":CODE,"task_id":checkpoint.task_id,"checkpoint_id":id,"error":e.to_string()})),
+            Err(e) => {
+                let message = e.to_string();
+                let code = diagnostic_code(&message);
+                diagnostics.push(json!({"code":code,"task_id":checkpoint.task_id,"checkpoint_id":id,"error":message}));
+            }
             _ => {},
         }
     }

@@ -305,6 +305,7 @@ emit_performer_event() {
     --arg run_id "$EVENT_RUN_ID" \
     --argjson coordinator_epoch "$EVENT_COORDINATOR_EPOCH" \
     --arg claim_id "$EVENT_CLAIM_ID" \
+    --arg generation "${MACC_PERFORMER_GENERATION:-}" \
     --argjson seq "$seq" \
     --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --arg source "$EVENT_SOURCE" \
@@ -326,6 +327,7 @@ emit_performer_event() {
       status:$status,
       payload:$payload
     }
+    + (if $generation != "" then {performer_generation:$generation} else {} end)
     + (if $claim_id != "" then {claim_id:$claim_id} else {} end)
     + (if $phase    != "" then {phase:$phase}       else {} end))' 2>"$jq_err_file")"; then
     jq_err="$(tr '\n' ' ' <"$jq_err_file" | sed 's/[[:space:]]\\+/ /g')"
@@ -338,12 +340,30 @@ emit_performer_event() {
     LAST_IPC_ERROR="empty event json: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>}"
     return 1
   fi
-  if [[ -n "$EVENT_IPC_ADDR" ]] && send_event_via_ipc "$event_line"; then
-    return 0
+  if [[ -n "$EVENT_IPC_ADDR" ]]; then
+    if send_event_via_ipc "$event_line"; then return 0; elif [[ $? -eq 2 ]]; then return 1; fi
+    local new_addr=""
+    if [[ -r "$EVENT_IPC_ADDR_FILE" ]]; then
+      new_addr="$(tr -d '[:space:]' < "$EVENT_IPC_ADDR_FILE")"
+    fi
+    if [[ -n "$new_addr" && "$new_addr" != "$EVENT_IPC_ADDR" ]]; then
+      EVENT_IPC_ADDR="$new_addr"
+      if send_event_via_ipc "$event_line"; then return 0; elif [[ $? -eq 2 ]]; then return 1; fi
+    fi
   fi
   if [[ -n "$EVENT_FILE" ]]; then
-    printf '%s\n' "$event_line" >>"$EVENT_FILE" 2>/dev/null || true
-    return 0
+    printf '%s\n' "$event_line" >>"$EVENT_FILE"
+    return $?
+  fi
+  if [[ -n "$EVENT_IPC_ADDR" && ( "$event_type" == phase_result || "$event_type" == failed ) ]]; then
+    local dir="$repo/.macc/state/performer-outbox" pending
+    mkdir -p -- "$dir" || return 1
+    pending="$(mktemp "$dir/$(date +%s%N)-XXXXXXXX")" || return 1
+    if printf '%s\n' "$event_line" >"$pending" && mv -- "$pending" "$pending.json"; then
+      echo "Terminal performer event retained for coordinator replay: $event_type ($pending.json)" >&2
+      return 0
+    fi
+    rm -f -- "$pending"
   fi
   return 1
 }
@@ -376,12 +396,21 @@ send_event_via_ipc() {
     IFS= read -r -t 2 ack_line <&9 || exit 1
     ack_ok="$(jq -r '.ok // false' <<<"$ack_line" 2>/dev/null)" || exit 1
     ack_event_id="$(jq -r '.event_id // empty' <<<"$ack_line" 2>/dev/null)" || exit 1
-    [[ "$ack_ok" == "true" && "$ack_event_id" == "$event_id" ]] || exit 1
+    [[ "$ack_event_id" == "$event_id" ]] || exit 1
+    if [[ "$ack_ok" != "true" ]]; then
+      # A retained claim can legitimately outlive its coordinator epoch.
+      if jq -e '.retryable == true' <<<"$ack_line" >/dev/null; then exit 1; fi
+      exit 2
+    fi
     exec 9>&- 9<&-
   ) >/dev/null 2>&1
   local rc=$?
   if [[ $rc -eq 0 ]]; then
     return 0
+  fi
+  if [[ $rc -eq 2 ]]; then
+    LAST_IPC_ERROR="coordinator rejected performer event $event_id"
+    return 2
   fi
   if command -v python3 >/dev/null 2>&1; then
     local py_err=""
@@ -407,12 +436,12 @@ try:
 except Exception as exc:
     print(f"ack parse error: {exc}")
     raise SystemExit(1)
-if not ack_payload.get("ok"):
-    print(f"ack negative: {ack_payload}")
-    raise SystemExit(1)
 if ack_payload.get("event_id") != event_id:
     print(f"ack event_id mismatch: {ack_payload.get('event_id')} != {event_id}")
     raise SystemExit(1)
+if not ack_payload.get("ok"):
+    print(f"ack negative: {ack_payload}")
+    raise SystemExit(1 if ack_payload.get("retryable") else 2)
 PY
 )"
     local py_rc=$?
@@ -422,23 +451,6 @@ PY
     return $py_rc
   fi
   LAST_IPC_ERROR="tcp ipc failed: addr=${addr_display} event_id_extracted=true preview=\"${preview}\""
-  # IPC failed with the baked-in address. If the coordinator was restarted
-  # (e.g., after SSH disconnect), the address file may have a new address.
-  # Read it and retry once so performers survive coordinator restarts.
-  if [[ -n "$EVENT_IPC_ADDR_FILE" && -f "$EVENT_IPC_ADDR_FILE" ]]; then
-    local new_addr
-    new_addr="$(< "$EVENT_IPC_ADDR_FILE" tr -d '[:space:]')"
-    if [[ -n "$new_addr" && "$new_addr" != "$EVENT_IPC_ADDR" ]]; then
-      local old_addr="$EVENT_IPC_ADDR"
-      EVENT_IPC_ADDR="$new_addr"
-      if send_event_via_ipc "$event_line"; then
-        # Successfully reconnected to restarted coordinator.
-        return 0
-      fi
-      # Retry with new addr also failed — restore original for error context.
-      EVENT_IPC_ADDR="$old_addr"
-    fi
-  fi
   return $rc
 }
 
@@ -451,7 +463,7 @@ must_emit_performer_event() {
   if emit_performer_event "$event_type" "$phase" "$status" "$payload_json"; then
     return 0
   fi
-  if [[ -n "$EVENT_IPC_ADDR" ]]; then
+  if [[ -n "$EVENT_IPC_ADDR" || -n "$EVENT_FILE" ]]; then
     local source="${EVENT_SOURCE:-performer:${tool:-unknown}:${EVENT_RUN_ID}}"
     local detail="Error: failed to persist performer event via coordinator IPC: type=${event_type} task=${EVENT_TASK_ID:-$task_id} source=${source}"
     if [[ -n "$LAST_IPC_ERROR" ]]; then

@@ -438,6 +438,12 @@ fn crashed_performer_without_terminal_result_retains_uncommitted_work() {
     )
     .unwrap();
     let task = typed.find_task("HANDOFF").unwrap();
+    assert!(task
+        .task_runtime
+        .last_error_message
+        .as_deref()
+        .unwrap()
+        .contains("uncommitted changes"));
     assert_eq!(task.state, "blocked");
     assert_eq!(task.worktree_path(), Some(fixture.worker.to_str().unwrap()));
     assert!(!typed.can_reuse_worktree_slot(fixture.worker.to_str().unwrap()));
@@ -446,3 +452,60 @@ fn crashed_performer_without_terminal_result_retains_uncommitted_work() {
 
 #[path = "phase_handoff_tests.rs"]
 mod phase_handoff_tests;
+
+#[test]
+fn offline_failure_survives_restart_with_the_original_diagnostic_and_dirty_worktree() {
+    use crate::coordinator::{
+        control_plane::{apply_runtime_event_bus_updates, consume_runtime_events},
+        state, state_runtime,
+    };
+    let fixture = Fixture::new(false);
+    let before = fixture.snapshot();
+    let root = fixture.root.path();
+    let generation = "c9cda0b1-623b-4422-97c1-c82a2c74400d";
+    let mut registry = fixture.registry("tool-a");
+    let runtime = &mut registry["tasks"][0]["task_runtime"];
+    runtime["pid"] = json!(2147483647);
+    runtime["run_id"] = json!("old-run");
+    runtime["coordinator_epoch"] = json!(4);
+    runtime["claim_id"] = json!("old-claim");
+    runtime["performer_group"] =
+        json!({"leader":2147483647,"generation":generation,"scope":"PerformerGroup"});
+    state::coordinator_state_registry_save(root, &BTreeMap::new(), &registry).unwrap();
+    let event = json!({
+        "schema_version":"1","event_id":"offline","seq":1,"ts":"2026-01-01T00:00:00Z",
+        "source":"performer:fixture","task_id":"HANDOFF","type":"failed","phase":"dev",
+        "run_id":"old-run","coordinator_epoch":4,"claim_id":"old-claim","performer_generation":generation,
+        "status":"failed","payload":{"reason":"tool execution failed","message":"provider timed out","error_code":"E101","origin":"provider"}
+    });
+    let dir = root.join(".macc/state/performer-outbox");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("offline.json"), event.to_string()).unwrap();
+    crate::coordinator_storage::performer_outbox::drain(root).unwrap();
+    assert_eq!(
+        state_runtime::cleanup_dead_runtime_tasks(root, "startup", 0, None).unwrap(),
+        0
+    );
+    let mut run = CoordinatorRunState::new();
+    consume_runtime_events(root, &mut run, None).unwrap();
+    apply_runtime_event_bus_updates(root, &CoordinatorEnvConfig::default(), None, &mut run, None)
+        .unwrap();
+    let sweep = state_runtime::execute_startup_recovery_sweep(root, "main", false, None).unwrap();
+    assert!(sweep
+        .iter()
+        .any(|entry| entry.classification == "blocked_preserved"));
+    let saved = state::coordinator_state_registry_load(root, &BTreeMap::new()).unwrap();
+    assert_eq!(saved["tasks"][0]["state"], "blocked");
+    assert_eq!(
+        saved["tasks"][0]["worktree"]["worktree_path"],
+        fixture.worker.to_str().unwrap()
+    );
+    assert_eq!(
+        saved["tasks"][0]["task_runtime"]["last_error_message"],
+        "provider timed out"
+    );
+    let failure = &saved["tasks"][0]["task_runtime"];
+    assert_eq!(failure["last_error_code"], "E101");
+    assert_eq!(failure["last_error_origin"], "provider");
+    assert_eq!(fixture.snapshot(), before);
+}

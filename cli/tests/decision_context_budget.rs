@@ -92,6 +92,18 @@ fn public_budget_preview_and_scoped_source_commands_share_the_issued_context() {
             .output()
             .unwrap()
     };
+    std::fs::write(root.join("draft.json"), r#"{"artifact_refs":[]}"#).unwrap();
+    let denied = run(&[
+        "request",
+        "--file",
+        root.join("draft.json").to_str().unwrap(),
+    ]);
+    assert!(!denied.status.success());
+    let draft: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert_eq!(draft["submitted"], false);
+    assert_eq!(draft["code"], "DM_REQUEST_INPUT");
+    assert!(draft["error"].as_str().unwrap().contains("artifact_refs"));
+
     let out = run(&[
         "context-source",
         "--dependency",

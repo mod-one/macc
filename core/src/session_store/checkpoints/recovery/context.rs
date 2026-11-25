@@ -147,6 +147,9 @@ pub(super) fn resolve_mode(
     current.worktree_dirty_digest = git.digest;
     current.worktree_content_digest = git.content_digest;
     current.changed_files = git.changed;
+    if let Some(validation) = current.validation.as_object_mut() {
+        validation.remove("changed_file_inventory");
+    }
     current.mandatory_task = task;
     current.source_hashes = hashes;
     current.decision_context =

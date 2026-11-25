@@ -249,6 +249,8 @@ fn ordered_failure_events_remain_effective_around_old_unblock_notifications() {
                 kind: CoordinatorRuntimeEventKind::Failed {
                     phase: Some("dev".into()),
                     message: Some("new failure".into()),
+                    code: None,
+                    origin: None,
                 },
             })
             .unwrap();

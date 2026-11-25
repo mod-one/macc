@@ -1840,19 +1840,50 @@ pub fn apply_runtime_event_bus_updates(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
+    let cursor = state.replay_cursor.take();
+    let updated = apply_pending_runtime_events(repo_root, env_cfg, coordinator, state, logger)?;
+    if let Some(id) = cursor {
+        let paths = crate::ProjectPaths::from_root(repo_root);
+        let store = crate::coordinator_storage::SqliteStorage::new(
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths),
+        );
+        store.open()?.execute(
+            "INSERT INTO event_cursor(stream,last_event_id,last_read_at)
+             SELECT 'coordinator',event_id,?2 FROM events WHERE event_id=?1
+             ON CONFLICT(stream) DO UPDATE SET last_event_id=excluded.last_event_id,last_read_at=excluded.last_read_at",
+            [id, chrono::Utc::now().to_rfc3339()],
+        ).map_err(|e| MaccError::Storage {backend:"sqlite",message:e.to_string()})?;
+    }
+    Ok(updated)
+}
+
+fn apply_pending_runtime_events(
+    repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<usize> {
     #[derive(Default)]
     struct PendingRuntimeUpdate {
         last_heartbeat: Option<String>,
         status: Option<String>,
         phase: Option<String>,
         last_error: Option<String>,
+        error_code: Option<String>,
+        error_origin: Option<String>,
         /// True when a terminal failure IPC event was received for this task.
         failure_signaled: bool,
     }
 
     let mut runtime_updates: HashMap<String, PendingRuntimeUpdate> = HashMap::new();
+    let mut replay = std::mem::take(&mut state.replay_events).into_iter();
     loop {
-        match state.runtime_event_bus_rx.try_recv() {
+        let next = replay
+            .next()
+            .map(Ok)
+            .unwrap_or_else(|| state.runtime_event_bus_rx.try_recv());
+        match next {
             Ok(event) => {
                 // Heartbeats arrive every few seconds per performer and carry no news:
                 // they would make up most of the run log.
@@ -1929,9 +1960,6 @@ pub fn apply_runtime_event_bus_updates(
                                 event.task_id, event.source, status
                             ));
                         }
-                        if status == "failed" {
-                            update.failure_signaled = true;
-                        }
                         update.status = Some(status);
                         if let Some(phase) = phase {
                             update.phase = Some(phase);
@@ -1940,7 +1968,18 @@ pub fn apply_runtime_event_bus_updates(
                             update.last_error = Some(message);
                         }
                     }
-                    CoordinatorRuntimeEventKind::Failed { phase, message } => {
+                    CoordinatorRuntimeEventKind::Failed {
+                        phase,
+                        message,
+                        code,
+                        origin,
+                    } => {
+                        if code.is_some() {
+                            update.error_code = code;
+                        }
+                        if origin.is_some() {
+                            update.error_origin = origin;
+                        }
                         update.failure_signaled = true;
                         update.status = Some(
                             crate::coordinator::RuntimeStatus::Failed
@@ -1995,6 +2034,22 @@ pub fn apply_runtime_event_bus_updates(
         let Some(update) = runtime_updates.get(task.id.as_str()) else {
             continue;
         };
+        // A late transport delivery must not replace a governed block or reopen a delivered task.
+        if matches!(task.state.as_str(), "blocked" | "merged" | "done") {
+            continue;
+        }
+        // A performer can outlive the engine that launched it. The new engine has
+        // no child waiter to complete its failed job, including after startup.
+        if update.failure_signaled
+            && task.is_active()
+            && task.has_worktree_attached()
+            && task.current_phase() == "dev"
+            && task.task_runtime.performer_group.is_some()
+            && !state.active_jobs.contains_key(&task.id)
+        {
+            task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+            task.touch_state_changed(&now_iso_coordinator());
+        }
         let runtime = task.ensure_runtime();
         if let Some(ts) = &update.last_heartbeat {
             runtime.last_heartbeat = Some(ts.clone());
@@ -2008,7 +2063,14 @@ pub fn apply_runtime_event_bus_updates(
         if let Some(phase) = &update.phase {
             runtime.current_phase = Some(phase.clone());
         }
+        if update.failure_signaled {
+            runtime.last_error_code.clone_from(&update.error_code);
+            runtime.last_error_origin.clone_from(&update.error_origin);
+        }
         if let Some(last_error) = &update.last_error {
+            if update.failure_signaled {
+                runtime.last_error_message = Some(last_error.clone());
+            }
             runtime.last_error = Some(last_error.clone());
         }
         updated += 1;
@@ -2161,6 +2223,9 @@ pub fn consume_runtime_events(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
+    if state.replay_cursor.is_some() {
+        return Ok(0);
+    }
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
@@ -2173,81 +2238,51 @@ pub fn consume_runtime_events(
         message: e.to_string(),
     };
 
-    let last_event_id: Option<String> = match conn.query_row(
-        "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
-        [],
-        |row| row.get::<_, String>(0),
-    ) {
-        Ok(id) => Some(id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(sql_err(e)),
-    };
-
-    let mut last_seq: Option<i64> = None;
-    if let Some(ref id) = last_event_id {
-        last_seq = match conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |row| {
-            row.get::<_, i64>(0)
-        }) {
-            Ok(seq) => Some(seq),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(sql_err(e)),
-        };
-    }
-
-    let mut stmt = if let (Some(_seq), Some(_id)) = (last_seq, &last_event_id) {
-        conn.prepare("SELECT raw_json, event_id FROM events WHERE (seq, event_id) > (?1, ?2) ORDER BY seq ASC, event_id ASC")
-            .map_err(sql_err)?
-    } else {
-        conn.prepare("SELECT raw_json, event_id FROM events ORDER BY seq ASC, event_id ASC")
-            .map_err(sql_err)?
-    };
-
-    let mut mapped_rows = Vec::new();
-    if let (Some(seq), Some(id)) = (last_seq, &last_event_id) {
-        let mut rows = stmt.query(rusqlite::params![seq, id]).map_err(sql_err)?;
-        while let Some(row) = rows.next().map_err(sql_err)? {
-            let raw: String = row.get(0).map_err(sql_err)?;
-            let event_id: String = row.get(1).map_err(sql_err)?;
-            mapped_rows.push((raw, event_id));
-        }
-    } else {
-        let mut rows = stmt.query([]).map_err(sql_err)?;
-        while let Some(row) = rows.next().map_err(sql_err)? {
-            let raw: String = row.get(0).map_err(sql_err)?;
-            let event_id: String = row.get(1).map_err(sql_err)?;
-            mapped_rows.push((raw, event_id));
-        }
-    }
-
-    let mut count = 0;
-    let mut latest_event_id = None;
-    for (raw, id) in mapped_rows {
-        if let Ok(v) = serde_json::from_str::<crate::coordinator::CoordinatorEventRecord>(&raw) {
-            if let Some(runtime_event) = coordinator_runtime::raw_event_to_runtime_event(&v) {
-                let _ = state.runtime_event_bus_tx.send(runtime_event);
-                count += 1;
-            }
-        }
-        latest_event_id = Some(id);
-    }
-
-    if let Some(ref id) = latest_event_id {
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO event_cursor (stream, last_event_id, last_read_at)
-             VALUES ('coordinator', ?1, ?2)
-             ON CONFLICT(stream) DO UPDATE SET last_event_id = ?1, last_read_at = ?2",
-            [id, &now],
+    // Producer sequence numbers are local to a performer. A late terminal
+    // event can have a lower sequence than the current cursor. Its pinned
+    // event ID locates the SQLite insertion position even after pruning.
+    let mut stmt = conn
+        .prepare(
+            "SELECT raw_json, event_id FROM events
+         WHERE rowid > COALESCE((SELECT e.rowid FROM events e JOIN event_cursor c
+            ON e.event_id=c.last_event_id WHERE c.stream='coordinator'),0)
+         ORDER BY rowid",
         )
         .map_err(sql_err)?;
+    let mapped_rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sql_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sql_err)?;
+    drop(stmt);
 
-        if let Some(log) = logger {
-            let _ = log.note(format!(
-                "- Recovery: replayed {} events; updated event_cursor to {}",
-                count, id
-            ));
+    let mut events = Vec::new();
+    let mut latest_event_id = None;
+    for (raw, id) in mapped_rows {
+        latest_event_id = Some(id);
+        if let Ok(v) = serde_json::from_str::<crate::coordinator::CoordinatorEventRecord>(&raw) {
+            if matches!(v.event_type.as_str(), "failed" | "phase_result")
+                && v.claim_id.is_some()
+                && !crate::coordinator_storage::performer_outbox::current_claim(&conn, &v)?
+            {
+                continue;
+            }
+            if let Some(runtime_event) = coordinator_runtime::raw_event_to_runtime_event(&v) {
+                events.push(runtime_event);
+            }
         }
     }
+
+    let count = events.len();
+    if let Some(log) = logger.filter(|_| count > 0) {
+        let _ = log.note(format!(
+            "- Recovery: replaying {count} persisted performer event(s)"
+        ));
+    }
+    state.replay_events = events;
+    state.replay_cursor = latest_event_id;
 
     Ok(count)
 }
@@ -3589,6 +3624,20 @@ mod tests {
         let replayed = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
         assert_eq!(replayed, 1);
 
+        // A stop before registry application must replay the same event on restart.
+        let mut run_state = CoordinatorRunState::new();
+        assert_eq!(
+            super::consume_runtime_events(&repo, &mut run_state, None).unwrap(),
+            1
+        );
+        super::apply_runtime_event_bus_updates(
+            &repo,
+            &Default::default(),
+            None,
+            &mut run_state,
+            None,
+        )
+        .unwrap();
         let last_event_id: String = conn
             .query_row(
                 "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
@@ -3607,7 +3656,7 @@ mod tests {
             run_id: Some("run-1".to_string()),
             coordinator_epoch: Some(1),
             claim_id: Some("claim-1".to_string()),
-            seq: 30,
+            seq: 1,
             ts: "2026-03-20T12:10:00Z".to_string(),
             source: "performer".to_string(),
             task_id: Some("T1".to_string()),
@@ -3620,6 +3669,14 @@ mod tests {
 
         let replayed_third = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
         assert_eq!(replayed_third, 1);
+        super::apply_runtime_event_bus_updates(
+            &repo,
+            &Default::default(),
+            None,
+            &mut run_state,
+            None,
+        )
+        .unwrap();
 
         let last_event_id: String = conn
             .query_row(
