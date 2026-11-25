@@ -307,6 +307,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                             || pending.attempts >= config.max_restart_attempts;
                         match workspace::finish(
                             &paths.root,
+                            &report.incident.id,
                             worktree,
                             &dir,
                             close,

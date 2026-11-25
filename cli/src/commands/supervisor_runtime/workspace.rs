@@ -1,6 +1,8 @@
 //! Owned supervisor slots and durable evidence, independent of attempt log directories.
+mod baseline;
 mod config_copy;
 use super::{io, repair::git, report::write_json};
+pub use baseline::{enter_baseline, restore_repair};
 use macc_core::{MaccError, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -70,7 +72,7 @@ pub fn prepare(
         if owner["incident_id"].as_str() != Some(incident) {
             continue;
         }
-        restore_repair(&path)?;
+        restore_repair(root, &path, incident)?;
         let base = owner["base"]
             .as_str()
             .ok_or_else(|| MaccError::Validation("Supervisor slot has no base".into()))?;
@@ -168,32 +170,6 @@ pub fn snapshot(path: &Path) -> Result<String> {
     macc_core::git::worktree_content_tree(path)
 }
 
-/// Swap the slot to the unmodified base, keeping the repair as a tree object.
-/// The marker is written before any file changes so an interrupted baseline run
-/// is always restored by [`restore_repair`].
-pub fn enter_baseline(path: &Path) -> Result<()> {
-    git(path, &["add", "--all"])?;
-    let tree = git(path, &["write-tree"])?;
-    std::fs::write(path.join(RESTORE), &tree).map_err(|e| io(path, e))?;
-    git(path, &["read-tree", "--reset", "-u", "HEAD"])?;
-    Ok(())
-}
-
-/// Return the slot from the baseline state to the staged repair. Everything
-/// discarded here was produced by the baseline run: the repair lives in the tree.
-pub fn restore_repair(path: &Path) -> Result<()> {
-    let marker = path.join(RESTORE);
-    let tree = match std::fs::read_to_string(&marker) {
-        Ok(tree) => tree.trim().to_owned(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(io(&marker, e)),
-    };
-    git(path, &["reset", "--hard", "HEAD"])?;
-    git(path, &["clean", "-fd"])?;
-    git(path, &["read-tree", "--reset", "-u", &tree])?;
-    std::fs::remove_file(&marker).map_err(|e| io(&marker, e))
-}
-
 pub fn safe_to_remove(root: &Path, path: &Path) -> Result<bool> {
     // A slot parked on the base still owns an unrestored repair.
     if path.join(RESTORE).exists() || config_copy::customized(path) {
@@ -286,35 +262,20 @@ pub fn archive(path: &Path, dir: &Path) -> Result<()> {
 
 pub fn finish(
     root: &Path,
+    incident: &str,
     path: &Path,
     dir: &Path,
     close: bool,
     retain_branch: bool,
 ) -> Result<bool> {
     // An interrupted baseline run leaves the base checked out: archive the repair.
-    restore_repair(path)?;
+    restore_repair(root, path, incident)?;
     archive(path, dir)?;
     if !close || !safe_to_remove(root, path)? {
         return Ok(false);
     }
-    if path.parent() != Some(root.join(".macc/worktree").as_path()) || !path.join(OWNER).is_file() {
-        return Err(MaccError::Validation(
-            "Refusing cleanup of an unowned supervisor slot".into(),
-        ));
-    }
-    let owner: Value =
-        serde_json::from_str(&std::fs::read_to_string(path.join(OWNER)).map_err(|e| io(path, e))?)
-            .map_err(|e| MaccError::Validation(e.to_string()))?;
+    let owner = baseline::owner(root, path, incident)?;
     let branch = git(path, &["branch", "--show-current"])?;
-    if owner["repair_branch"]
-        .as_str()
-        .is_some_and(|expected| expected != branch)
-    {
-        return Err(MaccError::Validation(
-            "Supervisor checkout differs from its owner marker; worktree and branches retained"
-                .into(),
-        ));
-    }
     let target = owner["branch"].as_str();
     config_copy::restore_before_removal(root, path)?;
 
@@ -410,7 +371,15 @@ mod tests {
             "customized"
         );
         std::fs::write(slot.join(config_copy::CONFIG), &primary).unwrap();
-        assert!(finish(root, &slot, &root.join(".macc/log/receipt"), true, false).unwrap());
+        assert!(finish(
+            root,
+            "untracked-config",
+            &slot,
+            &root.join(".macc/log/receipt"),
+            true,
+            false
+        )
+        .unwrap());
         assert!(!slot.exists());
         assert_eq!(
             std::fs::read_to_string(root.join(config_copy::CONFIG)).unwrap(),
@@ -437,7 +406,7 @@ mod tests {
             before
         );
         let logs = root.join(".macc/log/supervisor/attempt-1");
-        assert!(!finish(root, &slot, &logs, true, false).unwrap());
+        assert!(!finish(root, "incident-a", &slot, &logs, true, false).unwrap());
         assert!(slot.exists());
         assert_eq!(
             std::fs::read_to_string(logs.join("evidence/.macc/diagnosis.log")).unwrap(),
@@ -448,6 +417,7 @@ mod tests {
         assert_eq!(other, root.join(".macc/worktree/supervisor-02"));
         assert!(finish(
             root,
+            "incident-b",
             &other,
             &root.join(".macc/log/supervisor/other"),
             true,
@@ -465,7 +435,7 @@ mod tests {
         let (slot, _) = open_with_retention(root, "incident-c", true).unwrap();
         assert!(slot.exists());
         let logs = root.join(".macc/log/supervisor/c");
-        assert!(finish(root, &slot, &logs, true, true).unwrap());
+        assert!(finish(root, "incident-c", &slot, &logs, true, true).unwrap());
         assert!(!slot.exists());
         let branches = git(root, &["branch", "--list", "macc/supervisor/*"]).unwrap();
         assert!(branches.contains("incident-c"));
@@ -487,6 +457,7 @@ mod tests {
         std::fs::write(slot.join(".env"), "private work\n").unwrap();
         assert!(!finish(
             root,
+            "ignored",
             &slot,
             &root.join(".macc/log/supervisor/ignored"),
             true,
@@ -517,6 +488,7 @@ mod tests {
         assert_eq!(owner["repair_branch"].as_str(), Some(branch.as_str()));
         assert!(finish(
             root,
+            "legacy",
             &slot,
             &root.join(".macc/log/supervisor/legacy"),
             true,
@@ -534,7 +506,7 @@ mod tests {
         let (slot, _) = open(root, "a").unwrap();
         let logs = root.join("archive-blocker");
         std::fs::write(&logs, "occupied").unwrap();
-        assert!(finish(root, &slot, &logs, true, false).is_err());
+        assert!(finish(root, "a", &slot, &logs, true, false).is_err());
         assert!(slot.exists());
     }
     #[test]
@@ -547,6 +519,7 @@ mod tests {
         git(&slot, &["commit", "-qm", "repair"]).unwrap();
         assert!(!finish(
             root,
+            "a",
             &slot,
             &root.join(".macc/log/supervisor/a"),
             true,
@@ -572,7 +545,7 @@ mod tests {
         assert_eq!(same, slot);
         assert_eq!(git(&same, &["rev-parse", "HEAD"]).unwrap(), base);
         let logs = root.join(".macc/log/supervisor/a");
-        assert!(finish(root, &slot, &logs, true, false).unwrap());
+        assert!(finish(root, "a", &slot, &logs, true, false).unwrap());
         assert!(!slot.exists());
         assert_eq!(
             std::fs::read_to_string(logs.join("evidence/.macc/repair-notes.md")).unwrap(),
@@ -611,6 +584,7 @@ mod generated_cleanup_tests {
             .unwrap();
         assert!(finish(
             root,
+            "generated-config",
             &slot,
             &root.join(".macc/log/supervisor/generated-config"),
             true,

@@ -190,16 +190,30 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
             .map(PathBuf::from)
             .filter(|p| p.exists())
         {
-            if super::workspace::finish(
-                &paths.root,
-                &worktree,
-                &dir,
-                true,
-                cfg.retain_repair_branches,
-            )? {
-                value["intervention"]["detail"] = json!(
+            let incident = value
+                .pointer("/intervention/incident/id")
+                .and_then(|v| v.as_str());
+            let cleanup = incident
+                .ok_or_else(|| MaccError::Validation("Missing supervisor incident identity".into()))
+                .and_then(|id| {
+                    super::workspace::finish(
+                        &paths.root,
+                        id,
+                        &worktree,
+                        &dir,
+                        true,
+                        cfg.retain_repair_branches,
+                    )
+                });
+            match cleanup {
+                Ok(true) => value["intervention"]["detail"] = json!(
                     "Supervisor stopped during intervention; evidence archived; clean slot removed"
-                );
+                ),
+                Ok(false) => (),
+                Err(error) => {
+                    value["intervention"]["detail"] =
+                        json!(format!("Supervisor stopped; worktree retained: {error}"))
+                }
             }
         }
         value["intervention"]["next_action"] =

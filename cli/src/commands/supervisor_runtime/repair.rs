@@ -218,7 +218,7 @@ pub async fn validate(
             report,
             format!("Validation {position} failed; re-running on the unmodified base: {command}"),
         )?;
-        super::workspace::enter_baseline(worktree)?;
+        super::workspace::enter_baseline(&progress.paths.root, worktree, &report.incident.id)?;
         let baseline = run_validation(
             worktree,
             command,
@@ -226,7 +226,7 @@ pub async fn validate(
             progress.config.validation_timeout_seconds,
         )
         .await;
-        super::workspace::restore_repair(worktree)?;
+        super::workspace::restore_repair(&progress.paths.root, worktree, &report.incident.id)?;
         if baseline? {
             return Err(MaccError::Validation(format!(
                 "{VALIDATION_REGRESSION}: {command} passes on the unmodified base and fails with the repair; see {}",
