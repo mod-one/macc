@@ -1,8 +1,10 @@
 //! Owned supervisor slots and durable evidence, independent of attempt log directories.
 mod baseline;
 mod config_copy;
+mod creation;
 use super::{io, repair::git, report::write_json};
 pub use baseline::{enter_baseline, restore_repair};
+pub(super) use creation::reconcile;
 use macc_core::supervisor::cleanup::{Cleanup, Retention};
 use macc_core::{MaccError, Result};
 use serde_json::{json, Value};
@@ -54,21 +56,30 @@ pub fn prepare(
     retain_branch: bool,
 ) -> Result<PathBuf> {
     macc_core::gitignore_policy::ensure_local_exclusions(root)?;
+    reconcile(root)?;
     let head = target.base.as_str();
     let pool = root.join(".macc/worktree");
     std::fs::create_dir_all(&pool).map_err(|e| io(&pool, e))?;
     let mut vacant = None;
+    let mut unidentified = None;
     for index in 1..=999 {
         let path = pool.join(format!("supervisor-{index:02}"));
         if !path.exists() {
-            vacant.get_or_insert(path);
+            vacant.get_or_insert(index);
             continue;
         }
-        let owner: Value = match std::fs::read_to_string(path.join(OWNER)) {
-            Ok(text) => {
-                serde_json::from_str(&text).map_err(|e| MaccError::Validation(e.to_string()))?
+        let marker = path.join(OWNER);
+        let owner: Value = match std::fs::read(&marker)
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(std::io::Error::from))
+        {
+            Ok(owner) => owner,
+            Err(error) => {
+                unidentified.get_or_insert_with(|| MaccError::Validation(format!(
+                    "Cannot identify supervisor worktree {}: {error}. Inspect {} and its Git registration before allocating a new slot. Files preserved.",
+                    path.display(), marker.display()
+                )));
+                continue;
             }
-            Err(_) => continue, // Unowned or retained by another incident: never recycle it.
         };
         if owner["incident_id"].as_str() != Some(incident) {
             continue;
@@ -118,25 +129,12 @@ pub fn prepare(
         config_copy::sync(root, &path)?;
         return Ok(path);
     }
-    let path = vacant.ok_or_else(|| MaccError::Validation("No vacant supervisor slot".into()))?;
-    let branch = repair_branch(root, incident, head)?;
-    let slot = path
-        .to_str()
-        .ok_or_else(|| MaccError::Validation("Invalid supervisor path".into()))?;
-    if macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")).is_some() {
-        git(root, &["worktree", "add", slot, &branch])?;
-    } else {
-        git(root, &["worktree", "add", "-b", &branch, slot, head])?;
+    if let Some(error) = unidentified {
+        return Err(error);
     }
-    macc_core::project_ownership::record_branch(root, &branch)?;
-    std::fs::create_dir_all(path.join(".macc")).map_err(|e| io(&path, e))?;
-    let marker = json!({
-        "incident_id": incident,
-        "base": head,
-        "branch": target.branch,
-        "repair_branch": &branch,
-    });
-    write_json(&path.join(OWNER), &marker)?;
+    let slot = vacant.ok_or_else(|| MaccError::Validation("No vacant supervisor slot".into()))?;
+    let branch = repair_branch(root, incident, head)?;
+    let path = creation::create(root, slot, incident, target, branch)?;
     config_copy::sync(root, &path)?;
     Ok(path)
 }
@@ -156,7 +154,12 @@ fn repair_branch(root: &Path, incident: &str, base: &str) -> Result<String> {
         };
         match macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")) {
             None => return Ok(branch),
-            Some(head) if head == base => return Ok(branch),
+            Some(head)
+                if head == base
+                    && macc_core::git::worktrees_for_branch(root, &branch)?.is_empty() =>
+            {
+                return Ok(branch)
+            }
             _ => continue,
         }
     }

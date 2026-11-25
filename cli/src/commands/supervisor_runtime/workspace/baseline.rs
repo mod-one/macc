@@ -14,7 +14,7 @@ fn canonical(path: &Path) -> Result<PathBuf> {
     path.canonicalize().map_err(|e| io(path, e))
 }
 
-pub(super) fn owner(root: &Path, path: &Path, incident: &str) -> Result<Value> {
+pub(super) fn verify_checkout(root: &Path, path: &Path) -> Result<PathBuf> {
     let slot = canonical(path)?;
     if path.parent() != Some(root.join(".macc/worktree").as_path())
         || slot
@@ -27,6 +27,11 @@ pub(super) fn owner(root: &Path, path: &Path, incident: &str) -> Result<Value> {
     {
         return Err(retained(path, "repository or slot path differs"));
     }
+    Ok(slot)
+}
+
+pub(super) fn owner(root: &Path, path: &Path, incident: &str) -> Result<Value> {
+    let slot = verify_checkout(root, path)?;
     let marker = path.join(OWNER);
     let value: Value = serde_json::from_slice(&std::fs::read(&marker).map_err(|e| io(&marker, e))?)
         .map_err(|e| retained(path, e))?;

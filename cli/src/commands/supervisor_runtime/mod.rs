@@ -75,6 +75,7 @@ async fn run_monitor(paths: ProjectPaths, canonical: CanonicalConfig) -> Result<
 }
 
 async fn monitor(paths: ProjectPaths) -> Result<()> {
+    workspace::reconcile(&paths.root)?;
     let ledger_path = paths.root.join(".macc/state/supervisor-interventions.json");
     let mut ledger: policy::Ledger = if ledger_path.exists() {
         serde_json::from_str(
