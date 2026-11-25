@@ -87,18 +87,11 @@ stopping the supervisor terminates their process groups.
 A validation command that fails with the repair is run again in the same slot on
 the unmodified base, with the same installed dependencies and environment.
 
-- Passes on the base, fails with the repair: the repair introduced the failure;
-  the intervention escalates.
-- Fails on the base too (for example a browser test suite missing a system
-  library): it is not a gate. The command is recorded in
-  `preexisting_failures`, both logs are kept (`validation-N.log`,
-  `baseline-N.log`), and the independent verification must compare them and
-  reject the repair if it adds a failure absent from the baseline.
+- A failure introduced by the repair goes back to the repair agent, subject to its round limit.
+- If both executions fail, MACC compares complete flat TAP 13 reports with matching exit codes. Each report needs a plan and unique numbered results such as `not ok 1 - login`. A new failing test blocks publication. Existing failures are accepted only when every baseline test is accounted for.
+- Missing, ambiguous or unsupported reports (including nested TAP, directives and logs above 4 MiB) leave validation indeterminate. Inspect `validation-N.log` and `baseline-N.log` in the intervention directory. The repair is retained even when AI verification is disabled.
 
-A command-level comparison cannot see a new failure inside an already failing
-command; that judgment rests on the independent verification. Configure
-`validation_commands` with commands that pass on your machine to keep the gate
-deterministic. While the base is checked out, the repair is held as a Git tree
+While the base is checked out, the repair is held as a Git tree
 named in `.macc/supervisor-restore-tree`; an interrupted baseline run is restored
 on the next attempt and such a slot is never removed.
 

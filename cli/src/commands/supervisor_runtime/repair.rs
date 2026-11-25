@@ -1,6 +1,7 @@
 //! Isolated repair, independent verification, and integration against an exact base.
 use super::report::{Intervention, Progress};
 use super::tool::Agent;
+use super::validation_results::{self, Comparison};
 use macc_core::supervisor::incident::Incident;
 #[cfg(test)]
 use macc_core::supervisor::SupervisorConfig;
@@ -155,11 +156,17 @@ pub(super) fn scope_diagnosis(diagnosis: &mut Diagnosis, incident: &Incident) {
     });
 }
 pub use macc_core::supervisor::validation::commands as validation_commands;
+pub(super) const VALIDATION_INDETERMINATE: &str = "Validation indeterminate";
 const VALIDATION_REGRESSION: &str = "Validation failed";
 /// Detail prefix of a repair the verification referred to a human.
 pub const HUMAN_DECISION: &str = "Repair needs a human decision";
 /// Outcome of one validation command, bounded by the intervention timeout.
-async fn run_validation(worktree: &Path, command: &str, log: &Path, timeout: u64) -> Result<bool> {
+async fn run_validation(
+    worktree: &Path,
+    command: &str,
+    log: &Path,
+    timeout: u64,
+) -> Result<std::process::ExitStatus> {
     let file = std::fs::File::create(log).map_err(|e| io(log, e))?;
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
@@ -183,17 +190,12 @@ async fn run_validation(worktree: &Path, command: &str, log: &Path, timeout: u64
             message: format!("Validation timed out: {command}"),
         })?
         .map_err(|e| io(worktree, e))?;
-    Ok(status.success())
+    Ok(status)
 }
 
-/// Run project validation against the repair. A failing command is re-run on
-/// the unmodified base in the same slot (same dependencies and environment):
-/// only a command that passes there and fails with the repair blocks
-/// integration. Commands already failing on the base are returned so the
-/// independent verification can compare both logs for added failures.
-pub async fn validate(
+/// Compare failed commands with their baseline before allowing integration.
+async fn validate(
     worktree: &Path,
-    _timeout: u64,
     progress: &Progress<'_>,
     report: &mut Intervention,
 ) -> Result<Vec<String>> {
@@ -204,14 +206,14 @@ pub async fn validate(
         let position = format!("{}/{}", i + 1, commands.len());
         progress.step(report, format!("Validation {position}: {command}"))?;
         let log = dir.join(format!("validation-{i}.log"));
-        if run_validation(
+        let repair_status = run_validation(
             worktree,
             command,
             &log,
             progress.config.validation_timeout_seconds,
         )
-        .await?
-        {
+        .await?;
+        if repair_status.success() {
             continue;
         }
         progress.step(
@@ -219,21 +221,37 @@ pub async fn validate(
             format!("Validation {position} failed; re-running on the unmodified base: {command}"),
         )?;
         super::workspace::enter_baseline(&progress.paths.root, worktree, &report.incident.id)?;
+        let base_log = dir.join(format!("baseline-{i}.log"));
         let baseline = run_validation(
             worktree,
             command,
-            &dir.join(format!("baseline-{i}.log")),
+            &base_log,
             progress.config.validation_timeout_seconds,
         )
         .await;
         super::workspace::restore_repair(&progress.paths.root, worktree, &report.incident.id)?;
-        if baseline? {
+        let base_status = baseline?;
+        if base_status.success() {
             return Err(MaccError::Validation(format!(
                 "{VALIDATION_REGRESSION}: {command} passes on the unmodified base and fails with the repair; see {}",
                 log.display()
             )));
         }
-        preexisting.push(command.clone());
+        let comparison =
+            if repair_status.code().is_some() && repair_status.code() == base_status.code() {
+                validation_results::compare(&base_log, &log)?
+            } else {
+                Comparison::Indeterminate
+            };
+        match comparison {
+            Comparison::Preexisting => preexisting.push(command.clone()),
+            Comparison::Regression(ids) => return Err(MaccError::Validation(format!(
+                "{VALIDATION_REGRESSION}: {command} introduced failing tests: {}. Compare {} and {}",
+                ids.join(", "), base_log.display(), log.display()))),
+            Comparison::Indeterminate => return Err(MaccError::Validation(format!(
+                "{VALIDATION_INDETERMINATE}: {command}. Cannot establish comparable test results (base {base_status}, repair {repair_status}). Inspect {} and {}; retain the repair for verification. Configure a complete flat TAP 13 report with named tests or resolve the baseline failure before retrying.",
+                base_log.display(), log.display()))),
+        }
     }
     Ok(preexisting)
 }
@@ -245,7 +263,6 @@ pub async fn fix(
     progress: &Progress<'_>,
     worktree: &Path,
     diagnosis: &Diagnosis,
-    timeout: u64,
     report: &mut Intervention,
 ) -> Result<String> {
     let rounds = progress.config.max_repair_rounds.max(1);
@@ -266,7 +283,6 @@ pub async fn fix(
             progress,
             worktree,
             diagnosis,
-            timeout,
             report,
             position,
             feedback.as_deref(),
@@ -296,13 +312,11 @@ fn archive_round(dir: &Path, round: u32) -> Result<()> {
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
 async fn repair_round(
     agent: &Agent,
     progress: &Progress<'_>,
     worktree: &Path,
     diagnosis: &Diagnosis,
-    timeout: u64,
     report: &mut Intervention,
     (round, rounds): (u32, u32),
     feedback: Option<&str>,
@@ -325,7 +339,7 @@ async fn repair_round(
     };
     progress.enter(report, "repairing", activity)?;
     let rework = feedback.map(|reason| format!("\nThe previous state of this repair was rejected. Keep the valid work already in the worktree and address every point of the rejection: {reason}\nAn existing assertion may change only when it pins exactly the defective behaviour named in the diagnosis; justify each such change in .macc/repair-notes.md. If a point needs a decision outside your authority, do not guess: state it in .macc/repair-notes.md and leave that point unchanged.")).unwrap_or_default();
-    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Repair only prerequisites. Do not copy, import or commit unfinished implementations or evidence from performer worktrees; those remain task deliveries and must resume in their original workers. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.{rework}",diagnosis.summary,root.join(".macc/log").display(),commands);
+    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Repair only prerequisites. Do not copy, import or commit unfinished implementations or evidence from performer worktrees; those remain task deliveries and must resume in their original workers. Read original logs at {}. Validation commands are {:?}; validation must demonstrate that the repair introduces no additional failing tests. Report missing external authority without guessing it.{rework}",diagnosis.summary,root.join(".macc/log").display(),commands);
     let prompt = format!("{prompt}\nOnly edit the isolated repair worktree {}. Retained performer worktrees are read-only in this intervention. If the defect exists only in unfinished task delivery, report that its native fix/review cycle must resume in the original worker; do not modify that delivery from this invocation.\nAuthorized incident targets: {:?}. Related tasks {:?} are read-only context; do not implement their work or repair their independent causes.", worktree.display(), diagnosis.task_ids, diagnosis.related_task_ids);
     let requirements = super::external_verification::exact_requirements(root, &diagnosis.task_ids)?;
     let prompt=format!("{prompt}\nExact native prerequisite contracts to satisfy through source repair: {}. Leave actual physical actions, credentials and human approvals unresolved.",serde_json::to_string(&requirements).map_err(|e|MaccError::Validation(e.to_string()))?);
@@ -352,7 +366,7 @@ async fn repair_round(
             "Project tests skipped by configuration"
         },
     )?;
-    let preexisting = match validate(worktree, timeout, progress, report).await {
+    let preexisting = match validate(worktree, progress, report).await {
         Ok(preexisting) => preexisting,
         // A regression the repair introduced is the repair agent's to fix.
         Err(MaccError::Validation(reason)) if reason.starts_with(VALIDATION_REGRESSION) => {

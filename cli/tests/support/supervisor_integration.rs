@@ -35,18 +35,15 @@ fn edit_config(root: &Path, from: &str, to: &str) {
 fn validation_already_failing_on_the_base_does_not_block_the_repair() {
     let temp = fixture(false);
     let root = temp.path();
-    // An environment failure unrelated to the repair, like a missing system library.
+    let command = "echo 'TAP version 13'; echo '1..1'; echo 'not ok 1 - known failure'; exit 1";
     edit_config(
         root,
         "    validation_commands:\n",
-        "    validation_commands:\n      - \"echo environment-broken; exit 1\"\n",
+        &format!("    validation_commands:\n      - \"{command}\"\n"),
     );
     let supervisor = start(root);
     let r = settled(root, "recovered");
-    assert_eq!(
-        r["intervention"]["preexisting_failures"],
-        json!(["echo environment-broken; exit 1"])
-    );
+    assert_eq!(r["intervention"]["preexisting_failures"], json!([command]));
     assert!(r["intervention"]["detail"]
         .as_str()
         .unwrap()
@@ -64,6 +61,41 @@ fn validation_already_failing_on_the_base_does_not_block_the_repair() {
     );
     assert!(r["intervention"]["next_action"].is_null());
     drop(supervisor);
+}
+
+#[test]
+fn validation_blocks_a_second_failing_test_with_ai_disabled() {
+    let command = "echo 'TAP version 13'; echo '1..2'; echo 'not ok 1 - old'; if grep -q fixed defect.txt; then echo 'not ok 2 - second'; else echo 'ok 2 - second'; fi; exit 1";
+    assert_validation_retained(command, "introduced failing tests: second");
+}
+
+#[test]
+fn validation_retains_opaque_failure_with_ai_disabled() {
+    assert_validation_retained(
+        "echo environment-broken; exit 1",
+        "Validation indeterminate",
+    );
+}
+
+fn assert_validation_retained(command: &str, expected: &str) {
+    let temp = fixture(false);
+    let root = temp.path();
+    edit_config(root, "    validation_commands:\n", &format!("    max_repair_rounds: 1\n    ai_verification_enabled: false\n    validation_commands:\n      - \"{command}\"\n"));
+    let _supervisor = start(root);
+    let r = settled(root, "escalated");
+    let intervention = &r["intervention"];
+    assert!(
+        intervention["detail"].as_str().unwrap().contains(expected),
+        "{intervention}"
+    );
+    assert!(intervention["commit"].is_null());
+    assert!(intervention["restart_pid"].is_null());
+    let slot = Path::new(intervention["worktree"].as_str().unwrap());
+    assert_eq!(std::fs::read(slot.join("defect.txt")).unwrap(), b"fixed\n");
+    assert_eq!(std::fs::read(root.join("defect.txt")).unwrap(), b"broken\n");
+    let logs = Path::new(intervention["log_dir"].as_str().unwrap());
+    assert!(logs.join("validation-0.log").is_file());
+    assert!(logs.join("baseline-0.log").is_file());
 }
 
 #[test]

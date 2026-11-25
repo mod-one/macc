@@ -295,15 +295,7 @@ pub(super) async fn intervene(
         return Err(MaccError::Validation("Native source prerequisite recovery requires independent AI verification; no external decision will be cleared by tests alone".into()));
     }
     report.validation = repair::validation_commands(&paths.root, config)?;
-    let proof = repair::fix(
-        &agent,
-        &progress,
-        &worktree,
-        &diagnosis,
-        config.intervention_timeout_seconds,
-        report,
-    )
-    .await?;
+    let proof = repair::fix(&agent, &progress, &worktree, &diagnosis, report).await?;
     report.detail = format!(
         "{proof}; tests={}; AI verification={}",
         if config.tests_enabled {

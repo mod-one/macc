@@ -319,7 +319,9 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
     }
     let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
         || report.detail.contains(super::repair::HUMAN_DECISION);
-    let action = if report.detail.contains(super::repair_evidence::EMPTY)
+    let action = if report.detail.contains(super::repair::VALIDATION_INDETERMINATE) {
+        format!("Compare the baseline and repair logs named in the intervention. Supply complete named TAP 13 results or fix the baseline failure, then retry the retained repair with `{RETRY}`.")
+    } else if report.detail.contains(super::repair_evidence::EMPTY)
         || report.detail.contains(super::repair_evidence::OUTSIDE)
     {
         format!("Inspect repair-source-refused.json and *-retained-work.json in the incident log directory. Keep the original task worktree, commits, index and uncommitted files. Resume the task's native correction and independent review in that worker; an empty supervisor base cannot stand in for its delivery. Reconcile ownership through native recovery before retrying (`{RETRY}`). No source repair or passing compliance is inferred from a model's explanation.")

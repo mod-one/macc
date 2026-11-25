@@ -19,6 +19,7 @@ mod review_protocol_recovery;
 mod scoped_prd_recovery;
 mod shutdown;
 mod task_requeue;
+mod validation_results;
 mod watchdog;
 mod workspace;
 use recovery::intervene;
