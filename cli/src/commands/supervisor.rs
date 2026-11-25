@@ -458,6 +458,12 @@ fn intervention_summary(report: &Value) -> Vec<String> {
             .and_then(Value::as_u64)
             .unwrap_or(0)
     )];
+    if let (Some(cleanup), Some(path)) = (
+        macc_core::supervisor::cleanup::Cleanup::from_intervention(intervention),
+        text("worktree"),
+    ) {
+        lines.push(cleanup.summary(std::path::Path::new(path)));
+    }
     if let Some(reason) = text("detail") {
         lines.push(format!("reason: {reason}"));
     }
@@ -503,4 +509,19 @@ fn resolve_project_path(root: &Path, path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     root.join(path)
+}
+
+#[cfg(test)]
+mod report_tests {
+    #[test]
+    fn report_prints_retained_slot_and_path() {
+        let report = serde_json::json!({"intervention": {
+            "status": "recovered", "worktree": "/project/.macc/worktree/supervisor-01",
+            "worktree_cleanup": {"status":"retained", "reason": {
+                "kind": "untracked_file", "path": ".codex/config.toml"
+            }}
+        }});
+        assert!(super::intervention_summary(&report)
+            .contains(&r#"supervisor-01 retained · untracked file ".codex/config.toml""#.into()));
+    }
 }

@@ -2,6 +2,7 @@
 //!
 //! The supervisor is not a coordinator task: it never enters the task registry
 //! or its counts. Clients show it as its own row beside the live tasks.
+use super::cleanup::Cleanup;
 use crate::ProjectPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,16 +44,17 @@ pub struct SupervisorLive {
     pub next_action: Option<String>,
     pub target_branch: Option<String>,
     pub worktree: Option<String>,
+    #[serde(default)]
+    pub cleanup_notice: Option<String>,
     pub log_dir: Option<String>,
     /// MACC improvements recommended by the diagnosis.
     pub findings: Vec<String>,
 }
 
 impl SupervisorLive {
-    /// An unrecovered intervention stays visible until a coordinator runs
-    /// again; an active one is always shown.
+    /// Active interventions and cleanup notices remain visible across coordinator restarts.
     pub fn visible(&self, coordinator_running: bool) -> bool {
-        self.active || !coordinator_running
+        self.active || self.cleanup_notice.is_some() || !coordinator_running
     }
 
     /// Short label for the row's task column.
@@ -65,8 +67,7 @@ impl SupervisorLive {
     }
 }
 
-/// The intervention a client should show, if any. Recovered interventions and
-/// projects the supervisor never acted on yield `None`.
+/// Keep a completed intervention visible when its last cleanup needs explaining.
 pub fn load(paths: &ProjectPaths) -> Option<SupervisorLive> {
     let raw = std::fs::read_to_string(paths.root.join(".macc/log/supervisor/latest.json")).ok()?;
     let report: Value = serde_json::from_str(&raw).ok()?;
@@ -101,7 +102,10 @@ fn from_report(report: &Value, running: bool) -> Option<SupervisorLive> {
             .unwrap_or_default()
     };
     let recorded = text("/status")?;
-    if recorded == "recovered" {
+    let cleanup_notice = Cleanup::from_intervention(intervention)
+        .filter(|outcome| !matches!(outcome, Cleanup::Removed))
+        .and_then(|outcome| text("/worktree").map(|p| outcome.summary(std::path::Path::new(&p))));
+    if recorded == "recovered" && cleanup_notice.is_none() {
         return None;
     }
     let in_progress = ACTIVE.contains(&recorded.as_str());
@@ -124,10 +128,11 @@ fn from_report(report: &Value, running: bool) -> Option<SupervisorLive> {
     Some(SupervisorLive {
         running,
         active: in_progress && running,
+        cleanup_notice,
         status: if orphaned {
             "interrupted".into()
         } else {
-            recorded
+            recorded.clone()
         },
         attempt: intervention
             .get("attempt")
@@ -144,7 +149,7 @@ fn from_report(report: &Value, running: bool) -> Option<SupervisorLive> {
         diagnosis: text("/diagnosis/summary"),
         reason: if orphaned {
             Some("The supervisor process stopped during this intervention".into())
-        } else if in_progress {
+        } else if in_progress || recorded == "recovered" {
             None
         } else {
             text("/detail")
@@ -212,6 +217,22 @@ mod tests {
         assert!(!live.active);
         assert_eq!(live.status, "interrupted");
         assert!(live.next_action.unwrap().contains("macc supervisor start"));
+    }
+
+    #[test]
+    fn recovered_retained_slot_stays_visible_after_restart() {
+        let mut r = report("recovered");
+        r["intervention"]["worktree"] = json!("/project/.macc/worktree/supervisor-01");
+        r["intervention"]["worktree_cleanup"] = json!({"status":"retained","reason":{"kind":"untracked_file","path":".codex/config.toml"}});
+        let live = from_report(&r, true).unwrap();
+        assert!(live.visible(true));
+        assert!(!live.active);
+        assert!(live
+            .cleanup_notice
+            .unwrap()
+            .contains("supervisor-01 retained · untracked file"));
+        r["intervention"]["worktree_cleanup"] = json!({"status":"removed"});
+        assert!(from_report(&r, true).is_none());
     }
 
     #[test]

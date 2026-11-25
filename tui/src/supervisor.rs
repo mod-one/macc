@@ -54,7 +54,13 @@ fn elapsed_label(since: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Str
 /// Cells of the supervisor row, in the LIVE TASKS column order:
 /// health, worker, task, status, tool, model, effort, age, phase age.
 pub fn row_cells(live: &SupervisorLive, now: chrono::DateTime<chrono::Utc>) -> [String; 9] {
-    let marker = if live.active { "● SUP" } else { "▲ SUP" };
+    let marker = if live.active {
+        "● SUP"
+    } else if live.status == "recovered" {
+        "✓ SUP"
+    } else {
+        "▲ SUP"
+    };
     [
         marker.into(),
         WORKER_LABEL.into(),
@@ -87,6 +93,8 @@ pub fn detail(
             "{} — attempt {} on incident {} (not a coordinator task)",
             if live.active {
                 "intervention in progress"
+            } else if live.status == "recovered" {
+                "intervention complete"
             } else {
                 "intervention needs attention"
             },
@@ -95,6 +103,9 @@ pub fn detail(
         ),
         DetailKind::Info,
     )];
+    if let Some(notice) = &live.cleanup_notice {
+        lines.push(("Worktree:   ", notice.clone(), DetailKind::Info));
+    }
     let mut scope = if live.task_ids.is_empty() {
         "root task not identified yet".to_string()
     } else {
@@ -168,6 +179,7 @@ mod tests {
             next_action: (!active).then(|| "Fix the failing command".into()),
             target_branch: Some("feat/p0p1".into()),
             worktree: None,
+            cleanup_notice: None,
             log_dir: None,
             findings: vec!["Improve X".into(), "Improve Y".into()],
         }
@@ -187,6 +199,17 @@ mod tests {
         assert_eq!(cells[7], "21m");
         assert_eq!(cells[8], "4m");
         assert_eq!(row_cells(&sample(false), now())[0], "▲ SUP");
+    }
+
+    #[test]
+    fn completed_intervention_shows_why_the_slot_was_retained() {
+        let mut live = sample(false);
+        live.status = "recovered".into();
+        let notice = r#"supervisor-01 retained · untracked file ".codex/config.toml""#;
+        live.cleanup_notice = Some(notice.into());
+        assert!(detail(&live, now())
+            .iter()
+            .any(|(_, text, _)| text == notice));
     }
 
     #[test]

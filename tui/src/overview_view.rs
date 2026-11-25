@@ -220,7 +220,11 @@ fn draw_readiness(
             Style::default().fg(theme.warn),
         ));
     }
-    if let Some(intervention) = &obs.intervention {
+    if let Some(intervention) = obs
+        .intervention
+        .as_ref()
+        .filter(|i| i.status != "recovered")
+    {
         attention.push(Line::styled(
             format!("▲ Supervisor {}   [C] Coordinator", intervention.status),
             Style::default().fg(theme.warn),

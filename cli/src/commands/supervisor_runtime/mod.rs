@@ -232,6 +232,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         effort: None,
                         diagnosis: cached,
                         worktree: None,
+                        worktree_cleanup: None,
                         validation: Vec::new(),
                         commit: None,
                         restart_pid: None,
@@ -306,25 +307,21 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                     if let Some(worktree) = report.worktree.as_ref().filter(|path| path.exists()) {
                         let close = pending.status != "retrying"
                             || pending.attempts >= config.max_restart_attempts;
-                        match workspace::finish(
-                            &paths.root,
-                            &report.incident.id,
-                            worktree,
-                            &dir,
-                            close,
-                            config.retain_repair_branches,
-                        ) {
-                            Ok(removed) => {
-                                if removed {
-                                    report.detail.push_str(
-                                        "; evidence archived; clean supervisor slot removed",
-                                    );
+                        report.worktree_cleanup = Some(
+                            workspace::finish(
+                                &paths.root,
+                                &report.incident.id,
+                                worktree,
+                                &dir,
+                                close,
+                                config.retain_repair_branches,
+                            )
+                            .unwrap_or_else(|e| {
+                                macc_core::supervisor::cleanup::Cleanup::Failed {
+                                    error: e.to_string(),
                                 }
-                            }
-                            Err(error) => report.detail.push_str(&format!(
-                                "; evidence/cleanup failed; slot retained: {error}"
-                            )),
-                        }
+                            }),
+                        );
                     }
                     report.phase_started_at = Some(chrono::Utc::now().to_rfc3339());
                     report.activity = None;

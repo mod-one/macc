@@ -60,6 +60,12 @@ describe('SupervisorRow', () => {
     expect(screen.getByText('Next: Fix the failing command')).toBeInTheDocument();
   });
 
+  it('explains the retained slot after recovery', () => {
+    const notice = 'supervisor-01 retained · untracked file ".codex/config.toml"';
+    render(<ul><SupervisorRow supervisor={{ ...base, active: false, status: 'recovered', activity: null, cleanup_notice: notice }} /></ul>);
+    expect(screen.getByText(notice)).toBeInTheDocument();
+  });
+
   it('formats elapsed time and tolerates missing timestamps', () => {
     expect(elapsedLabel('2026-10-12T02:21:00Z', now)).toBe('30s');
     expect(elapsedLabel('2026-10-12T01:16:30Z', now)).toBe('1h05m');

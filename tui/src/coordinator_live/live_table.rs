@@ -113,6 +113,7 @@ pub(super) fn draw(
     let theme = theme();
     let title = match live {
         Some(s) if s.active => "LIVE TASKS · supervisor intervention running",
+        Some(s) if s.status == "recovered" => "LIVE TASKS · supervisor intervention complete",
         Some(_) => "LIVE TASKS · supervisor needs attention",
         None => "LIVE TASKS",
     };
@@ -122,7 +123,11 @@ pub(super) fn draw(
     let rows: Vec<_> = live
         .into_iter()
         .map(|s| {
-            let color = if s.active { theme.good } else { theme.warn };
+            let color = if s.active || s.status == "recovered" {
+                theme.good
+            } else {
+                theme.warn
+            };
             TaskRow {
                 values: supervisor::row_cells(s, now),
                 health: color,

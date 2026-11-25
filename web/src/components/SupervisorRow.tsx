@@ -11,7 +11,7 @@ export interface SupervisorRowProps {
  * coordinator task, so it carries its own badge, tint and wording.
  */
 export function SupervisorRow({ supervisor, now }: SupervisorRowProps) {
-  const tone = supervisor.active ? 'var(--info)' : 'var(--warning)';
+  const tone = supervisor.active || supervisor.status === 'recovered' ? 'var(--info)' : 'var(--warning)';
   const subject =
     supervisor.task_ids.length > 0
       ? `repair ${supervisor.task_ids.join(', ')}`
@@ -44,6 +44,9 @@ export function SupervisorRow({ supervisor, now }: SupervisorRowProps) {
           {elapsedLabel(supervisor.phase_started_at, now)} / {elapsedLabel(supervisor.started_at, now)}
         </span>
       </div>
+      {supervisor.cleanup_notice && (
+        <p className="mt-1 break-words text-xs text-[var(--text-primary)]">{supervisor.cleanup_notice}</p>
+      )}
       {supervisor.activity && (
         <p className="mt-1 truncate text-xs text-[var(--text-secondary)]">
           Doing: {supervisor.activity}

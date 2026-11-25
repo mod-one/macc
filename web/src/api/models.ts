@@ -948,6 +948,7 @@ export interface ApiSupervisorLive {
   next_action: string | null;
   target_branch: string | null;
   worktree: string | null;
+  cleanup_notice?: string | null;
   log_dir: string | null;
   findings: string[];
 }

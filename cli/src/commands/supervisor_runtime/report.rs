@@ -17,6 +17,8 @@ pub(super) struct Intervention {
     pub(super) effort: Option<String>,
     pub(super) diagnosis: Option<repair::Diagnosis>,
     pub(super) worktree: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) worktree_cleanup: Option<macc_core::supervisor::cleanup::Cleanup>,
     pub(super) validation: Vec<String>,
     pub(super) commit: Option<String>,
     pub(super) restart_pid: Option<i32>,
@@ -159,8 +161,7 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
         })
     {
         value["intervention"]["status"] = json!("interrupted");
-        value["intervention"]["detail"] =
-            json!("Supervisor stopped during intervention; isolated worktree and logs retained");
+        value["intervention"]["detail"] = json!("Supervisor stopped during intervention");
         let dir = value
             .pointer("/intervention/log_dir")
             .and_then(|v| v.as_str())
@@ -205,19 +206,14 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
                         cfg.retain_repair_branches,
                     )
                 });
-            match cleanup {
-                Ok(true) => value["intervention"]["detail"] = json!(
-                    "Supervisor stopped during intervention; evidence archived; clean slot removed"
-                ),
-                Ok(false) => (),
-                Err(error) => {
-                    value["intervention"]["detail"] =
-                        json!(format!("Supervisor stopped; worktree retained: {error}"))
+            value["intervention"]["worktree_cleanup"] = json!(cleanup.unwrap_or_else(|e| {
+                macc_core::supervisor::cleanup::Cleanup::Failed {
+                    error: e.to_string(),
                 }
-            }
+            }));
         }
         value["intervention"]["next_action"] =
-            json!("Inspect the retained work and restart the supervisor when ready.");
+            json!("Inspect the intervention report and restart the supervisor when ready.");
         macc_core::service::run_summary::publish_incident(paths, &value)?;
         write_json(&dir.join("report.json"), &value)?;
         let report = if cfg.report_output_path.is_absolute() {

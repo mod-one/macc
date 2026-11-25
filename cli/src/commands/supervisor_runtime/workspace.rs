@@ -3,6 +3,7 @@ mod baseline;
 mod config_copy;
 use super::{io, repair::git, report::write_json};
 pub use baseline::{enter_baseline, restore_repair};
+use macc_core::supervisor::cleanup::{Cleanup, Retention};
 use macc_core::{MaccError, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -77,10 +78,10 @@ pub fn prepare(
             .as_str()
             .ok_or_else(|| MaccError::Validation("Supervisor slot has no base".into()))?;
         let branch = if base != head {
-            if !safe_to_remove(root, &path)? {
-                return Err(MaccError::Validation(
-                    "Project base changed; supervisor work preserved for operator recovery".into(),
-                ));
+            if let Some(reason) = retention_reason(root, &path)? {
+                return Err(MaccError::Validation(format!(
+                    "Project base changed; supervisor work preserved: {reason}"
+                )));
             }
             let old_repair_branch = owner["repair_branch"].as_str().map(String::from);
             let branch = repair_branch(root, incident, head)?;
@@ -170,35 +171,59 @@ pub fn snapshot(path: &Path) -> Result<String> {
     macc_core::git::worktree_content_tree(path)
 }
 
-pub fn safe_to_remove(root: &Path, path: &Path) -> Result<bool> {
+fn retention_reason(root: &Path, path: &Path) -> Result<Option<Retention>> {
     // A slot parked on the base still owns an unrestored repair.
-    if path.join(RESTORE).exists() || config_copy::customized(path) {
-        return Ok(false);
+    if path.join(RESTORE).exists() {
+        return Ok(Some(Retention::PendingRestore));
+    }
+    if config_copy::customized(path) {
+        return Ok(Some(Retention::CustomizedConfig {
+            path: config_copy::CONFIG.into(),
+        }));
     }
     let status = git(
         path,
-        &["status", "--porcelain", "--untracked-files=all", "-z"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--no-renames",
+            "--untracked-files=all",
+            "-z",
+        ],
     )?;
-    if !status.is_empty()
-        && !(status
-            .split_terminator('\0')
-            .all(|row| row.get(3..) == Some(config_copy::CONFIG))
-            && config_copy::disposable(root, path)?)
-    {
-        return Ok(false);
+    for row in status.split_terminator('\0') {
+        let name = row.get(3..).ok_or_else(|| {
+            MaccError::Validation("Invalid Git status entry during supervisor cleanup".into())
+        })?;
+        if name == config_copy::CONFIG && config_copy::disposable(root, path)? {
+            continue;
+        }
+        return Ok(Some(if row.starts_with("?? ") {
+            Retention::UntrackedFile { path: name.into() }
+        } else {
+            Retention::ChangedFile { path: name.into() }
+        }));
     }
-    if !macc_core::project_ownership::unowned_ignored_files(path)?.is_empty() {
-        return Ok(false);
+    if let Some(path) = macc_core::project_ownership::unowned_ignored_files(path)?
+        .into_iter()
+        .next()
+    {
+        return Ok(Some(Retention::IgnoredFile { path }));
     }
     let head = git(path, &["rev-parse", "HEAD"])?;
     // Integrated means reachable from the branch the slot publishes to.
-    let branch = std::fs::read_to_string(path.join(OWNER))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|owner| owner["branch"].as_str().map(str::to_owned))
-        .and_then(|branch| macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")));
-    let integrated = match branch {
-        Some(tip) => tip,
+    let marker = path.join(OWNER);
+    let owner: Value = serde_json::from_slice(&std::fs::read(&marker).map_err(|e| io(&marker, e))?)
+        .map_err(|e| MaccError::Validation(e.to_string()))?;
+    let integrated = match owner["branch"].as_str() {
+        Some(branch) => match macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")) {
+            Some(tip) => tip,
+            None => {
+                return Ok(Some(Retention::MissingTarget {
+                    branch: branch.into(),
+                }))
+            }
+        },
         None => git(root, &["rev-parse", "HEAD"])?,
     };
     let result = macc_core::git::run_git_output_mapped(
@@ -207,8 +232,8 @@ pub fn safe_to_remove(root: &Path, path: &Path) -> Result<bool> {
         "inspect supervisor integration",
     )?;
     match result.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
+        Some(0) => Ok(None),
+        Some(1) => Ok(Some(Retention::UnmergedCommit { commit: head })),
         _ => Err(MaccError::Validation(
             "Cannot verify supervisor commit integration; worktree retained".into(),
         )),
@@ -267,12 +292,17 @@ pub fn finish(
     dir: &Path,
     close: bool,
     retain_branch: bool,
-) -> Result<bool> {
+) -> Result<Cleanup> {
     // An interrupted baseline run leaves the base checked out: archive the repair.
     restore_repair(root, path, incident)?;
     archive(path, dir)?;
-    if !close || !safe_to_remove(root, path)? {
-        return Ok(false);
+    let reason = if close {
+        retention_reason(root, path)?
+    } else {
+        Some(Retention::RetryScheduled)
+    };
+    if let Some(reason) = reason {
+        return Ok(Cleanup::Retained { reason });
     }
     let owner = baseline::owner(root, path, incident)?;
     let branch = git(path, &["branch", "--show-current"])?;
@@ -294,7 +324,7 @@ pub fn finish(
             macc_core::git::prune_merged_supervisor_branch(root, &branch, target)?;
         }
     }
-    Ok(true)
+    Ok(Cleanup::Removed)
 }
 
 #[cfg(test)]
@@ -362,28 +392,56 @@ mod tests {
             .unwrap();
         std::fs::write(root.join(config_copy::CONFIG), &primary).unwrap();
         let (slot, _) = open(root, "untracked-config").unwrap();
-        assert!(safe_to_remove(root, &slot).unwrap());
+        assert!(retention_reason(root, &slot).unwrap().is_none());
         std::fs::write(slot.join(config_copy::CONFIG), "customized").unwrap();
-        assert!(!safe_to_remove(root, &slot).unwrap());
+        assert!(retention_reason(root, &slot).unwrap().is_some());
         assert!(open(root, "untracked-config").is_err());
         assert_eq!(
             std::fs::read_to_string(slot.join(config_copy::CONFIG)).unwrap(),
             "customized"
         );
         std::fs::write(slot.join(config_copy::CONFIG), &primary).unwrap();
-        assert!(finish(
-            root,
-            "untracked-config",
-            &slot,
-            &root.join(".macc/log/receipt"),
-            true,
-            false
-        )
-        .unwrap());
+        assert!(matches!(
+            finish(
+                root,
+                "untracked-config",
+                &slot,
+                &root.join(".macc/log/receipt"),
+                true,
+                false
+            )
+            .unwrap(),
+            Cleanup::Removed
+        ));
         assert!(!slot.exists());
         assert_eq!(
             std::fs::read_to_string(root.join(config_copy::CONFIG)).unwrap(),
             primary
+        );
+    }
+
+    #[test]
+    fn report_distinguishes_scheduled_retry_from_untracked_file() {
+        let temp = fixture();
+        let root = temp.path();
+        let (slot, _) = open(root, "retained").unwrap();
+        let dir = root.join(".macc/log/supervisor/retained");
+        std::fs::create_dir_all(slot.join(".codex")).unwrap();
+        std::fs::write(slot.join(".codex/config.toml"), "personal").unwrap();
+        assert_eq!(
+            finish(root, "retained", &slot, &dir, false, false).unwrap(),
+            Cleanup::Retained {
+                reason: Retention::RetryScheduled
+            }
+        );
+        let cleanup = finish(root, "retained", &slot, &dir, true, false).unwrap();
+        assert_eq!(
+            serde_json::json!(cleanup),
+            serde_json::json!({"status":"retained","reason":{"kind":"untracked_file","path":".codex/config.toml"}})
+        );
+        assert_eq!(
+            std::fs::read(slot.join(".codex/config.toml")).unwrap(),
+            b"personal"
         );
     }
 
@@ -406,7 +464,10 @@ mod tests {
             before
         );
         let logs = root.join(".macc/log/supervisor/attempt-1");
-        assert!(!finish(root, "incident-a", &slot, &logs, true, false).unwrap());
+        assert!(matches!(
+            finish(root, "incident-a", &slot, &logs, true, false).unwrap(),
+            Cleanup::Retained { .. }
+        ));
         assert!(slot.exists());
         assert_eq!(
             std::fs::read_to_string(logs.join("evidence/.macc/diagnosis.log")).unwrap(),
@@ -415,15 +476,18 @@ mod tests {
         assert!(logs.join("evidence/untracked.txt").exists());
         let (other, _) = open(root, "incident-b").unwrap();
         assert_eq!(other, root.join(".macc/worktree/supervisor-02"));
-        assert!(finish(
-            root,
-            "incident-b",
-            &other,
-            &root.join(".macc/log/supervisor/other"),
-            true,
-            false
-        )
-        .unwrap());
+        assert!(matches!(
+            finish(
+                root,
+                "incident-b",
+                &other,
+                &root.join(".macc/log/supervisor/other"),
+                true,
+                false
+            )
+            .unwrap(),
+            Cleanup::Removed
+        ));
         assert!(!other.exists());
         let branches = git(root, &["branch", "--list", "macc/supervisor/*"]).unwrap();
         assert!(!branches.contains("incident-b"));
@@ -435,7 +499,10 @@ mod tests {
         let (slot, _) = open_with_retention(root, "incident-c", true).unwrap();
         assert!(slot.exists());
         let logs = root.join(".macc/log/supervisor/c");
-        assert!(finish(root, "incident-c", &slot, &logs, true, true).unwrap());
+        assert!(matches!(
+            finish(root, "incident-c", &slot, &logs, true, true).unwrap(),
+            Cleanup::Removed
+        ));
         assert!(!slot.exists());
         let branches = git(root, &["branch", "--list", "macc/supervisor/*"]).unwrap();
         assert!(branches.contains("incident-c"));
@@ -455,15 +522,20 @@ mod tests {
             .write_all(b"\n.env\n")
             .unwrap();
         std::fs::write(slot.join(".env"), "private work\n").unwrap();
-        assert!(!finish(
-            root,
-            "ignored",
-            &slot,
-            &root.join(".macc/log/supervisor/ignored"),
-            true,
-            false
-        )
-        .unwrap());
+        assert!(matches!(
+            finish(
+                root,
+                "ignored",
+                &slot,
+                &root.join(".macc/log/supervisor/ignored"),
+                true,
+                false
+            )
+            .unwrap(),
+            Cleanup::Retained {
+                reason: Retention::IgnoredFile { .. }
+            }
+        ));
         assert_eq!(
             std::fs::read_to_string(slot.join(".env")).unwrap(),
             "private work\n"
@@ -486,15 +558,18 @@ mod tests {
         let owner: Value =
             serde_json::from_str(&std::fs::read_to_string(slot.join(OWNER)).unwrap()).unwrap();
         assert_eq!(owner["repair_branch"].as_str(), Some(branch.as_str()));
-        assert!(finish(
-            root,
-            "legacy",
-            &slot,
-            &root.join(".macc/log/supervisor/legacy"),
-            true,
-            false
-        )
-        .unwrap());
+        assert!(matches!(
+            finish(
+                root,
+                "legacy",
+                &slot,
+                &root.join(".macc/log/supervisor/legacy"),
+                true,
+                false
+            )
+            .unwrap(),
+            Cleanup::Removed
+        ));
         assert!(git(root, &["branch", "--list", "macc/supervisor/*"])
             .unwrap()
             .is_empty());
@@ -517,15 +592,20 @@ mod tests {
         std::fs::write(slot.join("source.txt"), "repair\n").unwrap();
         git(&slot, &["add", "."]).unwrap();
         git(&slot, &["commit", "-qm", "repair"]).unwrap();
-        assert!(!finish(
-            root,
-            "a",
-            &slot,
-            &root.join(".macc/log/supervisor/a"),
-            true,
-            false
-        )
-        .unwrap());
+        assert!(matches!(
+            finish(
+                root,
+                "a",
+                &slot,
+                &root.join(".macc/log/supervisor/a"),
+                true,
+                false
+            )
+            .unwrap(),
+            Cleanup::Retained {
+                reason: Retention::UnmergedCommit { .. }
+            }
+        ));
         std::fs::write(root.join("source.txt"), "new base\n").unwrap();
         git(root, &["add", "."]).unwrap();
         git(root, &["commit", "-qm", "advance"]).unwrap();
@@ -545,7 +625,10 @@ mod tests {
         assert_eq!(same, slot);
         assert_eq!(git(&same, &["rev-parse", "HEAD"]).unwrap(), base);
         let logs = root.join(".macc/log/supervisor/a");
-        assert!(finish(root, "a", &slot, &logs, true, false).unwrap());
+        assert!(matches!(
+            finish(root, "a", &slot, &logs, true, false).unwrap(),
+            Cleanup::Removed
+        ));
         assert!(!slot.exists());
         assert_eq!(
             std::fs::read_to_string(logs.join("evidence/.macc/repair-notes.md")).unwrap(),
@@ -582,15 +665,18 @@ mod generated_cleanup_tests {
             .unwrap()
             .write_all(b"\n.codex/\n")
             .unwrap();
-        assert!(finish(
-            root,
-            "generated-config",
-            &slot,
-            &root.join(".macc/log/supervisor/generated-config"),
-            true,
-            false
-        )
-        .unwrap());
+        assert!(matches!(
+            finish(
+                root,
+                "generated-config",
+                &slot,
+                &root.join(".macc/log/supervisor/generated-config"),
+                true,
+                false
+            )
+            .unwrap(),
+            Cleanup::Removed
+        ));
         assert!(!slot.exists());
     }
 }
