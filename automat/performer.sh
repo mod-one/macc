@@ -1220,75 +1220,65 @@ commit_changes() {
   local last_id="$1"
   local last_title="$2"
 
-  if git status --porcelain | awk 'NF' | grep -q .; then
-    local git_add_output=""
-    local git_commit_output=""
-    # Stage everything first; protected files are un-staged right after.
-    if ! git_add_output="$(git add -A 2>&1)"; then
-      git_add_output="${git_add_output//$'\n'/ }"
-      set_last_error "E202" "git" "git add failed: ${git_add_output:0:240}"
-      return 1
-    fi
-    git reset -q HEAD -- performer.sh worktree.prd.json >/dev/null 2>&1 || true
-    if git diff --cached --quiet; then
-      if git status --porcelain -- performer.sh worktree.prd.json | awk 'NF' | grep -q .; then
-        echo "No committable changes (protected files excluded: performer.sh, worktree.prd.json)."
-      else
-        echo "No changes to commit."
-      fi
-      return 0
-    fi
-    # --- MACC commit message convention (see core/src/commit_message.rs) ---
-    # Subject: <type>: <task_id>[ - <title>]
-    # Trailers: [macc:task <id>] [macc:phase <phase>]
-    local subject="feat: ${last_id}"
-    if [[ -n "$last_title" ]]; then
-      subject="feat: ${last_id} - ${last_title}"
-    fi
-    local trailer="[macc:task ${last_id}]"
-    if [[ -n "$CURRENT_PHASE" ]]; then
-      trailer="${trailer}
-[macc:phase ${CURRENT_PHASE}]"
-    fi
-    if [[ -n "$tool" ]]; then
-      trailer="${trailer}
-[macc:tool ${tool}]"
-    fi
-    local model
-    model="$(get_active_model)"
-    if [[ -n "$model" ]]; then
-      trailer="${trailer}
-[macc:model ${model}]"
-    fi
-    local effort
-    effort="$(get_active_effort)"
-    if [[ -n "$effort" ]]; then
-      trailer="${trailer}
-[macc:effort ${effort}]"
-    fi
-    if [[ -z "$task_duration_seconds" && -n "$task_start_seconds" ]]; then
-      local now_sec
-      now_sec="$(date +%s)"
-      task_duration_seconds=$(( now_sec - task_start_seconds ))
-    fi
-    if [[ -n "$task_duration_seconds" ]]; then
-      trailer="${trailer}
-[macc:duration ${task_duration_seconds}s]"
-    fi
-    if ! git_commit_output="$(git commit -m "$subject" -m "" -m "$trailer" 2>&1)"; then
-      git_commit_output="${git_commit_output//$'\n'/ }"
-      set_last_error "E201" "git" "git commit failed: ${git_commit_output:0:240}"
-      return 1
-    fi
-    printf '%s\n' "$git_commit_output"
-    local sha
-    sha="$(git rev-parse HEAD 2>/dev/null || true)"
-    local msg="${subject}"
-    soft_emit_performer_event "commit_created" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$sha" --arg message "$msg" '{sha:$sha, message:$message}')"
-    echo "Committed changes: $subject"
-  else
-    echo "No changes to commit."
+  local git_add_output=""
+  local git_commit_output=""
+  local stage_cli="${MACC_PROTOCOL_CLI:-${MACC_DECISION_CLI:-${MACC_SESSION_SERVICE_BIN:-macc}}}"
+  if ! git_add_output="$("$stage_cli" --cwd "$PWD" worktree stage-task-changes 2>&1)"; then
+    set_last_error "E202" "git" "Task staging failed: ${git_add_output:0:240}"
+    return 1
   fi
+  if git diff --cached --quiet; then
+    echo "No task changes to commit."
+    return 0
+  fi
+  # --- MACC commit message convention (see core/src/commit_message.rs) ---
+  # Subject: <type>: <task_id>[ - <title>]
+  # Trailers: [macc:task <id>] [macc:phase <phase>]
+  local subject="feat: ${last_id}"
+  if [[ -n "$last_title" ]]; then
+    subject="feat: ${last_id} - ${last_title}"
+  fi
+  local trailer="[macc:task ${last_id}]"
+  if [[ -n "$CURRENT_PHASE" ]]; then
+    trailer="${trailer}
+[macc:phase ${CURRENT_PHASE}]"
+  fi
+  if [[ -n "$tool" ]]; then
+    trailer="${trailer}
+[macc:tool ${tool}]"
+  fi
+  local model
+  model="$(get_active_model)"
+  if [[ -n "$model" ]]; then
+    trailer="${trailer}
+[macc:model ${model}]"
+  fi
+  local effort
+  effort="$(get_active_effort)"
+  if [[ -n "$effort" ]]; then
+    trailer="${trailer}
+[macc:effort ${effort}]"
+  fi
+  if [[ -z "$task_duration_seconds" && -n "$task_start_seconds" ]]; then
+    local now_sec
+    now_sec="$(date +%s)"
+    task_duration_seconds=$(( now_sec - task_start_seconds ))
+  fi
+  if [[ -n "$task_duration_seconds" ]]; then
+    trailer="${trailer}
+[macc:duration ${task_duration_seconds}s]"
+  fi
+  if ! git_commit_output="$(git commit -m "$subject" -m "" -m "$trailer" 2>&1)"; then
+    git_commit_output="${git_commit_output//$'\n'/ }"
+    set_last_error "E201" "git" "git commit failed: ${git_commit_output:0:240}"
+    return 1
+  fi
+  printf '%s\n' "$git_commit_output"
+  local sha
+  sha="$(git rev-parse HEAD 2>/dev/null || true)"
+  local msg="${subject}"
+  soft_emit_performer_event "commit_created" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$sha" --arg message "$msg" '{sha:$sha, message:$message}')"
+  echo "Committed changes: $subject"
 }
 
 # ---------------------------------------------------------------------------

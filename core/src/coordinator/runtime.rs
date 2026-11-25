@@ -1781,7 +1781,7 @@ fn finish_integration(
     if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, task_id) {
         return Ok(Err(error.to_string()));
     }
-    match integration.publish() {
+    match integration.publish(branch) {
         Ok(PublishOutcome::Published { .. }) | Ok(PublishOutcome::UpToDate) => Ok(Ok(())),
         Ok(outcome) => {
             let detail = outcome
@@ -1790,8 +1790,9 @@ fn finish_integration(
             // A blocked publish is the one failure an operator can act on
             // directly, so say what to do instead of the generic merge hint.
             let advice = match &outcome {
+                PublishOutcome::PrivateAdditions(_) => "remove the generated additions from the task candidate, retain the local files, then revalidate and resume".into(),
                 PublishOutcome::BlockedByCheckout { worktree, .. } => format!(
-                    "commit or stash your changes in {} (the merge is ready and will be applied on the next attempt)",
+                    "inspect and preserve the conflicting files in {}, resolve the collision, then resume",
                     worktree.display()
                 ),
                 _ => suggestion.to_string(),

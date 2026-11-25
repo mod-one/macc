@@ -2,6 +2,9 @@ use crate::{MaccError, Result};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 
+mod task_changes;
+pub(crate) use task_changes::private_additions;
+pub use task_changes::stage_task_changes;
 mod housekeeping;
 mod supervisor_prune;
 pub use housekeeping::{fetch_housekeeping, fetch_housekeeping_sync};

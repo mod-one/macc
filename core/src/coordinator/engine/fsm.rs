@@ -1672,15 +1672,11 @@ pub async fn run_control_plane<B: ControlPlaneBackend + ?Sized>(
     }
 }
 
-/// Returns true when a merge failure reason represents an actual conflict that
-/// requires operator intervention and justifies killing other running performers.
-///
-/// Transient failures — `precheck_clean` (dirty working tree), `verify_branch`,
-/// `verify_base`, and `timeout` — should be retried automatically without
-/// disturbing other running tasks.  Only `step=merge` (a genuine git conflict)
-/// needs the full operator-wait flow.
+/// Pause for conflicts that require editing the candidate or preserving local files.
 fn is_operator_blocked_merge(reason: &str) -> bool {
     reason.starts_with("failure:local_merge step=merge")
+        || reason.starts_with("failure:local_merge step=publish reason=base_checked_out_dirty ")
+        || reason.starts_with("failure:local_merge step=publish reason=generated_task_files ")
 }
 
 async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
@@ -2868,6 +2864,21 @@ pub(crate) async fn run_single_prd_control_plane(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn publication_conflicts_wait_for_operator() {
+        for reason in [
+            "base_checked_out_dirty",
+            "generated_task_files",
+            "base_moved",
+        ] {
+            let detail = format!("failure:local_merge step=publish reason={reason} branch=task");
+            assert_eq!(
+                super::is_operator_blocked_merge(&detail),
+                reason != "base_moved"
+            );
+        }
+    }
+
     use super::*;
     use crate::coordinator::engine::retry::RetryStrategy;
     use crate::coordinator::error_normalizer::ErrorNormalizer;

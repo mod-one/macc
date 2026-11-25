@@ -8,7 +8,7 @@
 //! This module is pure business logic — no CLI, no UI.
 
 use crate::commit_message;
-use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
+use crate::coordinator::integration::IntegrationWorktree;
 use crate::coordinator::model::{GateVerdict, TaskRegistry};
 use crate::coordinator::WorkflowState;
 use crate::git;
@@ -495,12 +495,27 @@ pub fn sync_unmerged_branches(
         }
 
         let merge_output = merge_branch_into_base(&merge_dir, branch)?;
-        let published = merge_output.status.success()
-            && matches!(
-                integration.publish(),
-                Ok(PublishOutcome::Published { .. }) | Ok(PublishOutcome::UpToDate)
-            );
-        if published {
+        let failure = if merge_output.status.success() {
+            match integration.publish(branch) {
+                Ok(outcome) => outcome.failure_detail(),
+                Err(error) => Some(error.to_string()),
+            }
+        } else {
+            Some(
+                String::from_utf8_lossy(&merge_output.stderr)
+                    .trim()
+                    .to_owned(),
+            )
+        };
+        if let Some(detail) = failure {
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::MergeFailed,
+                detail: Some(detail),
+            });
+        } else {
             let report = ReconcileReport {
                 reconciled: eligible_task_ids
                     .iter()
@@ -534,24 +549,6 @@ pub fn sync_unmerged_branches(
                 merged_task_ids: eligible_task_ids,
                 status: SyncBranchStatus::Merged,
                 detail: None,
-            });
-        } else {
-            let detail = if merge_output.status.success() {
-                // The merge itself worked but could not reach the base branch.
-                "merge succeeded but could not be published to the base branch \
-                 (it may be checked out with conflicting uncommitted changes)"
-                    .to_string()
-            } else {
-                String::from_utf8_lossy(&merge_output.stderr)
-                    .trim()
-                    .to_string()
-            };
-            out.push(SyncBranchResult {
-                branch: branch.clone(),
-                discovered_task_ids,
-                merged_task_ids: Vec::new(),
-                status: SyncBranchStatus::MergeFailed,
-                detail: Some(detail),
             });
         }
         // Reset between candidates so a failed merge cannot leak into the next.

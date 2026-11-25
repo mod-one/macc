@@ -481,8 +481,9 @@ pub fn integrate(
     )?;
     let commit = git(worktree, &["rev-parse", "HEAD"])?;
     let refused = match &target.branch {
-        Some(branch) => match publish_commit(root, branch, &commit, base)? {
+        Some(branch) => match publish_commit(root, branch, &commit, base, &[worktree.to_path_buf()])? {
             PublishOutcome::Published { .. } | PublishOutcome::UpToDate => None,
+            PublishOutcome::PrivateAdditions(paths) => Some(format!("Publication blocked by generated files: {paths:?}")),
             PublishOutcome::BaseMoved { .. } => Some(format!(
                 "Reference branch '{branch}' moved during intervention; repair retained, integration deferred"
             )),
@@ -499,7 +500,7 @@ pub fn integrate(
             "Project HEAD changed during intervention; repair retained, integration deferred"
                 .into(),
         ),
-        None => git(root, &["merge", "--ff-only", &commit])
+        None => git(root, &["merge", "--ff-only", "--no-overwrite-ignore", &commit])
             .err()
             .map(|error| error.to_string()),
     };

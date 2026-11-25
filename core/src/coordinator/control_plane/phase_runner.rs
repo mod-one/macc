@@ -744,17 +744,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     let _ = std::fs::remove_file(&prompt_path);
                     return Ok(Ok(response));
                 }
-                evidence.settle("validated", None)?;
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits
                 // are managed by performer.sh. Fix phases may leave
                 // uncommitted file changes that must be committed before merging.
-                if crate::git::is_dirty(&worktree).unwrap_or(false) {
-                    let _ = crate::git::run_git_output_mapped(
-                        &worktree,
-                        &["add", "-A"],
-                        "stage all changes after phase",
-                    );
+                if crate::git::stage_task_changes(&worktree)? {
                     let commit_type = if mode == "fix" {
                         crate::commit_message::CommitType::Fix
                     } else {
@@ -779,28 +773,25 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                         commit_builder = commit_builder.with_effort(e);
                     }
                     let commit_msg = commit_builder.format();
-                    let commit_out = crate::git::run_git_output_mapped(
+                    let commit = crate::git::run_git_output_mapped(
                         &worktree,
                         &["commit", "-m", &commit_msg],
                         "auto-commit phase changes",
-                    );
+                    )?;
+                    if !commit.status.success() {
+                        return Err(MaccError::Git {
+                            operation: "commit phase changes".into(),
+                            message: String::from_utf8_lossy(&commit.stderr).into_owned(),
+                        });
+                    }
                     if let Some(log) = self.logger {
-                        match commit_out {
-                            Ok(ref o) if o.status.success() => {
-                                let _ = log.note(format!(
-                                    "- Phase {} auto-committed changes task={}",
-                                    mode, task_id
-                                ));
-                            }
-                            _ => {
-                                let _ = log.note(format!(
-                                    "- Phase {} auto-commit failed task={} (continuing)",
-                                    mode, task_id
-                                ));
-                            }
-                        }
+                        let _ = log.note(format!(
+                            "- Phase {} auto-committed changes task={}",
+                            mode, task_id
+                        ));
                     }
                 }
+                evidence.settle("validated", None)?;
                 append_performer_log(
                     &worktree,
                     task_id,

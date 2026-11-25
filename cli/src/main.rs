@@ -927,6 +927,8 @@ pub enum SupervisorCommands {
 
 #[derive(Subcommand)]
 pub enum WorktreeCommands {
+    #[command(hide = true)]
+    StageTaskChanges,
     /// Create worktrees for parallel runs
     Create {
         /// Slug for worktree IDs (e.g. "feature")

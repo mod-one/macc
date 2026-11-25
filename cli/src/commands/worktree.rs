@@ -31,6 +31,9 @@ impl<'a> WorktreeCommand<'a> {
 impl<'a> Command for WorktreeCommand<'a> {
     fn run(&self) -> Result<()> {
         match self.command {
+            WorktreeCommands::StageTaskChanges => {
+                macc_core::git::stage_task_changes(&self.app.cwd).map(|_| ())
+            }
             WorktreeCommands::Create {
                 slug,
                 tool,

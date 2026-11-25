@@ -60,9 +60,12 @@ const LOCK_RETRY_DELAY: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishOutcome {
     /// The base branch now points at the integrated commit.
-    Published { new_sha: String },
+    Published {
+        new_sha: String,
+    },
     /// The merge produced no new commit (base already contained the branch).
     UpToDate,
+    PrivateAdditions(Vec<String>),
     /// A working tree has the base branch checked out and git refused to
     /// fast-forward it because the operator's uncommitted changes overlap the
     /// merged files. Nothing was modified.
@@ -72,7 +75,9 @@ pub enum PublishOutcome {
     },
     /// The base branch moved while we were integrating, so the merge result is
     /// stale. The caller should retry from the new tip.
-    BaseMoved { expected_sha: String },
+    BaseMoved {
+        expected_sha: String,
+    },
 }
 
 /// A private worktree, detached at the base branch tip, in which the
@@ -176,11 +181,18 @@ impl IntegrationWorktree {
     ///
     /// See the module docs for why the mechanism depends on whether a working
     /// tree holds the base branch.
-    pub fn publish(&self) -> Result<PublishOutcome> {
+    pub fn publish(&self, source_branch: &str) -> Result<PublishOutcome> {
         let _roles = super::worktree_roles::lock(&self.repo_root)?;
         super::worktree_roles::validate_scratch(&self.repo_root, &self.path, &self.base_sha)?;
         let new_sha = git::head_commit(&self.path)?;
-        publish_commit(&self.repo_root, &self.base, &new_sha, &self.base_sha)
+        let sources = git::worktrees_for_branch(&self.repo_root, source_branch)?;
+        publish_commit(
+            &self.repo_root,
+            &self.base,
+            &new_sha,
+            &self.base_sha,
+            &sources,
+        )
     }
 
     /// Abort any in-progress merge and return the worktree to the base tip.
@@ -205,6 +217,9 @@ impl PublishOutcome {
     pub fn failure_detail(&self) -> Option<String> {
         match self {
             PublishOutcome::Published { .. } | PublishOutcome::UpToDate => None,
+            PublishOutcome::PrivateAdditions(paths) => Some(format!(
+                "step=publish reason=generated_task_files paths={paths:?}"
+            )),
             PublishOutcome::BlockedByCheckout {
                 worktree,
                 git_output,
@@ -232,9 +247,14 @@ pub fn publish_commit(
     base: &str,
     new_sha: &str,
     base_sha: &str,
+    sources: &[PathBuf],
 ) -> Result<PublishOutcome> {
     if new_sha == base_sha {
         return Ok(PublishOutcome::UpToDate);
+    }
+    let paths = git::private_additions(repo_root, sources, base_sha, new_sha)?;
+    if !paths.is_empty() {
+        return Ok(PublishOutcome::PrivateAdditions(paths));
     }
     let new_sha = new_sha.to_string();
 
@@ -263,7 +283,7 @@ pub fn publish_commit(
     // together, and refuses outright if that would clobber local changes.
     let output = git::run_git_output_mapped(
         &holder,
-        &["merge", "--ff-only", &new_sha],
+        &["merge", "--ff-only", "--no-overwrite-ignore", &new_sha],
         "fast-forward base worktree to integrated commit",
     )?;
     if output.status.success() {
@@ -345,7 +365,7 @@ mod tests {
 
         let wt = IntegrationWorktree::acquire(repo, "main").expect("acquire");
         run_git(wt.path(), &["merge", "--no-ff", "-m", "merge", "task/x"]);
-        let outcome = wt.publish().expect("publish");
+        let outcome = wt.publish("task/x").expect("publish");
 
         assert!(matches!(outcome, PublishOutcome::Published { .. }));
         assert_eq!(
@@ -369,7 +389,7 @@ mod tests {
 
         let wt = IntegrationWorktree::acquire(repo, "main").expect("acquire");
         run_git(wt.path(), &["merge", "--no-ff", "-m", "merge", "task/x"]);
-        let outcome = wt.publish().expect("publish");
+        let outcome = wt.publish("task/x").expect("publish");
 
         match outcome {
             PublishOutcome::Published { new_sha } => {
@@ -398,7 +418,7 @@ mod tests {
 
         let wt = IntegrationWorktree::acquire(repo, "main").expect("acquire");
         run_git(wt.path(), &["merge", "--no-ff", "-m", "merge", "task/x"]);
-        let outcome = wt.publish().expect("publish");
+        let outcome = wt.publish("task/x").expect("publish");
 
         assert!(
             matches!(outcome, PublishOutcome::Published { .. }),
@@ -423,7 +443,7 @@ mod tests {
 
         let wt = IntegrationWorktree::acquire(repo, "main").expect("acquire");
         run_git(wt.path(), &["merge", "--no-ff", "-m", "merge", "task/x"]);
-        let outcome = wt.publish().expect("publish");
+        let outcome = wt.publish("task/x").expect("publish");
 
         match outcome {
             PublishOutcome::BlockedByCheckout { .. } => {}
@@ -449,6 +469,24 @@ mod tests {
     }
 
     #[test]
+    fn ignored_user_file_survives_publication_without_creation_evidence() {
+        let dir = make_repo();
+        let repo = dir.path();
+        add_task_branch(repo, "task/x", "settings", "candidate");
+        std::fs::write(repo.join(".git/info/exclude"), "/settings\n").unwrap();
+        std::fs::write(repo.join("settings"), "personal").unwrap();
+        let before = git::head_commit(repo).unwrap();
+        let wt = IntegrationWorktree::acquire(repo, "main").unwrap();
+        run_git(wt.path(), &["merge", "--ff-only", "task/x"]);
+        assert!(matches!(
+            wt.publish("task/x").unwrap(),
+            PublishOutcome::BlockedByCheckout { .. }
+        ));
+        assert_eq!(git::head_commit(repo).unwrap(), before);
+        assert_eq!(std::fs::read(repo.join("settings")).unwrap(), b"personal");
+    }
+
+    #[test]
     fn publish_detects_base_moving_underneath() {
         let dir = make_repo();
         let repo = dir.path();
@@ -465,7 +503,7 @@ mod tests {
         run_git(repo, &["checkout", "-q", "operator/side"]);
 
         assert!(matches!(
-            wt.publish().expect("publish"),
+            wt.publish("task/x").expect("publish"),
             PublishOutcome::BaseMoved { .. }
         ));
     }
@@ -509,6 +547,9 @@ mod tests {
         let dir = make_repo();
         let repo = dir.path();
         let wt = IntegrationWorktree::acquire(repo, "main").expect("acquire");
-        assert_eq!(wt.publish().expect("publish"), PublishOutcome::UpToDate);
+        assert_eq!(
+            wt.publish("task/x").expect("publish"),
+            PublishOutcome::UpToDate
+        );
     }
 }

@@ -476,3 +476,58 @@ fn runtime_bootstrap_respects_personal_ignores_before_project_setup() {
         assert!(!ignored(&paths, ".macc/skills.lock.json"));
     }
 }
+
+#[test]
+fn task_delivery_preserves_user_files_and_excludes_only_proven_additions() {
+    use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
+    let (_tmp, base) = fixture();
+    let holder = tempfile::tempdir().unwrap();
+    let worker = ProjectPaths::from_root(holder.path().join("worker"));
+    git(&base.root, &["checkout", "-b", "reference"]);
+    fs::create_dir(base.root.join(".tool")).unwrap();
+    fs::write(base.root.join(".tool/tracked"), "original").unwrap();
+    git(&base.root, &["add", ".tool/tracked"]);
+    git(&base.root, &["commit", "-qm", "base"]);
+    let original = git(&base.root, &["rev-parse", "HEAD"]);
+    fs::write(base.root.join(".tool/config"), "personal config").unwrap();
+    git(
+        &base.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "candidate",
+            worker.root.to_str().unwrap(),
+        ],
+    );
+    deploy(&worker, &[".tool/config"]);
+    fs::write(worker.root.join(".tool/tracked"), "updated").unwrap();
+    fs::write(worker.root.join(".tool/user"), "new user file").unwrap();
+    git(&worker.root, &["add", "-f", ".tool/config"]);
+    let rules = excludes(&base);
+    assert!(crate::git::stage_task_changes(&worker.root).unwrap());
+    let staged = git(&worker.root, &["diff", "--cached", "--name-only"]);
+    assert!(staged.lines().any(|p| p == ".tool/tracked"));
+    assert!(staged.lines().any(|p| p == ".tool/user"));
+    assert!(!staged.lines().any(|p| p == ".tool/config"));
+    assert!(!ignored(&base, ".tool/config"));
+    assert_eq!(rules, excludes(&base));
+    // A direct agent commit bypasses staging. Check the integrated tree again.
+    git(&worker.root, &["add", "-f", ".tool/config"]);
+    git(&worker.root, &["commit", "-qm", "candidate"]);
+    let scratch = IntegrationWorktree::acquire(&base.root, "reference").unwrap();
+    git(scratch.path(), &["merge", "--ff-only", "candidate"]);
+    assert_eq!(
+        scratch.publish("candidate").unwrap(),
+        PublishOutcome::PrivateAdditions(vec![".tool/config".into()])
+    );
+    assert_eq!(original, git(&base.root, &["rev-parse", "HEAD"]));
+    assert_eq!(
+        fs::read(base.root.join(".tool/config")).unwrap(),
+        b"personal config"
+    );
+    assert_eq!(
+        fs::read(worker.root.join(".tool/config")).unwrap(),
+        b"generated"
+    );
+}
