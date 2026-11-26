@@ -27,23 +27,6 @@ pub fn write(root: &Path, spec: &ModelConfigSpec, value: &str) -> Result<()> {
         }
     }
     let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io(&path, e))?;
-        if !parent
-            .canonicalize()
-            .map_err(|e| io(parent, e))?
-            .starts_with(root.canonicalize().map_err(|e| io(root, e))?)
-        {
-            return Err(MaccError::Validation(
-                "Supervisor settings directory escapes its worktree".into(),
-            ));
-        }
-    }
-    if path.is_symlink() {
-        return Err(MaccError::Validation(
-            "Supervisor refuses symlinked settings".into(),
-        ));
-    }
     let text = if path.exists() {
         std::fs::read_to_string(&path).map_err(|e| io(&path, e))?
     } else {
@@ -73,7 +56,14 @@ pub fn write(root: &Path, spec: &ModelConfigSpec, value: &str) -> Result<()> {
         }
         other => return Err(invalid(format!("Unsupported format {other}"))),
     };
-    std::fs::write(&path, output).map_err(|e| io(&path, e))
+    crate::write_if_changed(
+        &crate::ProjectPaths::from_root(root),
+        &spec.path,
+        &path,
+        output.as_bytes(),
+        |_| Ok(()),
+    )?;
+    Ok(())
 }
 fn io(path: &Path, source: std::io::Error) -> MaccError {
     MaccError::Io {
@@ -99,6 +89,11 @@ mod tests {
             write(temp.path(), &spec, "high").unwrap();
             let text = std::fs::read_to_string(temp.path().join(&spec.path)).unwrap();
             assert!(text.contains("first") && text.contains("high"));
+            assert!(crate::project_ownership::owned_unchanged(
+                &crate::ProjectPaths::from_root(temp.path()),
+                &spec.path
+            )
+            .unwrap());
             spec.path = "../outside.json".into();
             assert!(write(temp.path(), &spec, "bad").is_err());
         }

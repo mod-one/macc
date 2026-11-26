@@ -195,6 +195,7 @@ pub(super) async fn intervene(
         config.retain_repair_branches,
     )?;
     report.worktree = Some(worktree.clone());
+    agent.prepare_settings(&worktree)?;
     let activity = if report.diagnosis.is_some() {
         "Reusing the recorded diagnosis".to_string()
     } else {

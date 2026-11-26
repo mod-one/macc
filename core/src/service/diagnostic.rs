@@ -152,6 +152,21 @@ mod tests {
     }
 
     #[test]
+    fn terminal_queue_block_supersedes_an_earlier_tool_failure() {
+        let earlier = event("2026-11-26T15:48:00Z", "tool execution failed");
+        for kind in ["command_end", "prd_queue_stopped"] {
+            let mut terminal = event(
+                "2026-11-26T16:23:21Z",
+                "review precheck failed: ?? user-file",
+            );
+            terminal.event_type = kind.into();
+            terminal.status = "blocked".into();
+            let report = report_from_events(&[earlier.clone(), terminal], None).unwrap();
+            assert_eq!(report.message, "review precheck failed: ?? user-file");
+        }
+    }
+
+    #[test]
     fn scoped_analysis_never_attributes_an_older_failure() {
         let events = vec![event("2026-08-29T18:00:00Z", "old coordinator run failed")];
         let since = DateTime::parse_from_rfc3339("2026-08-30T00:48:59Z")
@@ -352,5 +367,6 @@ pub fn is_blocking_failure_event(event: &str, status: &str, severity: &str) -> b
         && (matches!(
             event,
             "command_error" | "task_blocked" | "failed" | "phase_result"
-        ) || matches!(status, "failed" | "error"))
+        ) || matches!(status, "failed" | "error")
+            || (status == "blocked" && matches!(event, "command_end" | "prd_queue_stopped")))
 }

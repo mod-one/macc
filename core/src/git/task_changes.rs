@@ -65,6 +65,43 @@ fn apply_paths<'a>(
     Ok(())
 }
 
+/// Only an untracked file with unchanged, checkout-local creation evidence can
+/// be present during review. Staged or tracked edits always need inspection.
+pub(crate) fn review_worktree_change(root: &Path) -> Result<Option<String>> {
+    let status = checked(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--no-renames",
+            "--untracked-files=all",
+            "-z",
+        ],
+    )?;
+    let paths = ProjectPaths::from_root(root);
+    let mut inventory = None;
+    for entry in status.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+        if let Some(name) = entry
+            .strip_prefix(b"?? ")
+            .and_then(|s| std::str::from_utf8(s).ok())
+        {
+            if inventory.is_none() {
+                inventory = Some(project_ownership::read(&paths)?);
+            }
+            if inventory
+                .as_ref()
+                .is_some_and(|i| i.owns_unchanged(&paths, name))
+            {
+                continue;
+            }
+        }
+        return Ok(Some(
+            String::from_utf8_lossy(entry).escape_debug().to_string(),
+        ));
+    }
+    Ok(None)
+}
+
 /// Keep existing tracked files editable. Use exact paths, including inside user directories.
 pub fn stage_task_changes(root: &Path) -> Result<bool> {
     if checked(root, &["rev-parse", "--show-prefix"])? != b"\n" {

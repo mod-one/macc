@@ -69,6 +69,16 @@ fn review_terminal_event_and_evidence_agree_after_postchecks() {
             "changes_requested",
             "info",
         ),
+        (
+            "echo changed > '.tool/generated config'; echo 'REVIEW_VERDICT: OK'",
+            "validation_failed",
+            "blocking",
+        ),
+        (
+            "git add '.tool/generated config'; echo 'REVIEW_VERDICT: OK'",
+            "validation_failed",
+            "blocking",
+        ),
         ("echo 'REVIEW_VERDICT: OK'", "validated", "info"),
     ] {
         let tmp = tempfile::tempdir().unwrap();
@@ -90,6 +100,15 @@ fn review_terminal_event_and_evidence_agree_after_postchecks() {
         git(&["commit", "-qm", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
         git(&["commit", "--allow-empty", "-qm", "implementation"]);
+        let relative = ".tool/generated config";
+        crate::write_if_changed(
+            &crate::ProjectPaths::from_root(root),
+            relative,
+            &root.join(relative),
+            b"generated",
+            |_| Ok(()),
+        )
+        .unwrap();
         let ipc = crate::coordinator::ipc::performer_ipc_addr_path_pub(root);
         fs::create_dir_all(ipc.parent().unwrap()).unwrap();
         fs::write(ipc, "unused-fixture-address").unwrap();

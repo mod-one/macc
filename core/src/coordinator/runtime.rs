@@ -1053,10 +1053,6 @@ pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
     None
 }
 
-fn git_status_clean(worktree: &Path) -> Result<bool> {
-    Ok(git::status_porcelain_v1(worktree, true)?.is_empty())
-}
-
 fn git_head_commit(worktree: &Path) -> Result<String> {
     git::head_commit(worktree)
 }
@@ -1098,10 +1094,9 @@ pub(crate) fn review_candidate_head(task: &Task, worktree: &Path) -> Result<Stri
         ));
     }
     let base_branch = task.base_branch("master");
-    let clean_before = git_status_clean(worktree)?;
-    if !clean_before {
+    if let Some(change) = git::review_worktree_change(worktree)? {
         return Err(MaccError::Validation(format!(
-            "review precheck failed for task {}: worktree not clean before review",
+            "review precheck failed for task {}: worktree not clean before review: {change}",
             task_id
         )));
     }
@@ -1140,10 +1135,9 @@ pub fn run_review_phase<E: PhaseExecutor>(
     };
     // A review is read-only. Unexpected files are evidence to preserve, not
     // proof that deleting them is safe; fail the postcheck without cleaning.
-    let clean_after = git_status_clean(worktree)?;
-    if !clean_after {
+    if let Some(change) = git::review_worktree_change(worktree)? {
         return Ok(Err(format!(
-            "review postcheck failed for task {}: worktree not clean after review",
+            "review postcheck failed for task {}: worktree not clean after review: {change}",
             task_id
         )));
     }

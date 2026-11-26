@@ -104,16 +104,29 @@ impl Agent {
             timeout: Duration::from_secs(config.intervention_timeout_seconds.max(1)),
         })
     }
+    /// Materialize file-only settings before read-only phase snapshots are taken.
+    pub(super) fn prepare_settings(&self, cwd: &Path) -> Result<()> {
+        for (placeholder, spec, value) in [
+            ("{model}", &self.performer.model_config, &self.model),
+            ("{effort}", &self.performer.effort_config, &self.effort),
+        ] {
+            if let Some(spec) = spec {
+                if !self
+                    .performer
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains(placeholder))
+                {
+                    macc_core::supervisor::tool_settings::write(cwd, spec, value)?;
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn run(&self, cwd: &Path, prompt: &str, log_dir: &Path, phase: &str) -> Result<()> {
         std::fs::create_dir_all(log_dir).map_err(|e| io(log_dir, e))?;
         std::fs::write(log_dir.join(format!("{phase}-prompt.txt")), prompt)
             .map_err(|e| io(log_dir, e))?;
-        if let Some(spec) = &self.performer.model_config {
-            macc_core::supervisor::tool_settings::write(cwd, spec, &self.model)?;
-        }
-        if let Some(spec) = &self.performer.effort_config {
-            macc_core::supervisor::tool_settings::write(cwd, spec, &self.effort)?;
-        }
         let mut cmd = tokio::process::Command::new(&self.performer.command);
         cmd.env_remove("MACC_WEB_ACCESS_TOKEN");
         cmd.args(render_args(
@@ -322,6 +335,28 @@ performer:
             ("override", "low")
         );
     }
+    #[test]
+    fn argument_overrides_do_not_create_project_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut canonical = CanonicalConfig::default();
+        canonical.tools.enabled = vec!["codex".into()];
+        let config = SupervisorConfig {
+            tool: Some("codex".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let agent = Agent::resolve(temp.path(), &canonical, &config).unwrap();
+        let setting = temp
+            .path()
+            .join(&agent.performer.effort_config.as_ref().unwrap().path);
+        agent.prepare_settings(temp.path()).unwrap();
+        assert!(!setting.exists());
+        std::fs::create_dir_all(setting.parent().unwrap()).unwrap();
+        std::fs::write(&setting, b"# personal").unwrap();
+        agent.prepare_settings(temp.path()).unwrap();
+        assert_eq!(std::fs::read(setting).unwrap(), b"# personal");
+    }
+
     #[test]
     fn codex_arguments_preserve_exec_yolo_and_effort() {
         let args = [

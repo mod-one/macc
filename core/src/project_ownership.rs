@@ -65,11 +65,16 @@ pub(crate) fn digest(path: &Path) -> Result<String> {
     ))
 }
 pub(crate) fn owned_unchanged(paths: &ProjectPaths, path: &str) -> Result<bool> {
-    let inventory = read(paths)?;
-    Ok(!inventory.protected.contains(path)
-        && inventory.files.get(path).is_some_and(|expected| {
-            digest(&paths.root.join(path)).is_ok_and(|actual| &actual == expected)
-        }))
+    Ok(read(paths)?.owns_unchanged(paths, path))
+}
+
+impl Inventory {
+    pub(crate) fn owns_unchanged(&self, paths: &ProjectPaths, path: &str) -> bool {
+        !self.protected.contains(path)
+            && self.files.get(path).is_some_and(|expected| {
+                digest(&paths.root.join(path)).is_ok_and(|actual| &actual == expected)
+            })
+    }
 }
 
 /// Capture before parent creation, then record only successful MACC creations/updates.
@@ -256,11 +261,7 @@ pub fn unowned_ignored_files(worktree: &Path) -> Result<Vec<String>> {
         if name.starts_with(".macc/") {
             continue;
         }
-        if inventory.protected.contains(&name)
-            || !inventory.files.get(&name).is_some_and(|hash| {
-                digest(&worktree.join(&name)).is_ok_and(|actual| &actual == hash)
-            })
-        {
+        if !inventory.owns_unchanged(&paths, &name) {
             unowned.push(name);
         }
     }
