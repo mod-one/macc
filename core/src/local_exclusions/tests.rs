@@ -531,3 +531,36 @@ fn task_delivery_preserves_user_files_and_excludes_only_proven_additions() {
         b"generated"
     );
 }
+
+#[test]
+fn task_staging_succeeds_beside_ignored_generated_directories() {
+    let (_tmp, paths) = fixture();
+    let root = &paths.root;
+    fs::create_dir(root.join(".codex")).unwrap();
+    fs::write(root.join(".codex/config.toml"), "user").unwrap();
+    fs::write(root.join("obsolete"), "remove").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "base"]);
+    deploy(&paths, &[".codex/hooks/hook", ".codex/rules/rule"]);
+    assert!(ignored(&paths, ".codex/hooks/hook"));
+    assert!(ignored(&paths, ".codex/rules/rule"));
+    git(root, &["add", "-N", "-f", ".codex/rules/rule"]);
+    fs::write(root.join(".codex/config.toml"), "updated").unwrap();
+    fs::remove_file(root.join("obsolete")).unwrap();
+    fs::write(root.join("test[1]"), "delivery").unwrap();
+    fs::write(root.join("README.md"), "already staged").unwrap();
+    git(root, &["add", "README.md"]);
+    let rules = excludes(&paths);
+    assert!(crate::git::stage_task_changes(root).unwrap());
+    let staged = git(root, &["diff", "--cached", "--name-status"]);
+    for entry in [
+        "M\t.codex/config.toml",
+        "D\tobsolete",
+        "A\ttest[1]",
+        "A\tREADME.md",
+    ] {
+        assert!(staged.lines().any(|line| line == entry), "{staged}");
+    }
+    assert!(!staged.contains(".codex/hooks") && !staged.contains(".codex/rules"));
+    assert_eq!(rules, excludes(&paths));
+}

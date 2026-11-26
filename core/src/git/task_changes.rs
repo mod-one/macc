@@ -2,14 +2,20 @@
 use crate::{project_ownership, MaccError, ProjectPaths, Result};
 use std::{
     collections::BTreeSet,
+    io::{Seek, Write},
     path::{Path, PathBuf},
+    process::{Command, Output},
 };
 
 fn checked(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = super::run_git_output(root, args, "prepare task changes")?;
+    checked_output(args[0], output)
+}
+
+fn checked_output(operation: &str, output: Output) -> Result<Vec<u8>> {
     if !output.status.success() {
         return Err(MaccError::Git {
-            operation: format!("git {}", args[0]),
+            operation: format!("git {operation}"),
             message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
@@ -21,6 +27,42 @@ fn owned_files(root: &Path) -> Result<BTreeSet<String>> {
         .files
         .into_keys()
         .collect())
+}
+
+/// Pass exact filenames as bytes, independent of shell syntax or argument limits.
+fn apply_paths<'a>(
+    root: &Path,
+    command: &str,
+    paths: impl Iterator<Item = &'a [u8]>,
+) -> Result<()> {
+    let mut paths = paths.peekable();
+    if paths.peek().is_none() {
+        return Ok(());
+    }
+    let io = |source| MaccError::Io {
+        path: root.display().to_string(),
+        action: format!("prepare git {command} pathspec"),
+        source,
+    };
+    let mut input = std::io::BufWriter::new(tempfile::tempfile().map_err(io)?);
+    for name in paths {
+        input.write_all(name).map_err(io)?;
+        input.write_all(&[0]).map_err(io)?;
+    }
+    input.rewind().map_err(io)?;
+    let output = Command::new("git")
+        .current_dir(root)
+        .args([
+            "--literal-pathspecs",
+            command,
+            "--pathspec-file-nul",
+            "--pathspec-from-file=-",
+        ])
+        .stdin(input.into_inner().map_err(|e| io(e.into_error()))?)
+        .output()
+        .map_err(io)?;
+    checked_output(command, output)?;
+    Ok(())
 }
 
 /// Keep existing tracked files editable. Use exact paths, including inside user directories.
@@ -40,30 +82,27 @@ pub fn stage_task_changes(root: &Path) -> Result<bool> {
             private.remove(name);
         }
     }
-    let exclusions: Vec<_> = private
-        .iter()
-        .map(|p| format!(":(top,exclude,literal){p}"))
-        .collect();
-    let mut add = vec!["add", "-A", "--", "."];
-    add.extend(exclusions.iter().map(String::as_str));
-    checked(root, &add)?;
-    // An AI or an interrupted attempt may already have staged a private addition.
+    let is_private = |name: &[u8]| std::str::from_utf8(name).is_ok_and(|p| private.contains(p));
+    // Include intent-to-add entries, which a cached diff can omit.
     if !private.is_empty() {
-        let staged = checked(
+        let index = checked(root, &["ls-files", "--cached", "-z"])?;
+        apply_paths(
             root,
-            &["diff", "--cached", "--name-only", "--no-renames", "-z"],
-        )?;
-        let mut reset = vec!["--literal-pathspecs", "reset", "-q", "--"];
-        reset.extend(
-            staged
+            "reset",
+            index
                 .split(|b| *b == 0)
-                .filter_map(|s| std::str::from_utf8(s).ok())
-                .filter(|p| private.contains(*p)),
-        );
-        if reset.len() > 4 {
-            checked(root, &reset)?;
-        }
+                .filter(|name| !name.is_empty() && is_private(name)),
+        )?;
     }
+    checked(root, &["add", "-u", "--", "."])?;
+    let candidates = checked(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    apply_paths(
+        root,
+        "add",
+        candidates
+            .split(|b| *b == 0)
+            .filter(|name| !name.is_empty() && !is_private(name)),
+    )?;
     Ok(!checked(root, &["diff", "--cached", "--name-only", "-z"])?.is_empty())
 }
 
