@@ -518,6 +518,24 @@ pub async fn run(
     result
 }
 
+fn retain_on_operator_stop(root: &Path, reason: Option<&str>) -> Result<bool> {
+    let mut progress = load(root)?;
+    let reason = reason.unwrap_or("Coordinator stopped by operator.");
+    progress.status = "stopped_by_user".into();
+    progress.reason = Some(reason.into());
+    save(root, &progress)?;
+    crate::coordinator::helpers::append_coordinator_event_with_severity(
+        root,
+        "prd_queue_stopped",
+        "-",
+        "run",
+        "stopped_by_user",
+        reason,
+        "info",
+    )?;
+    Ok(false)
+}
+
 async fn run_queue(
     root: &Path,
     canonical: &crate::config::CanonicalConfig,
@@ -585,28 +603,23 @@ async fn run_queue(
         )
         .await;
         let outcome = result.and_then(|_| {
+            let run = storage.get_coordinator_run(&run_id)?;
+            match run.as_ref() {
+                Some(run) if run.status == "stopped_by_user" => {
+                    return retain_on_operator_stop(root, run.stop_reason.as_deref());
+                }
+                Some(run) if run.status == "success" => {}
+                _ => return Err(invalid("PRD run did not finish successfully; the remaining queue is preserved.")),
+            }
+            if storage.get_coordinator_control()?.is_some_and(|control| control.mode != "running") {
+                return retain_on_operator_stop(root, None);
+            }
             // Graph projections can legitimately change this entry during a run.
             // Only the durable controller updates the persisted queue fingerprint.
             let live_progress=load(root)?;
             let entry=if crate::coordinator::decisions::policy(root)?.enabled { live_progress.entries.iter().find(|e|e.path==entry.path).unwrap_or(&entry) } else { &entry };
             if inspect(&root.join(&entry.path))?.0.fingerprint != entry.fingerprint {
                 return Err(invalid(format!("PRD changed during execution: {}; review and reset queue progress before continuing", entry.path)));
-            }
-            if storage
-                .get_coordinator_run(&run_id)?
-                .is_none_or(|run| run.status != "success")
-            {
-                return Err(invalid(
-                    "PRD run did not finish successfully; the remaining queue is preserved.",
-                ));
-            }
-            if storage
-                .get_coordinator_control()?
-                .is_some_and(|control| control.mode != "running")
-            {
-                return Err(invalid(
-                    "PRD queue interrupted by coordinator stop; next PRD was not started.",
-                ));
             }
             let snapshot = storage.load_snapshot()?;
             let incomplete = incomplete_tasks(&entry, &snapshot.registry);
@@ -616,7 +629,7 @@ async fn run_queue(
                 crate::session_store::checkpoints::recovery::maintain(root)?;
                 Ok(true)
             } else {
-                if budget::pause(root, &mut progress, storage.get_coordinator_run(&run_id)?.as_ref(), incomplete.len())? {
+                if budget::pause(root, &mut progress, run.as_ref(), incomplete.len())? {
                     return Ok(false);
                 }
                 let reasons: Vec<_> = incomplete.iter().map(|id| {

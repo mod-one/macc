@@ -298,7 +298,7 @@ pub fn coordinator_poll_managed_command_state(
         } => {
             if success {
                 let finish_reason = if command == "run" {
-                    read_dispatch_limit_reason(paths, &started_at)
+                    read_run_finish_reason(paths, &started_at)
                 } else {
                     None
                 };
@@ -641,10 +641,8 @@ fn pid_is_alive(pid: i32) -> bool {
     crate::process_ownership::process_identity(pid.into()).is_some()
 }
 
-/// Check whether the most recent coordinator run ended because the dispatch
-/// limit was reached. Returns a user-friendly message if so, or `None` for
-/// a normal full-completion.
-fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<String> {
+/// Explain an intentional stop of the managed run to its observing client.
+fn read_run_finish_reason(paths: &ProjectPaths, started_at: &str) -> Option<String> {
     use crate::coordinator_storage::{
         CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
     };
@@ -659,6 +657,11 @@ fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .zip(chrono::DateTime::parse_from_rfc3339(started_at).ok())
             .is_some_and(|(stopped, started)| stopped >= started);
+        if current && run.status == "stopped_by_user" {
+            return run
+                .stop_reason
+                .or_else(|| Some("Coordinator stopped by operator.".into()));
+        }
         if current
             && run.status == "success"
             && run.stop_reason.as_deref() == Some("dispatch limit reached")
