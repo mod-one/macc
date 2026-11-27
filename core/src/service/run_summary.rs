@@ -210,6 +210,9 @@ fn blocked_root_for_run<'a>(
     run: &CoordinatorRun,
     waits: &DecisionWaits<'a>,
 ) -> Option<&'a Task> {
+    if run.status == "stopped_by_user" {
+        return None;
+    }
     let terminal = matches!(run.status.as_str(), "blocked" | "failed" | "crashed");
     registry
         .tasks
@@ -722,6 +725,33 @@ mod tests {
             .expect("latest run");
         assert_eq!(summary.headline, "Coordinator completed successfully.");
         assert_eq!(summary.task_id, None);
+    }
+
+    #[test]
+    fn operator_drain_is_not_attributed_to_a_failed_task_in_the_same_run() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(root.path());
+        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        let reason = "Drain complete. Active work has finished.";
+        sqlite
+            .upsert_coordinator_run(&run(
+                "current",
+                "2026-11-26T20:42:09Z",
+                "stopped_by_user",
+                reason,
+            ))
+            .unwrap();
+        let registry = TaskRegistry::from_value(&json!({"tasks": [{
+            "id": "PERMS", "state": "blocked",
+            "task_runtime": {"run_id": "current", "last_error_message": "tool execution failed"}
+        }]}))
+        .unwrap();
+        let summary = load_latest_run_summary(&sqlite, &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.cause, reason);
+        assert_eq!(summary.task_id, None);
+        assert_eq!(summary.headline, "Coordinator was stopped by the user.");
     }
 
     #[test]

@@ -2747,24 +2747,26 @@ pub(crate) async fn run_single_prd_control_plane(
     if let Some(mut job) = backend.run_state.phase_job.take() {
         job.cancel_and_wait().await;
     }
-    let mut is_clean_exit = false;
-    let mut final_status = "success".to_string();
     let is_terminal_blocked = matches!(
         &run_result,
         Err(MaccError::Validation(message))
             if message.starts_with("Coordinator cannot continue:")
     );
-    if let Err(MaccError::Validation(ref msg)) = run_result {
-        if msg == "draining complete"
-            || msg == "graceful stop complete"
-            || msg == "force stopped by operator"
-        {
-            is_clean_exit = true;
-            final_status = "stopped_by_user".to_string();
-        }
-    }
-
-    let run_result = if is_clean_exit { Ok(()) } else { run_result };
+    let operator_stop = match &run_result {
+        Err(MaccError::Validation(message)) => match message.as_str() {
+            "draining complete" => Some("Drain complete. Active work has finished."),
+            "graceful stop complete" => Some("Graceful stop complete."),
+            "force stopped by operator" => Some("Coordinator force-stopped by operator."),
+            _ => None,
+        },
+        Ok(()) if *shutdown_rx.borrow() => Some("Coordinator stopped by operator signal."),
+        _ => None,
+    };
+    let run_result = if operator_stop.is_some() {
+        Ok(())
+    } else {
+        run_result
+    };
     let pause_state = crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
         .ok()
         .flatten();
@@ -2773,17 +2775,12 @@ pub(crate) async fn run_single_prd_control_plane(
         "blocked"
     } else if run_result.is_err() {
         "failed"
+    } else if operator_stop.is_some() {
+        "stopped_by_user"
+    } else if pause_state.is_some() {
+        "paused"
     } else {
-        let is_shutdown = *shutdown_rx.borrow();
-        if is_shutdown {
-            "stopped_by_user"
-        } else if is_clean_exit {
-            &final_status
-        } else if pause_state.is_some() {
-            "paused"
-        } else {
-            "success"
-        }
+        "success"
     };
 
     if let Some(log) = logger {
@@ -2810,37 +2807,22 @@ pub(crate) async fn run_single_prd_control_plane(
         "all tasks completed"
     };
 
-    let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
-        if let Some(mut r) = run_opt {
-            let stopped_by_signal = *shutdown_rx.borrow();
-            r.status = if is_terminal_blocked {
-                "blocked".to_string()
-            } else if is_clean_exit {
-                final_status.clone()
-            } else if run_result.is_err() {
-                "failed".to_string()
-            } else if stopped_by_signal {
-                "stopped_by_user".to_string()
-            } else if pause_state.is_some() {
-                "paused".to_string()
-            } else {
-                "success".to_string()
-            };
-            r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
-            if is_terminal_blocked || (!is_clean_exit && run_result.is_err()) {
-                r.stop_reason = run_result.as_ref().err().map(ToString::to_string);
-            } else if is_clean_exit {
-                r.stop_reason = Some(final_status.clone());
-            } else if let Some(pause) = pause_state.as_ref() {
-                r.stop_reason = Some(pause.reason.clone());
-            } else {
-                // Normal completion (exit 0): persist the human-readable reason so
-                // it is not lost the way it previously was.
-                r.stop_reason = Some(normal_stop_reason.to_string());
-            }
-            let _ = sqlite.upsert_coordinator_run(&r);
+    if let Some(mut r) = sqlite.get_coordinator_run(&run_id)? {
+        r.status = result_label.to_string();
+        r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
+        if let Err(err) = &run_result {
+            r.stop_reason = Some(err.to_string());
+        } else if let Some(reason) = operator_stop {
+            r.stop_reason = Some(reason.into());
+        } else if let Some(pause) = pause_state.as_ref() {
+            r.stop_reason = Some(pause.reason.clone());
+        } else {
+            // Normal completion (exit 0): persist the human-readable reason so
+            // it is not lost the way it previously was.
+            r.stop_reason = Some(normal_stop_reason.to_string());
         }
-    });
+        sqlite.upsert_coordinator_run(&r)?;
+    }
 
     if run_result.is_err() {
         if let Err(err) = &run_result {
@@ -2862,7 +2844,19 @@ pub(crate) async fn run_single_prd_control_plane(
         return run_result;
     }
 
-    let _ = crate::coordinator::helpers::append_coordinator_run_complete_event(repo_root);
+    if let Some(reason) = operator_stop {
+        crate::coordinator::helpers::append_coordinator_event_with_severity(
+            repo_root,
+            "command_end",
+            "-",
+            "run",
+            result_label,
+            reason,
+            "info",
+        )?;
+    } else {
+        let _ = crate::coordinator::helpers::append_coordinator_run_complete_event(repo_root);
+    }
     Ok(())
 }
 

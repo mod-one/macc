@@ -21,8 +21,8 @@ pub(super) fn finish(root: &Path, logger: Option<&dyn CoordinatorLog>, result: &
             (status, error.to_string())
         }
         Ok(()) => match progress.as_ref().map(|p| p.status.as_str()) {
-            Some("paused") => (
-                "paused",
+            Some(status @ ("paused" | "stopped_by_user")) => (
+                status,
                 progress
                     .as_ref()
                     .and_then(|p| p.reason.clone())
@@ -99,6 +99,44 @@ mod tests {
         assert!(lines[0].contains("- result: blocked\n"));
         assert!(lines[0].contains("exit_reason: Validation error: PRD changed"));
         assert!(!lines[0].contains("Dispatch limit reached"));
+    }
+
+    #[test]
+    fn operator_drain_retains_queue_and_emits_a_nonblocking_terminal_result() {
+        use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
+        let root = tempfile::tempdir().unwrap();
+        let entry = Entry {
+            path: "active.json".into(),
+            fingerprint: "current".into(),
+            task_ids: vec!["A".into()],
+        };
+        let progress = Progress {
+            entries: vec![entry.clone(), entry],
+            next: 1,
+            status: "running".into(),
+            reason: None,
+        };
+        save(root.path(), &progress).unwrap();
+        let reason = "Drain complete. Active work has finished.";
+        assert!(!retain_on_operator_stop(root.path(), Some(reason)).unwrap());
+        let saved = load(root.path()).unwrap();
+        assert_eq!(saved.next, progress.next);
+        assert_eq!(saved.entries, progress.entries);
+        assert_eq!(saved.status, "stopped_by_user");
+        let log = Capture::default();
+        finish(root.path(), Some(&log), &Ok(()));
+        assert!(log.0.lock().unwrap()[0].contains(&format!(
+            "- result: stopped_by_user\n- exit_reason: {reason}"
+        )));
+        let paths = crate::ProjectPaths::from_root(root.path());
+        let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        let events = db.load_recent_events(10).unwrap();
+        let stop = events
+            .iter()
+            .find(|e| e.event_type == "prd_queue_stopped")
+            .unwrap();
+        assert_eq!(stop.status, "stopped_by_user");
+        assert_eq!(stop.severity(), Some("info"));
     }
 
     #[tokio::test]
