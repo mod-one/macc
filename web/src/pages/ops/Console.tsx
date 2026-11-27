@@ -530,6 +530,7 @@ const Console: React.FC = () => {
 
   const [tasks, setTasks] = useState<ApiRegistryTask[]>([]);
   const [worktrees, setWorktrees] = useState<ApiWorktree[]>([]);
+  const [resumeMessage, setResumeMessage] = useState<string | null>(null);
   const [ownerErr, setOwnerErr] = useState<string | null>(null);
   const [stopConfirm, setStopConfirm] = useState(false);
   const [workerFilter, setWorkerFilter] = useState<'active' | 'errors' | 'all'>('active');
@@ -564,7 +565,9 @@ const Console: React.FC = () => {
 
   const handleAction = async (action: ApiCoordinatorAction) => {
     try {
-      await runAction(action);
+      setResumeMessage(null);
+      const result = await runAction(action);
+      setResumeMessage(result.resume_message ?? null);
     } catch (err) {
       if (err instanceof ApiClientError && err.status === 403) {
         setOwnerErr('Viewer mode — request control, then retry.');
@@ -940,6 +943,7 @@ const Console: React.FC = () => {
           {/* Primary actions */}
           <SectionLabel>Actions</SectionLabel>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            {resumeMessage && <p role="status" style={{ whiteSpace: 'pre-line' }}>{resumeMessage}</p>}
             <ActionBtn label="Run coordinator" variant="primary" onClick={() => handleAction('run')} disabled={isBusy || !isOwner} title={viewerHint} loading={pendingAction === 'run'} />
             <ActionBtn label="Stop" variant="danger" onClick={() => setStopConfirm(true)} disabled={isBusy || !isOwner} title={viewerHint} />
             <ActionBtn label="Resume" onClick={() => handleAction('resume')} disabled={isBusy || !isOwner} title={viewerHint} loading={pendingAction === 'resume'} />

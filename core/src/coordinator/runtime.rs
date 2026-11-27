@@ -1770,9 +1770,14 @@ fn finish_integration(
     branch: &str,
     base: &str,
     suggestion: &str,
+    review_skipped_at_limit: bool,
 ) -> Result<std::result::Result<(), String>> {
     let _decision_fence = crate::coordinator::decisions::publication_lock(repo_root)?;
-    if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, task_id) {
+    if let Err(error) = crate::coordinator::decisions::check_merge_receipt(
+        repo_root,
+        task_id,
+        review_skipped_at_limit,
+    ) {
         return Ok(Err(error.to_string()));
     }
     match integration.publish(branch) {
@@ -1817,7 +1822,12 @@ pub fn merge_task_with_policy_native<FE>(
 where
     FE: FnMut(&str, &str, &str, &str, &str, &str),
 {
-    if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, task_id) {
+    let review_skipped_at_limit = merge_context.review_skipped_at_limit;
+    if let Err(error) = crate::coordinator::decisions::check_merge_receipt(
+        repo_root,
+        task_id,
+        review_skipped_at_limit,
+    ) {
         return Ok(Err(error.to_string()));
     }
     let log_dir = coordinator_log_dir(repo_root);
@@ -1854,7 +1864,24 @@ where
     };
     let merge_dir = integration.path().to_path_buf();
 
-    let candidate = if let Some(review) = &merge_context.retained_review {
+    let skipped_candidate;
+    let candidate = if review_skipped_at_limit
+        && merge_context
+            .retained_review
+            .as_ref()
+            .is_none_or(|review| review.approved_commit.is_none())
+    {
+        let worker = Path::new(&merge_context.worktree_path);
+        skipped_candidate = git::head_commit(worker)?;
+        if git::current_branch_name(worker)? != branch
+            || git::is_dirty(worker)?
+            || git::resolve_ref(repo_root, &format!("refs/heads/{branch}")).as_deref()
+                != Some(&skipped_candidate)
+        {
+            return Ok(Err(format!("Task {task_id} retained checkout does not match a clean merge candidate on {branch}")));
+        }
+        &skipped_candidate
+    } else if let Some(review) = &merge_context.retained_review {
         let head = git::resolve_ref(repo_root, &format!("refs/heads/{branch}"));
         let Some(sha) = review
             .approved_commit
@@ -1876,7 +1903,15 @@ where
         "run local merge",
     )?;
     if merge.status.success() {
-        return finish_integration(&integration, repo_root, task_id, branch, base, &suggestion);
+        return finish_integration(
+            &integration,
+            repo_root,
+            task_id,
+            branch,
+            base,
+            &suggestion,
+            review_skipped_at_limit,
+        );
     }
 
     let merge_output = format!(
@@ -1895,7 +1930,8 @@ where
 
     // Decision-aware repair belongs to the task's fix/review pipeline: a
     // detached hook must not change artifacts after their compliance review.
-    if merge_context.retained_review.is_some()
+    if review_skipped_at_limit
+        || merge_context.retained_review.is_some()
         || crate::coordinator::decisions::policy(repo_root)?.enabled
     {
         integration.reset()?;
@@ -1980,7 +2016,15 @@ where
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(true);
         if hook_accepted && !unresolved && !integration.merge_in_progress() {
-            return finish_integration(&integration, repo_root, task_id, branch, base, &suggestion);
+            return finish_integration(
+                &integration,
+                repo_root,
+                task_id,
+                branch,
+                base,
+                &suggestion,
+                review_skipped_at_limit,
+            );
         }
     }
 

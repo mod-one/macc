@@ -349,7 +349,7 @@ fn sqlite_transition_preserves_approved_dependency_in_the_sync_compatibility_sna
     );
 }
 #[test]
-fn launch_preview_keeps_unfinished_old_work_visible_after_explicit_reset() {
+fn reset_preserves_unfinished_work_and_identifies_its_owner() {
     let (tmp, mut cfg) = fixture();
     let root = tmp.path();
     crate::coordinator::state::coordinator_state_registry_save(
@@ -359,14 +359,14 @@ fn launch_preview_keeps_unfinished_old_work_visible_after_explicit_reset() {
     )
     .unwrap();
     cfg.prd_files = vec!["new.json".into()];
-    reset_locked(root, &cfg).unwrap();
-    let error = readiness::inspect(&crate::ProjectPaths::from_root(root), Some(&cfg))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("unfinished work outside new.json"));
+    let before = read(&state_path(root)).unwrap();
+    let error = reset_locked(root, &cfg).unwrap_err().to_string();
+    assert!(error.contains("PRD 1/1 (old.json)") && error.contains("macc coordinator resume"));
+    assert_eq!(read(&state_path(root)).unwrap(), before);
+    assert!(!root.join(".macc/state/prd-queue-history").exists());
 }
 #[test]
-fn an_undelivered_task_can_keep_its_id_after_explicit_contract_review() {
+fn reset_cannot_replace_an_open_task_contract() {
     let (tmp, cfg) = fixture();
     let root = tmp.path();
     let mut progress = load(root).unwrap();
@@ -385,10 +385,108 @@ fn an_undelivered_task_can_keep_its_id_after_explicit_contract_review() {
     )
     .unwrap();
     assert!(reconcile(root, &cfg).is_err());
-    reset_locked(root, &cfg).unwrap();
-    assert_eq!(
-        load(root).unwrap().entries,
-        validate(root, &cfg.prd_files).unwrap()
-    );
+    assert!(reset_locked(root, &cfg).is_err());
+    assert_eq!(load(root).unwrap().entries, progress.entries);
+}
+
+#[test]
+fn resume_restores_only_the_archived_series_owning_the_registry() {
+    let (tmp, mut cfg) = fixture();
+    let root = tmp.path();
+    cfg.prd_files.push("new.json".into());
+    let entries = validate(root, &cfg.prd_files).unwrap();
+    let mut progress = Progress {
+        entries,
+        next: 0,
+        status: "ready".into(),
+        reason: None,
+    };
+    save(root, &progress).unwrap();
+    let registry = json!({"tasks":[{"id":"NEW","state":"blocked"}]});
+    crate::coordinator::state::coordinator_state_registry_save(
+        root,
+        &BTreeMap::from([("storage-mode".into(), "json".into())]),
+        &registry,
+    )
+    .unwrap();
+    assert!(recovery::align_locked(root, &cfg, None).is_err());
+    let history = root.join(".macc/state/prd-queue-history/old-reset");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::copy(
+        root.join(".macc/state/prd-queue-completed-0.json"),
+        history.join("prd-queue-completed-0.json"),
+    )
+    .unwrap();
+    progress.next = 1;
+    for (file, value) in [
+        ("progress.json", json!(progress)),
+        ("registry.json", registry),
+        ("transition.json", json!({"reason":"explicit reset"})),
+    ] {
+        std::fs::write(history.join(file), value.to_string()).unwrap();
+    }
+    assert!(recovery::align_locked(root, &cfg, Some("old.json")).is_err());
     assert_eq!(load(root).unwrap().next, 0);
+    recovery::align_locked(root, &cfg, None).unwrap();
+    recovery::align_locked(root, &cfg, None).unwrap();
+    assert_eq!(load(root).unwrap().next, 1);
+}
+
+#[test]
+fn manual_merge_requires_integration_and_preserves_pending_gates() {
+    let (tmp, mut cfg) = fixture();
+    let root = tmp.path();
+    let worker = root.join("worker");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.name", "Tester"]);
+    git(root, &["config", "user.email", "test@example.test"]);
+    git(root, &["commit", "--allow-empty", "-m", "init"]);
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "worker-01",
+            worker.to_str().unwrap(),
+        ],
+    );
+    git(
+        &worker,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "feat: deliver OLD",
+            "-m",
+            "[macc:task OLD]",
+        ],
+    );
+    let sha = git(&worker, &["rev-parse", "HEAD"]);
+    cfg.reference_branch = Some("main".into());
+    let args = BTreeMap::from([("storage-mode".into(), "json".into())]);
+    let paths = crate::ProjectPaths::from_root(root);
+    let registry = json!({"tasks":[{"id":"OLD","state":"pr_open","worktree":{"branch":"worker-01","worktree_path":worker},"task_runtime":{"completion_commit_sha":sha}},{"id":"OTHER","state":"pending_approval","gate":{}}]});
+    crate::coordinator::state::coordinator_state_registry_save(root, &args, &registry).unwrap();
+    let mut current = transition::registry(root, &cfg).unwrap();
+    manual_delivery::reconcile(&paths, &mut current, &cfg, &args).unwrap();
+    assert_eq!(current.find_task("OLD").unwrap().state, "pr_open");
+    git(root, &["merge", "--ff-only", "worker-01"]);
+    manual_delivery::reconcile(&paths, &mut current, &cfg, &args).unwrap();
+    let saved = transition::registry(root, &cfg).unwrap();
+    assert!(saved.find_task("OLD").unwrap().is_merged());
+    assert_eq!(saved.find_task("OTHER").unwrap().state, "pending_approval");
 }

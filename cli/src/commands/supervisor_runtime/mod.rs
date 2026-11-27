@@ -124,6 +124,13 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
             matches!(r.status.as_str(), "running" | "draining")
                 && macc_core::coordinator::helpers::is_pid_running(r.pid)
         });
+        if !running && config.auto_restart {
+            match macc_core::prd_queue::recovery::wake_after_decision(&paths.root) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error,"Deferred coordinator resume"),
+            }
+        }
         if watchdog::inspect(
             &paths,
             run.as_ref().filter(|_| running),

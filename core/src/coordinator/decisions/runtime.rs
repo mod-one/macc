@@ -98,19 +98,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
             continue;
         }
         let pending = decisions.iter().find(|d| {
-            matches!(
-                d.status.as_str(),
-                "pending_human"
-                    | "rejected"
-                    | "conflict"
-                    | "investigating"
-                    | "expired"
-                    | "awaiting_effects"
-                    | "conditional"
-                    | "investigating_requested"
-                    | "blocked_external"
-                    | "waiting_dependency"
-            ) && store.decision_applies(&plan, d, &task.id).unwrap_or(false)
+            blocks_task(&d.status) && store.decision_applies(&plan, d, &task.id).unwrap_or(false)
         });
         if let Some(decision) = pending.filter(|d| {
             matches!(
@@ -341,7 +329,31 @@ pub fn prepare_context(
     )?;
     Ok(Some(issued))
 }
+fn blocks_task(status: &str) -> bool {
+    matches!(
+        status,
+        "pending_human"
+            | "rejected"
+            | "conflict"
+            | "investigating"
+            | "expired"
+            | "awaiting_effects"
+            | "conditional"
+            | "investigating_requested"
+            | "blocked_external"
+            | "waiting_dependency"
+    )
+}
+
 pub fn merge_ready(root: &Path, task_id: &str) -> Result<()> {
+    check_merge_receipt(root, task_id, false)
+}
+
+pub(crate) fn check_merge_receipt(
+    root: &Path,
+    task_id: &str,
+    review_skipped_at_limit: bool,
+) -> Result<()> {
     let p = policy(root)?;
     if !p.enabled {
         return Ok(());
@@ -380,10 +392,11 @@ pub fn merge_ready(root: &Path, task_id: &str) -> Result<()> {
     if !receipt.acknowledged {
         return Err(error("Missing model context acknowledgement"));
     }
-    if context
-        .bindings
-        .iter()
-        .any(|b| !b.resolution.as_ref().is_some_and(|r| r.advisory))
+    if !review_skipped_at_limit
+        && context
+            .bindings
+            .iter()
+            .any(|b| !b.resolution.as_ref().is_some_and(|r| r.advisory))
         && phase != "review"
     {
         return Err(error(
@@ -401,7 +414,24 @@ pub fn merge_ready(root: &Path, task_id: &str) -> Result<()> {
             return Err(error("DM_STALE: reviewed artifacts changed; repeat independent review before publication"));
         }
     }
+    if review_skipped_at_limit {
+        for d in store.applicable_decisions(&plan)? {
+            if blocks_task(&d.status) && store.decision_applies(&plan, &d, task_id)? {
+                return Err(error(format!(
+                    "DM_PENDING: Decision {} is {}",
+                    d.id, d.status
+                )));
+            }
+        }
+    }
     for binding in &context.bindings {
+        // A skipped review produces no reviewer evidence. Explicitly failed checks still block.
+        if review_skipped_at_limit
+            && phase != "review"
+            && !receipt.compliance.contains_key(&binding.id)
+        {
+            continue;
+        }
         if !binding.resolution.as_ref().is_some_and(|r| r.advisory)
             && !receipt
                 .compliance

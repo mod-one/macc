@@ -89,7 +89,7 @@ pub(super) fn target(registry: &TaskRegistry, entry: &Entry) -> Result<()> {
         .map(|t| t.id.as_str())
         .collect();
     if !unfinished.is_empty() {
-        return Err(invalid(format!("{CODE}: cannot replace the registry while tasks {} have unfinished work outside {}; resolve that work before launching the new series",unfinished.join(", "),entry.path)));
+        return Err(invalid(format!("{CODE}: cannot replace the registry while tasks {} have unfinished work outside {}; run `macc coordinator resume` to recover its owning PRD before launching a new series",unfinished.join(", "),entry.path)));
     }
     Ok(())
 }

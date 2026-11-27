@@ -46,6 +46,7 @@ pub struct PhaseTransition {
 pub enum AdvancePlan {
     RunPhase(PhaseTransition),
     Merge,
+    MergeAfterReviewLimit,
     ReviewBudgetExhausted,
     Noop,
 }
@@ -189,6 +190,7 @@ pub enum AdvanceTaskAction {
 /// without needing to read the task registry from disk.
 #[derive(Debug, Clone, Default)]
 pub struct MergeTaskContext {
+    pub review_skipped_at_limit: bool,
     pub retained_review: Option<crate::coordinator::model::RetainedReview>,
     pub tool: String,
     pub worktree_path: String,
@@ -439,7 +441,7 @@ pub fn build_advance_actions(
                     transition,
                 });
             }
-            AdvancePlan::Merge => {
+            plan @ (AdvancePlan::Merge | AdvancePlan::MergeAfterReviewLimit) => {
                 let branch = task.branch().unwrap_or_default().to_string();
                 if branch.is_empty() {
                     // Worktree/branch was cleared (e.g. by ghost cleanup) while
@@ -451,6 +453,7 @@ pub fn build_advance_actions(
                 }
                 let base = task.base_branch("master");
                 let merge_context = MergeTaskContext {
+                    review_skipped_at_limit: plan == AdvancePlan::MergeAfterReviewLimit,
                     retained_review: task.task_runtime.retained_review.clone(),
                     tool: task.tool.clone().unwrap_or_default(),
                     worktree_path: task.worktree_path().unwrap_or_default().to_string(),
@@ -1162,6 +1165,7 @@ where
         .unwrap_or_default()
         .to_string();
     let merge_context = MergeTaskContext {
+        review_skipped_at_limit: false,
         retained_review: Some(crate::coordinator::model::RetainedReview {
             approved_commit: Some(delivered_commit.into()),
         }),

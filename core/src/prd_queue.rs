@@ -2,7 +2,9 @@
 mod budget;
 mod identity;
 mod logging;
+mod manual_delivery;
 pub mod readiness;
+pub mod recovery;
 pub mod review;
 pub mod transition;
 mod transition_safety;

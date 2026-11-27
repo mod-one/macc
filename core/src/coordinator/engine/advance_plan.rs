@@ -3,7 +3,7 @@ use super::fsm::{AdvancePlan, PhaseTransition};
 use crate::coordinator::WorkflowState;
 
 /// Resolve every source of a review request before testing the shared limit.
-pub(super) fn plan_task(
+pub(crate) fn plan_task(
     task: &crate::coordinator::model::Task,
     limit: Option<usize>,
     phases: &crate::config::PhasesConfig,
@@ -33,7 +33,7 @@ pub(super) fn plan_task(
                 != Some("review"));
     if matches!(ordinary, AdvancePlan::Merge) && needs_review {
         if limit.is_some_and(|max| used >= max) {
-            return AdvancePlan::ReviewBudgetExhausted;
+            return AdvancePlan::MergeAfterReviewLimit;
         }
         return AdvancePlan::RunPhase(PhaseTransition {
             mode: "review",

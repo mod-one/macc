@@ -841,6 +841,39 @@ fn review_records_negative_evidence_and_publication_is_bound_to_the_reviewed_com
             "{attempt}"
         );
     }
+    let (corrected, _) = store
+        .issue(&current, "A", "last-fix", "fix", tmp.path(), &p)
+        .unwrap();
+    store
+        .issued(&plan.id, "last-fix", "fix", &corrected.render(), &p)
+        .unwrap();
+    reg.find_task_mut("A").unwrap().task_runtime.extra.insert(
+        "decision_context".into(),
+        json!({"attempt_id":"last-fix","phase":"fix"}),
+    );
+    crate::coordinator::state::coordinator_state_registry_save(
+        tmp.path(),
+        &BTreeMap::new(),
+        &reg.to_value().unwrap(),
+    )
+    .unwrap();
+    let ack = format!("MACC_DECISION_ACK: {}", corrected.context_digest);
+    store
+        .complete(&plan.id, "last-fix", "fix", &ack, &p)
+        .unwrap();
+    assert!(merge_ready(tmp.path(), "A").is_err());
+    check_merge_receipt(tmp.path(), "A", true).unwrap();
+    let failed_check = format!(
+        "{ack}\nMACC_DECISION_COMPLIANCE: {}",
+        json!({
+            d.id.clone(): {"status":"fail","evidence":"Verification failed on corrected source"}
+        })
+    );
+    store
+        .complete(&plan.id, "last-fix", "fix", &failed_check, &p)
+        .unwrap();
+    assert!(check_merge_receipt(tmp.path(), "A", true).is_err());
+
     let (fresh, _) = store
         .issue(&current, "A", "fresh-review", "review", tmp.path(), &p)
         .unwrap();
@@ -1744,3 +1777,82 @@ mod workflows;
 
 #[path = "tests_interaction.rs"]
 mod interaction_tests;
+
+#[test]
+fn resume_shows_merged_code_and_open_decision_after_queue_reset() {
+    let (tmp, mut store, plan, _, policy) = fixture();
+    let root = tmp.path();
+    let paths = crate::ProjectPaths::from_root(root);
+    let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
+    let cfg = config.automation.coordinator.as_mut().unwrap();
+    cfg.storage_mode = Some("json".into());
+    cfg.prd_files = vec!["first.json".into(), "prd.json".into()];
+    let cfg = cfg.clone();
+    std::fs::write(&paths.config_path, config.to_yaml().unwrap()).unwrap();
+    std::fs::write(root.join("first.json"), r#"{"tasks":[{"id":"FIRST"}]}"#).unwrap();
+    let decision = store
+        .submit(&plan, question("Windows/NVDA"), "agent:A", "agent", &policy)
+        .unwrap();
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "feat: implementation",
+            "-m",
+            "[macc:task A]",
+        ],
+    );
+    git(root, &["branch", "worker"]);
+    let sha = git(root, &["rev-parse", "HEAD"]);
+    let registry = json!({"tasks":[{"id":"A","state":"blocked","worktree":{"branch":"worker"},"task_runtime":{"completion_commit_sha":sha}},{"id":"B","state":"blocked","dependencies":["A"]},{"id":"C","state":"merged"}]});
+    crate::coordinator::state::coordinator_state_registry_save(
+        root,
+        &BTreeMap::from([("storage-mode".into(), "json".into())]),
+        &registry,
+    )
+    .unwrap();
+    let mut progress = crate::prd_queue::Progress {
+        entries: crate::prd_queue::validate(root, &cfg.prd_files).unwrap(),
+        next: 1,
+        status: "blocked".into(),
+        reason: None,
+    };
+    let hist = root.join(".macc/state/prd-queue-history/reset");
+    std::fs::create_dir_all(&hist).unwrap();
+    std::fs::write(
+        hist.join("prd-queue-completed-0.json"),
+        json!({"tasks":[{"id":"FIRST","state":"merged"}]}).to_string(),
+    )
+    .unwrap();
+    for (file, value) in [
+        ("transition.json", json!({})),
+        ("progress.json", json!(progress)),
+        ("registry.json", registry),
+    ] {
+        std::fs::write(hist.join(file), value.to_string()).unwrap();
+    }
+    progress.next = 0;
+    crate::prd_queue::save(root, &progress).unwrap();
+    let retained = super::registry(root).unwrap();
+    let error = super::check_unblock_owner(root, retained.find_task("A").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&decision.id) && error.contains("prd.json"),
+        "{error}"
+    );
+    let result = crate::prd_queue::recovery::stopped(&paths, None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.contains("Code integrated into main") && result.contains(&decision.id),
+        "{result}"
+    );
+    assert_eq!(crate::prd_queue::load(root).unwrap().next, 1);
+    assert_eq!(
+        store.decision(&decision.id).unwrap().status,
+        "pending_human"
+    );
+}

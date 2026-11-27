@@ -289,6 +289,7 @@ fn dedicated_scratch_merge_keeps_the_reviewed_performer_commit_unchanged() {
             &super::super::engine::MergeTaskContext {
                 tool: "future".into(),
                 worktree_path: path.to_string_lossy().into(),
+                review_skipped_at_limit: false,
                 retained_review: Some(super::super::model::RetainedReview {
                     approved_commit: Some(sha),
                 }),

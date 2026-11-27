@@ -1913,7 +1913,7 @@ fn pause_overlay_content(
             body.push_str("\n- Press 'd': open Decisions and inspect the failed check\n");
         }
         body.push_str(
-            "\n- Press 'o': open Logs screen\n- Press Esc: close and keep the run stopped\n",
+            "\n- Press 'u': resume retained work\n- Press 'o': open Logs screen\n- Press Esc: close and keep the run stopped\n",
         );
         body.push_str(&format!("\nCommand: {}\n", command_name));
         return (
@@ -1942,7 +1942,7 @@ fn pause_overlay_content(
         (
             "Coordinator Error",
             format!(
-                "Coordinator Paused (blocking error)\n\n{}\n\nTarget:\n- {}\n\nFix the issue in your repo/worktree, then choose:\n\n- Press 'r' or Enter: retry failed phase, then resume run\n- Press 's': skip failed phase (move task to todo), then resume run\n- Press 'u': send manual resume signal (same as `macc coordinator resume`)\n- Press 'o': open Logs screen\n- Press Esc: stop and keep paused state\n- Press 'c': resume run without retry\n\nCommand: {}\n",
+                "Coordinator Paused (blocking error)\n\n{}\n\nTarget:\n- {}\n\nFix the issue in your repo/worktree, then choose:\n\n- Press 'r' or Enter: retry failed phase, then resume run\n- Press 's': skip failed phase (move task to todo), then resume run\n- Press 'u': resume retained work\n- Press 'o': open Logs screen\n- Press Esc: stop and keep paused state\n- Press 'c': resume run without retry\n\nCommand: {}\n",
                 message, retry_target, command_name
             ),
         )

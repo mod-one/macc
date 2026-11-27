@@ -804,10 +804,23 @@ async fn advance_owned(
     }
 
     // --- Emit skipped phase events if phases are disabled ---
+    let max_review_cycles = env_cfg.max_review_cycles.or(cfg.max_review_cycles);
     let mut registry_typed = TaskRegistry::from_value(&registry)?;
     let mut skipped_phases_changed = false;
     for task in &mut registry_typed.tasks {
         use crate::coordinator::WorkflowState;
+        // Earlier versions stopped merge-ready tasks here solely because no review slot remained.
+        if task.workflow_state() == Some(WorkflowState::Blocked)
+            && task.task_runtime.last_error_origin.as_deref() == Some("review_budget")
+            && task.task_runtime.current_phase.as_deref() == Some("review")
+            && max_review_cycles.is_some_and(|max| task.task_runtime.reviews_used() >= max)
+        {
+            task.set_workflow_state(WorkflowState::Queued);
+            task.task_runtime.clear_last_error_details();
+            task.task_runtime.last_error = None;
+            task.touch_state_changed(&now_iso_coordinator());
+            skipped_phases_changed = true;
+        }
         let ws = task.workflow_state().unwrap_or(WorkflowState::Todo);
         if ws != WorkflowState::Todo
             && ws != WorkflowState::Claimed
@@ -834,7 +847,6 @@ async fn advance_owned(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    let max_review_cycles = env_cfg.max_review_cycles.or(cfg.max_review_cycles);
     let mut actions = coordinator_engine::build_advance_actions(
         &registry,
         &active_merge_ids,
@@ -1109,8 +1121,11 @@ async fn advance_owned(
                 base,
                 merge_context,
             } => {
-                if let Err(error) = crate::coordinator::decisions::merge_ready(repo_root, &task_id)
-                {
+                if let Err(error) = crate::coordinator::decisions::check_merge_receipt(
+                    repo_root,
+                    &task_id,
+                    merge_context.review_skipped_at_limit,
+                ) {
                     let mut typed = TaskRegistry::from_value(&registry)?;
                     if let Some(task) = typed.find_task_mut(&task_id) {
                         task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
@@ -1144,6 +1159,16 @@ async fn advance_owned(
                         "- Merge start task={} branch={} base={}",
                         task_id, branch, base
                     ));
+                }
+                if merge_context.review_skipped_at_limit {
+                    append_coordinator_event(
+                        repo_root,
+                        "phase_skipped",
+                        &task_id,
+                        "review",
+                        "skipped",
+                        "Review limit reached; proceeding to merge without another review",
+                    )?;
                 }
                 let repo = repo_root.to_path_buf();
                 let task_for_worker = task_id.clone();

@@ -36,7 +36,60 @@ fn find_pending(
         return Ok(None);
     }
     let (store, plan) = active_plan(root)?;
-    for d in store.applicable_decisions(&plan)? {
+    find_pending_in_plan(&store, &plan, task, owned_intervention_only)
+}
+
+pub(crate) fn check_unblock_owner(
+    root: &Path,
+    task: &crate::coordinator::model::Task,
+) -> crate::Result<()> {
+    if !policy(root)?.enabled {
+        return Ok(());
+    }
+    let Some(store) = Store::inspect_registered(root)? else {
+        return Ok(());
+    };
+    let cfg = crate::load_canonical_config(&crate::ProjectPaths::from_root(root).config_path)?;
+    let cfg = cfg.automation.coordinator.as_ref();
+    let reference = crate::config::CoordinatorConfigResolved::resolve(cfg).reference_branch;
+    let bound = task
+        .task_runtime
+        .extra
+        .get("decision_context")
+        .and_then(|ctx| ctx["plan_id"].as_str());
+    let plans = store.plans()?;
+    let owners: Vec<_> = plans
+        .iter()
+        .filter(|p| {
+            p.reference_branch == reference
+                && bound.is_none_or(|id| id == p.id)
+                && p.graph["tasks"]
+                    .as_array()
+                    .is_some_and(|ts| ts.iter().any(|t| t["id"] == task.id))
+        })
+        .collect();
+    let [plan] = owners.as_slice() else {
+        return Err(error(format!("Cannot identify a unique decision plan for task {}. Matching PRDs: {:?}. Run `macc coordinator resume`.",task.id,owners.iter().map(|p| &p.source).collect::<Vec<_>>())));
+    };
+    if let Some(wait) = find_pending_in_plan(&store, plan, &task.id, false)? {
+        return Err(error(format!("{} in {}. {}. Run `macc coordinator resume` to reconcile progress and inspect the outstanding decision.",task.id,plan.source,wait.reason())));
+    }
+    if crate::prd_queue::current(root, cfg).path != plan.source {
+        return Err(error(format!(
+            "Task {} belongs to {}. Run `macc coordinator resume` to restore the queue position.",
+            task.id, plan.source
+        )));
+    }
+    Ok(())
+}
+
+fn find_pending_in_plan(
+    store: &Store,
+    plan: &Plan,
+    task: &str,
+    owned_intervention_only: bool,
+) -> crate::Result<Option<PendingDecision>> {
+    for d in store.applicable_decisions(plan)? {
         if owned_intervention_only
             && (d.request.task_id != task
                 || !matches!(d.status.as_str(), "blocked_external" | "pending_human")
@@ -54,7 +107,7 @@ fn find_pending(
                 | "conflict"
                 | "waiting_dependency"
                 | "investigating"
-        ) && store.decision_applies(&plan, &d, task)?
+        ) && store.decision_applies(plan, &d, task)?
         {
             return Ok(Some(PendingDecision {
                 id: d.id,

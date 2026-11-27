@@ -391,6 +391,9 @@ pub(crate) fn replace_phase_task(
                 .filter(|current| **current == *expected)
                 .ok_or_else(|| stale_phase_assignment(expected))?;
             *task = next.clone();
+            if expected.state != next.state {
+                registry.recompute_resource_locks(&now);
+            }
             registry.updated_at = Some(now);
             write_registry(path, &registry.to_value()?)
         }

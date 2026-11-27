@@ -1722,7 +1722,9 @@ impl AppState {
             Ok(response) => {
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
-                if let Some(resumed) = response.resumed {
+                if let Some(message) = response.resume_message {
+                    self.set_status(UiStatusLevel::Info, message, None);
+                } else if let Some(resumed) = response.resumed {
                     let message = if resumed {
                         "Resume signal sent to coordinator."
                     } else {

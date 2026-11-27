@@ -90,6 +90,7 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
 pub(super) struct ApiCoordinatorCommandResult {
     pub status: Option<ApiCoordinatorStatus>,
     pub resumed: Option<bool>,
+    pub resume_message: Option<String>,
     pub aggregated_performer_logs: Option<usize>,
     pub runtime_status: Option<String>,
     pub exported_events_path: Option<String>,
@@ -108,6 +109,7 @@ impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
         Self {
             status: result.status.map(ApiCoordinatorStatus::from),
             resumed: result.resumed,
+            resume_message: result.resume_message,
             aggregated_performer_logs: result.aggregated_performer_logs,
             runtime_status: result.runtime_status,
             exported_events_path: result
@@ -411,12 +413,16 @@ pub(super) async fn coordinator_resume_handler(
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let was_paused = engine.get_coordinator_status(&paths)?.paused;
-        engine.coordinator_resume(&paths.root)?;
-        Ok::<_, macc_core::MaccError>(CoordinatorCommandResult {
-            resumed: Some(was_paused),
-            ..CoordinatorCommandResult::default()
-        })
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::ResumePausedRun,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &CoordinatorEnvConfig::default(),
+                logger: None,
+            },
+        )
     })
     .await
     .map_err(|e| ApiError::validation(e.to_string()))??;

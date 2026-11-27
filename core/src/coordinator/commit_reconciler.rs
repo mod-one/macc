@@ -238,10 +238,14 @@ pub fn reconcile(registry: &TaskRegistry, commits: &[GitCommitInfo]) -> Reconcil
     }
 
     for (task_id, (sha, subject)) in &commit_tasks {
-        if registry
-            .find_task(task_id)
-            .is_some_and(|task| task.is_human_approval_gate())
-        {
+        if registry.find_task(task_id).is_some_and(|task| {
+            task.is_human_approval_gate()
+                || (task.has_worktree_attached()
+                    && (task.task_runtime.extra.contains_key("decision_context")
+                        || task.task_runtime.extra.contains_key("decision_wait")
+                        || task.task_runtime.retained_review.is_some()))
+        }) {
+            // A commit in Git cannot certify an assigned task's decision or review receipt.
             continue;
         }
 

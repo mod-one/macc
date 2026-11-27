@@ -18,10 +18,11 @@ outstanding reservations remain charged across restarts to enforce the limit.
 For example, if both reviews request changes, the second correction runs and the
 configured tests run on the corrected source. The task detail shows
 `2/2 reviews used · 2/2 corrections completed · no review verdict for the corrected revision`.
-If the ordinary delivery gates pass, the task can proceed to merge. If governance
-requires a current independent verdict, the task stays blocked with its worktree
-and branch. To authorize another review, increase the limit and retry the
-retained review phase. The previous verdict applies only to the revision reviewed.
+After the last slot, MACC skips any further review request, including a refresh
+after a resumed correction, and queues the merge. A skipped review produces no
+verdict. Pending decisions, failed checks, and Git publication errors can still
+block delivery. Existing stops caused solely by the review limit in the review
+phase are reconsidered on the next coordinator advance.
 
 `task_runtime.review_cycles` counts completed verdicts. `task_runtime.review_usage`
 records slots used, the limit at reservation, corrections completed, and the

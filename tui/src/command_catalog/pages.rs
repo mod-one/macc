@@ -86,7 +86,7 @@ pub(super) fn commands(s: &AppState) -> Vec<Command> {
         }
         Screen::CoordinatorLive => {
             add(C('r'), "Run coordinator", A::Run);
-            add(C('u'), "Resume paused run", A::Resume);
+            add(C('u'), "Resume retained work", A::Resume);
             add(C('t'), "Retry selected task", A::RetryTask);
             add(C('x'), "Stop selected task…", A::StopTask);
             if s.live_supervisor().is_some() && s.selected_live_task().is_none() {

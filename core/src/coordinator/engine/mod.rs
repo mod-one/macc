@@ -1,4 +1,5 @@
 mod advance_plan;
+pub(crate) use advance_plan::plan_task;
 pub mod completion;
 pub mod fsm;
 pub(crate) mod phase_failure;

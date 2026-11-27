@@ -166,7 +166,7 @@ pub(super) fn check_base(root: &Path, base: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn worker_busy(registry: &TaskRegistry, path: &Path) -> bool {
+pub(crate) fn worker_busy(registry: &TaskRegistry, path: &Path) -> bool {
     let registered = registry
         .tasks
         .iter()

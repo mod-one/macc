@@ -229,7 +229,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn restart_or_governed_publication_cannot_replace_a_missing_verdict() {
+    fn governed_review_uses_remaining_slots_then_queues_merge_without_a_verdict() {
         let mut phases = crate::config::PhasesConfig::default();
         phases.review.enabled = false;
         for state in ["testing", "pr_open", "queued"] {
@@ -250,7 +250,7 @@ mod tests {
             };
             assert!(matches!(
                 plan(&task, 1).as_slice(),
-                [AdvanceTaskAction::BlockReviewBudget { .. }]
+                [AdvanceTaskAction::QueueMerge { .. }]
             ));
             assert!(matches!(
                 plan(&task, 2).as_slice(),
@@ -263,7 +263,7 @@ mod tests {
             assert!(reserve(&mut restored, Some(2), 1).is_err());
             assert!(matches!(
                 plan(&restored, 2).as_slice(),
-                [AdvanceTaskAction::BlockReviewBudget { .. }]
+                [AdvanceTaskAction::QueueMerge { .. }]
             ));
             let msg = restored.task_runtime.review_usage.unwrap().summary();
             assert!(

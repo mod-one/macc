@@ -61,6 +61,7 @@ fn add_task_branch(repo: &Path, branch: &str, file: &str, contents: &str) {
 
 fn merge_context() -> MergeTaskContext {
     MergeTaskContext {
+        review_skipped_at_limit: false,
         retained_review: None,
         tool: "test".into(),
         worktree_path: String::new(),
@@ -146,7 +147,7 @@ fn overlapping_operator_work_fails_with_an_actionable_reason() {
         "failure must name the real cause, got: {err}"
     );
     assert!(
-        err.contains("commit or stash"),
+        err.contains("preserve the conflicting files") && err.contains("then resume"),
         "failure should tell the operator what to do, got: {err}"
     );
     assert_eq!(

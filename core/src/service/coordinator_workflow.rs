@@ -222,6 +222,7 @@ pub struct RecoveryReportEntry {
 pub struct CoordinatorCommandResult {
     pub status: Option<CoordinatorStatus>,
     pub resumed: Option<bool>,
+    pub resume_message: Option<String>,
     pub aggregated_performer_logs: Option<usize>,
     pub runtime_status: Option<String>,
     pub exported_events_path: Option<PathBuf>,
@@ -826,6 +827,12 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             coordinator_cleanup(paths, request.logger)?;
         }
         CoordinatorCommand::ResumePausedRun => {
+            if let Some(message) =
+                crate::prd_queue::recovery::stopped(paths, request.env_cfg.prd.as_deref())?
+            {
+                result.resume_message = Some(message);
+                return Ok(result);
+            }
             let was_paused = state_runtime::read_coordinator_pause_file(&paths.root)?.is_some();
             engine.coordinator_resume(&paths.root)?;
             result.resumed = Some(was_paused);
@@ -1194,6 +1201,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
 
+            crate::prd_queue::recovery::cancel_wait(&paths.root)?;
             if drain {
                 let mut active_task_ids = Vec::new();
                 let registry = sqlite.load_registry()?;
@@ -1562,6 +1570,7 @@ pub fn coordinator_run(
 }
 
 pub fn coordinator_stop(paths: &ProjectPaths, reason: &str) -> Result<()> {
+    crate::prd_queue::recovery::cancel_wait(&paths.root)?;
     state_runtime::write_coordinator_pause_file(
         &paths.root,
         "global",

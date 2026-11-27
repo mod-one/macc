@@ -508,6 +508,9 @@ Performers cannot commit without it. Fix this first:\n\
     if let Some(copied) = response.aggregated_performer_logs {
         println!("Aggregated {} performer log file(s).", copied);
     }
+    if let Some(message) = response.resume_message {
+        println!("{message}");
+    }
     if let Some(resumed) = response.resumed {
         if resumed {
             println!("Coordinator resume signal applied.");

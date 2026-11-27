@@ -15,6 +15,12 @@ Automatic replacement requires `completed` progress, a cursor at the end, all pe
 
 Read-only launch/Doctor previews select the proposed task source without accepting or changing queue progress. The native command rechecks under `.macc/state/prd-queue.lock` before importing tasks. An explicit `--prd` selection retains its existing separate behavior.
 
+## Continuing a stopped queue
+
+Run `macc coordinator resume` to continue the current series. A reset refuses while the registry contains unfinished tasks. For an older reset, resume compares the registry with archived queue fingerprints, earlier deliveries and the durable decision plan. If the evidence identifies several PRDs, select a listed candidate with `macc coordinator --prd PATH resume`.
+
+Resume checks manually integrated task commits against the reference branch. An open external check appears alongside the Git result. Supply its result or request a governed deferral in the Inbox. With supervisor automatic restart enabled, MACC records the wait and rechecks it when the answer is recorded. Otherwise, run `macc coordinator resume` again. Dependent tasks become eligible when their prerequisites satisfy delivery.
+
 ## Review and acceptance
 
 ```sh

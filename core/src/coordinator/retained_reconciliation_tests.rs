@@ -152,10 +152,7 @@ fn required_compliance_review_shares_the_two_review_limit() {
                     2
                 );
                 assert!(
-                    matches!(
-                        actions.as_slice(),
-                        [AdvanceTaskAction::BlockReviewBudget { .. }]
-                    ),
+                    matches!(actions.as_slice(), [AdvanceTaskAction::QueueMerge { .. }]),
                     "{actions:?}"
                 );
             } else {
@@ -245,7 +242,7 @@ fn retained_review_uses_the_same_slots_as_an_ordinary_review() {
         .unwrap();
         assert!(matches!(
             actions.as_slice(),
-            [AdvanceTaskAction::BlockReviewBudget { .. }]
+            [AdvanceTaskAction::QueueMerge { .. }]
         ));
         let actions = build_advance_actions(
             &registry,

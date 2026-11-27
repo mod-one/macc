@@ -1772,7 +1772,7 @@ impl CoordinatorEvent {
 /// Check whether a coordinator is running by reading `coordinator.sqlite` via
 /// `SqliteStorage`. Used by the `Engine::readiness_ladder` default method so
 /// the `Engine` facade is the only entry-point for clients.
-fn check_coordinator_running_via_storage(paths: &ProjectPaths) -> bool {
+pub(crate) fn check_coordinator_running_via_storage(paths: &ProjectPaths) -> bool {
     use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let storage = SqliteStorage::read_only(storage_paths);

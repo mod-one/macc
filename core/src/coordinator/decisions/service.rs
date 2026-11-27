@@ -1134,6 +1134,10 @@ impl Store {
         save_plan(&tx, &plan)?;
         event(&tx, &plan.id, "decision.resolved", &decision)?;
         sql(tx.commit())?;
+        drop(_fence);
+        if let Err(error) = crate::prd_queue::recovery::wake_after_decision(&self.root) {
+            tracing::warn!(%error,"Decision recorded; coordinator wake deferred");
+        }
         Ok(decision)
     }
     pub fn revoke(

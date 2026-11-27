@@ -91,6 +91,7 @@ pub(crate) fn apply(
             "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
         )));
     }
+    crate::coordinator::decisions::check_unblock_owner(&paths.root, task)?;
     let scoped_recovery = crate::coordinator::scoped_prd::is_dispatch_failure(task);
     let release_worker = if scoped_recovery {
         let prd =

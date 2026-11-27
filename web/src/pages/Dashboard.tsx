@@ -97,6 +97,7 @@ function formatResultSummary(action: ApiCoordinatorAction, result: ApiCoordinato
   if (typeof result.aggregated_performer_logs === 'number') {
     return `${action} completed. Aggregated ${result.aggregated_performer_logs} performer logs.`;
   }
+  if (result.resume_message) return result.resume_message;
   if (typeof result.resumed === 'boolean') {
     return result.resumed ? 'Coordinator resumed.' : 'Coordinator was already active.';
   }

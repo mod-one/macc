@@ -201,14 +201,32 @@ fn archive(
 
 /// Explicit reset uses the same archive; caller owns the existing queue lock.
 pub fn reset_locked(root: &Path, config: &CoordinatorConfig) -> Result<()> {
-    quiescent(root, config)?;
     let previous = load(root)?;
+    let current = registry(root, config)?;
+    let open: Vec<_> = current
+        .tasks
+        .iter()
+        .filter(|t| !t.satisfies_dependants() && t.state != "abandoned")
+        .collect();
+    if !open.is_empty() {
+        let owner = previous
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| open.iter().all(|task| entry.task_ids.contains(&task.id)));
+        let location = owner
+            .map(|(i, e)| format!("PRD {}/{} ({})", i + 1, previous.entries.len(), e.path))
+            .unwrap_or_else(|| "the current registry".into());
+        return Err(invalid(format!("{CODE}: {} unfinished task(s) in {location}: {}. Queue progress preserved. Continue with `macc coordinator resume`.", open.len(), open.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", "))));
+    }
+    quiescent(root, config)?;
     if !config.prd_files.is_empty() {
         super::identity::check(root, config, &previous, &validate(root, &config.prd_files)?)?;
     }
     if !previous.entries.is_empty() {
         archive(root, &previous, config, "explicit reset")?;
     }
+    super::recovery::cancel_wait(root)?;
     preserve_deliveries(root, config)?;
     // Pin the accepted file fingerprints now. A later edit requires a fresh
     // review instead of silently changing what this acceptance authorized.

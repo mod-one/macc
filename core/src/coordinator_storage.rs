@@ -1579,6 +1579,9 @@ impl SqliteStorage {
         )
         .map_err(sql_err)?;
         self.insert_task_jobs(&tx, next, now)?;
+        if expected.state != next.state {
+            self.recompute_resource_locks(&tx, now)?;
+        }
         tx.execute("UPDATE metadata SET value=json_set(value, '$.updated_at', ?1), updated_at=?1 WHERE key='registry_json'", [now]).map_err(sql_err)?;
         tx.commit().map_err(sql_err)?;
         Ok(true)

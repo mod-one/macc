@@ -198,6 +198,7 @@ fn pause_commands(state: &AppState) -> Vec<Command> {
     ) {
         return rows(vec![
             (k::ch('d'), "Inspect decision / failed check"),
+            (k::ch('u'), "Resume retained work"),
             (k::ch('o'), "Open logs"),
             (k::ESC, "Keep stopped"),
         ]);
@@ -208,7 +209,7 @@ fn pause_commands(state: &AppState) -> Vec<Command> {
         (k::ENTER, "Retry failed phase"),
         (k::ch('s'), "Skip failed phase"),
         (k::ch('o'), "Open logs"),
-        (k::ch('u'), "Resume signal"),
+        (k::ch('u'), "Resume retained work"),
         (k::ch('c'), "Continue"),
         (k::ESC, "Keep stopped"),
     ])

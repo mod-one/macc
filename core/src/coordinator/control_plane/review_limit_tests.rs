@@ -82,24 +82,21 @@ esac
             .unwrap();
         assert!(state.phase_job.is_none());
     }
-    let mut state = CoordinatorRunState::new();
-    advance_tasks_native(root, &env, None, None, 4, &mut state, None)
-        .await
-        .unwrap();
-    let registry = coordinator_state_registry_load(root, &args).unwrap();
-    let task = &registry["tasks"][0];
-    assert_eq!(task["state"], "blocked");
-    assert_eq!(task["worktree"]["branch"], "task");
-    let runtime = &task["task_runtime"];
-    assert_eq!(runtime["review_cycles"], 2);
-    assert_eq!(runtime["review_usage"]["corrections"]["completed"], 2);
-    assert_eq!(runtime["review_usage"]["state"], "corrected");
-    assert_eq!(runtime["last_error_origin"], "review_budget");
-    let reason = runtime["last_error"].as_str().unwrap();
-    assert!(
-        reason.contains("2/2 review slots used") && reason.contains("2/2 corrections completed"),
-        "{reason}"
+    let mut registry = coordinator_state_registry_load(root, &args).unwrap();
+    let task = &mut registry["tasks"][0];
+    assert_eq!(task["task_runtime"]["review_cycles"], 2);
+    assert_eq!(
+        task["task_runtime"]["review_usage"]["corrections"]["completed"],
+        2
     );
+    // Reproduce an existing stop written by the previous coordinator.
+    task["state"] = json!("blocked");
+    task["task_runtime"]["current_phase"] = json!("review");
+    task["task_runtime"]["last_error_origin"] = json!("review_budget");
+    task["task_runtime"]["review_refresh_required"] =
+        json!("Resumed correction requires a fresh independent review");
+    coordinator_state_registry_save(root, &args, &registry).unwrap();
+    // Explicit reviewer retries still enforce the cap on a blocked review.
     let cli_args = ["--retry-task", "A", "--retry-phase", "review"].map(String::from);
     let error = coordinator_retry_phase(
         &crate::engine::MaccEngine::new(crate::tool::ToolRegistry::new()),
@@ -129,7 +126,7 @@ esac
     let raised = CoordinatorEnvConfig {
         max_review_cycles: Some(3),
         phase_runner_max_attempts: Some(4),
-        ..env
+        ..env.clone()
     };
     let engine = crate::engine::MaccEngine::new(crate::tool::ToolRegistry::new());
     let paths = crate::ProjectPaths::from_root(root);
@@ -157,11 +154,36 @@ esac
             .count(),
         1
     );
-    let registry = coordinator_state_registry_load(root, &args).unwrap();
-    let runtime = &registry["tasks"][0]["task_runtime"];
+    let after_retry = coordinator_state_registry_load(root, &args).unwrap();
+    let runtime = &after_retry["tasks"][0]["task_runtime"];
     assert_eq!(runtime["review_usage"]["started"], 3);
     assert_eq!(
         runtime["review_cycles"], 2,
         "a failed invocation produces no verdict"
+    );
+
+    // Restart from the original retained stop and follow the automatic publication path.
+    coordinator_state_registry_save(root, &args, &registry).unwrap();
+    let mut state = CoordinatorRunState::new();
+    advance_tasks_native(root, &env, None, None, 4, &mut state, None)
+        .await
+        .unwrap();
+    assert!(state.active_merge_jobs.contains_key("A"));
+    let corrected = crate::git::head_commit(root).unwrap();
+    state.merge_join_set.join_next().await.unwrap().unwrap();
+    assert_eq!(
+        super::monitor_merge_jobs_native(root, &env, None, &mut state, None)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        coordinator_state_registry_load(root, &args).unwrap()["tasks"][0]["state"],
+        "merged"
+    );
+    git(root, &["merge-base", "--is-ancestor", &corrected, "main"]);
+    assert_eq!(
+        fs::read_to_string(root.join(".macc/invocations")).unwrap(),
+        "review\nfix\nreview\nfix\nretry\n"
     );
 }

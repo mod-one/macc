@@ -265,6 +265,7 @@ export interface ApiToolCooldownEntry {
 export interface ApiCoordinatorCommandResult {
   status?: ApiCoordinatorStatus;
   resumed?: boolean;
+  resume_message?: string;
   aggregated_performer_logs?: number;
   runtime_status?: string;
   exported_events_path?: string;
