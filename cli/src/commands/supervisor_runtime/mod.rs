@@ -126,8 +126,11 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
         });
         if !running && config.auto_restart {
             match macc_core::prd_queue::recovery::wake_after_decision(&paths.root) {
-                Ok(true) => continue,
-                Ok(false) => {}
+                Ok(Some(message)) => {
+                    tracing::info!(%message, "Decision wake");
+                    continue;
+                }
+                Ok(None) => {}
                 Err(error) => tracing::warn!(%error,"Deferred coordinator resume"),
             }
         }

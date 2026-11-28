@@ -1796,7 +1796,25 @@ pub(crate) fn ghost_grace_with_stall(
 
 impl NativeControlPlaneBackend<'_> {
     fn enter_stage(&self, stage: &str) -> Result<()> {
-        crate::coordinator::tick_progress::enter(self.repo_root, self.run_id, self.epoch, stage)
+        use crate::coordinator::tick_progress::{enter, Activity};
+        let activity = self
+            .run_state
+            .phase_job
+            .as_ref()
+            .filter(|job| !job.is_finished())
+            .map(|job| Activity {
+                task: job.task.id.clone(),
+                phase: job.mode.into(),
+                worker: job.task.worktree_path().map(str::to_owned),
+            })
+            .or_else(|| {
+                self.run_state.active_jobs.keys().min().map(|id| Activity {
+                    task: id.clone(),
+                    phase: "dev".into(),
+                    worker: None,
+                })
+            });
+        enter(self.repo_root, self.run_id, self.epoch, stage, activity)
     }
 
     fn effective_ghost_grace_seconds(&self) -> i64 {
@@ -2423,7 +2441,13 @@ pub(crate) async fn run_single_prd_control_plane(
         stop_reason: None,
     };
     sqlite.upsert_coordinator_run(&current_run)?;
-    crate::coordinator::tick_progress::enter(repo_root, &run_id, next_epoch, "startup recovery")?;
+    crate::coordinator::tick_progress::enter(
+        repo_root,
+        &run_id,
+        next_epoch,
+        "startup recovery",
+        None,
+    )?;
 
     let _ = sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
         mode: "running".to_string(),

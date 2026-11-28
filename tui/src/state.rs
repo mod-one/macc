@@ -906,6 +906,23 @@ impl AppState {
         &self,
         root: &macc_core::coordinator::model::TaskRegistry,
     ) -> Result<CoordinatorTaskSnapshot, String> {
+        let activity = self
+            .project_paths
+            .as_ref()
+            .and_then(|p| {
+                macc_core::coordinator::tick_progress::read(&p.root)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|tick| tick.live_activity());
+        self.snapshot_with_activity(root, activity.as_ref())
+    }
+
+    fn snapshot_with_activity(
+        &self,
+        root: &macc_core::coordinator::model::TaskRegistry,
+        activity: Option<&macc_core::coordinator::tick_progress::Activity>,
+    ) -> Result<CoordinatorTaskSnapshot, String> {
         let mut snapshot = CoordinatorTaskSnapshot {
             total: root.tasks.len(),
             todo: 0,
@@ -930,22 +947,30 @@ impl AppState {
                 .unwrap_or_default()
         });
         for task in &root.tasks {
+            let executing = activity.filter(|a| {
+                a.task == task.id
+                    && a.worker
+                        .as_deref()
+                        .is_none_or(|worker| Some(worker) == task.worktree_path())
+                    && !matches!(task.state.as_str(), "blocked" | "merged" | "abandoned")
+            });
             let state = if task.state.is_empty() {
                 "todo".to_string()
             } else {
                 task.state.to_ascii_lowercase()
             };
             let runtime_status = task.task_runtime.status.as_deref().unwrap_or("-");
-            let is_live_active = matches!(
-                state.as_str(),
-                "claimed"
-                    | "in_progress"
-                    | "testing"
-                    | "reviewing"
-                    | "pr_open"
-                    | "changes_requested"
-                    | "queued"
-            ) && !(state == "claimed" && runtime_status == "phase_done");
+            let is_live_active = executing.is_some()
+                || matches!(
+                    state.as_str(),
+                    "claimed"
+                        | "in_progress"
+                        | "testing"
+                        | "reviewing"
+                        | "pr_open"
+                        | "changes_requested"
+                        | "queued"
+                ) && !(state == "claimed" && runtime_status == "phase_done");
 
             let has_blocked_check = state == "blocked" && task.task_runtime.resume_check.is_some();
             if is_live_active || has_blocked_check {
@@ -961,12 +986,16 @@ impl AppState {
                     Utc::now(),
                     model,
                 );
+                if let Some(activity) = executing {
+                    row.phase = activity.phase.clone().into();
+                    row.runtime_status = macc_core::coordinator::RuntimeStatus::Running;
+                }
                 row.effort = effort;
                 snapshot.task_rows.push(row);
             }
             match state.as_str() {
-                "todo" => snapshot.todo += 1,
                 _ if is_live_active => snapshot.active += 1,
+                "todo" => snapshot.todo += 1,
                 "claimed" => {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.
                     // Keep it out of live-active rendering to avoid a misleading "still running" signal.
@@ -7880,6 +7909,40 @@ mod tests {
             .unwrap();
         state.refresh_coordinator_snapshot();
         assert_eq!(state.awaiting_approvals().count(), 1);
+    }
+
+    #[test]
+    fn coordinator_snapshot_counts_a_retained_phase_while_the_registry_is_idle() {
+        let state = AppState::with_engine(Arc::new(NoopEngine::default()));
+        let registry =
+            macc_core::coordinator::model::TaskRegistry::from_value(&serde_json::json!({
+                "tasks": [{"id":"T1", "state":"todo", "task_runtime":{"status":"idle"},
+                           "worktree":{"worktree_path":"/worker-01"}}]
+            }))
+            .unwrap();
+        for phase in ["review", "fix"] {
+            let activity = macc_core::coordinator::tick_progress::Activity {
+                task: "T1".into(),
+                phase: phase.into(),
+                worker: Some("/worker-01".into()),
+            };
+            let snapshot = state
+                .snapshot_with_activity(&registry, Some(&activity))
+                .unwrap();
+            assert_eq!((snapshot.active, snapshot.todo), (1, 0));
+            assert_eq!(
+                snapshot.task_rows[0].runtime_status,
+                macc_core::coordinator::RuntimeStatus::Running
+            );
+            assert_eq!(snapshot.task_rows[0].phase, phase.to_string().into());
+        }
+        assert_eq!(
+            state
+                .snapshot_with_activity(&registry, None)
+                .unwrap()
+                .active,
+            0
+        );
     }
 
     #[test]

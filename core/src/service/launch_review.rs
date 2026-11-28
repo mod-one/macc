@@ -221,6 +221,11 @@ pub fn launch<E: Engine + ?Sized>(
                 std::time::Duration::from_secs(15),
             )?;
         }
+        super::supervisor_launch::remember(
+            paths,
+            canonical.automation.coordinator.as_ref(),
+            decision.supervisor,
+        )?;
         if decision.supervisor {
             engine.coordinator_attach_supervisor(paths)?;
         }

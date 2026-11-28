@@ -48,6 +48,7 @@ mod reconciliation;
 mod runtime;
 mod source_recovery;
 mod waiting;
+pub(crate) use waiting::record_refresh_failure;
 pub(crate) use waiting::{check_unblock_owner, pending_owned_intervention};
 pub use waiting::{
     gate_revision, human_wait_count, pending_for_task, refresh_waits, PendingDecision,

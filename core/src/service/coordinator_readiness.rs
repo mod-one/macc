@@ -45,6 +45,51 @@ pub fn wait(paths: &ProjectPaths, pid: i32, timeout: Duration) -> Result<()> {
     }
 }
 
+/// Observe only events belonging to this launcher's child, within the CLI latency budget.
+pub(crate) fn observe_resume(paths: &ProjectPaths, pid: i32, timeout: Duration) -> Result<String> {
+    let results = paths.macc_dir.join("state/managed-command-results");
+    let ready = results.join(format!("run-{pid}.ready"));
+    let exit = results.join(format!("run-{pid}.exit"));
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(code) = std::fs::read_to_string(&exit) {
+            if code.trim() == "0" {
+                return Ok("Run completed.".into());
+            }
+            return Err(startup_error(
+                paths,
+                pid,
+                &format!("Run stopped (exit {})", code.trim()),
+            ));
+        }
+        let child = std::fs::read_to_string(&ready)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if let Some(active) = crate::coordinator::tick_progress::read(&paths.root)?
+            .filter(|tick| Some(tick.pid) == child)
+            .and_then(|tick| tick.live_activity())
+        {
+            return Ok(format!(
+                "{} · {} phase{}",
+                active.task,
+                active.phase,
+                active.worker.map(|w| format!(" · {w}")).unwrap_or_default()
+            ));
+        }
+        if !crate::coordinator::helpers::is_pid_running(pid.into()) {
+            return Err(startup_error(
+                paths,
+                pid,
+                "Coordinator stopped before task activity could be confirmed",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Ok("Startup in progress; awaiting a task or terminal result.".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn startup_error(paths: &ProjectPaths, pid: i32, reason: &str) -> MaccError {
     use std::io::{Read, Seek, SeekFrom};
     let log = paths
@@ -76,6 +121,38 @@ fn startup_error(paths: &ProjectPaths, pid: i32, reason: &str) -> MaccError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resume_reports_only_activity_from_the_ready_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(temp.path());
+        let results = paths.macc_dir.join("state/managed-command-results");
+        std::fs::create_dir_all(&results).unwrap();
+        let pid = std::process::id() as i32;
+        let activity = crate::coordinator::tick_progress::Activity {
+            task: "T1".into(),
+            phase: "fix".into(),
+            worker: Some("worker-01".into()),
+        };
+        crate::coordinator::tick_progress::enter(temp.path(), "run", 2, "advance", Some(activity))
+            .unwrap();
+        assert!(observe_resume(&paths, pid, Duration::ZERO)
+            .unwrap()
+            .contains("Startup in progress"));
+        std::fs::write(
+            results.join(format!("run-{pid}.ready")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            observe_resume(&paths, pid, Duration::ZERO).unwrap(),
+            "T1 · fix phase · worker-01"
+        );
+        std::fs::write(results.join(format!("run-{pid}.exit")), "3").unwrap();
+        assert!(observe_resume(&paths, pid, Duration::ZERO)
+            .unwrap_err()
+            .to_string()
+            .contains("exit 3"));
+    }
     #[test]
     fn startup_failure_reports_current_run_cause_instead_of_stale_daemon_error() {
         let temp = tempfile::tempdir().unwrap();

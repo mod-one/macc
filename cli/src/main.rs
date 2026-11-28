@@ -1148,8 +1148,10 @@ fn main() {
     if let Err(e) = run_with_engine_provider(cli, provider) {
         // Queue transitions already carry an actionable, multiline diagnostic.
         // Avoid printing that entire diagnostic again through the stderr logger.
-        if !matches!(e, MaccError::PrdPlanDrift { .. })
-            && !concise_apply_errors
+        if !matches!(
+            e,
+            MaccError::PrdPlanDrift { .. } | MaccError::CheckpointWorktreeReview { .. }
+        ) && !concise_apply_errors
             && !e
                 .to_string()
                 .contains(macc_core::prd_queue::transition::CODE)
@@ -1194,6 +1196,7 @@ fn get_exit_code(err: &MaccError) -> i32 {
     match err {
         MaccError::ApplyPreparation { source, .. } => get_exit_code(source),
         MaccError::PrdPlanDrift { .. }
+        | MaccError::CheckpointWorktreeReview { .. }
         | MaccError::Validation(_)
         | MaccError::ConfigRevisionConflict => 1,
         MaccError::NotProcessOwner { .. } => 14,

@@ -233,6 +233,8 @@ mod tests {
             run_id: run.run_id.clone(),
             epoch: 2,
             pid: 42,
+            activity: None,
+            process_identity: None,
             stage: "monitor performers".into(),
             since_ms: Utc::now().timestamp_millis(),
         };

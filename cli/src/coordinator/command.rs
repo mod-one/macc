@@ -170,7 +170,7 @@ pub fn handle(
             return handle_interactive_approval(engine, paths, canonical, coordinator_cfg, &input);
         }
     }
-    let interactive_sync = if input.command_name == "sync" {
+    let interactive_recovery = if matches!(input.command_name.as_str(), "sync" | "resume") {
         let (interactive, rest) = approval_prompt::split_interactive_flags(
             &input.extra_args,
             approval_prompt::stdio_is_terminal(),
@@ -444,13 +444,58 @@ Performers cannot commit without it. Fix this first:\n\
         }
         err
     });
-    let response = match first {
-        Err(MaccError::PrdPlanDrift { plan_id, message }) if interactive_sync => {
-            eprintln!("{message}");
-            crate::commands::decisions::confirm_sync_edits(&paths.root, &plan_id)?;
-            execute()?
+    let mut attempt = first;
+    let response = loop {
+        match attempt {
+            Err(
+                ref err @ MaccError::CheckpointWorktreeReview {
+                    ref id, ref sha, ..
+                },
+            ) if interactive_recovery && command == CoordinatorCommand::ResumePausedRun => {
+                eprintln!("{err}");
+                eprintln!("[d] Inspect Git changes   [c] Keep changes and resume   [Enter] Later");
+                let mut answer = String::new();
+                std::io::stdin()
+                    .read_line(&mut answer)
+                    .map_err(|e| MaccError::Validation(e.to_string()))?;
+                match answer.trim() {
+                    "d" => {
+                        let preview = macc_core::session_store::checkpoints::reconcile(
+                            &paths.root,
+                            id,
+                            None,
+                        )?;
+                        if let Some(worker) = preview["current"]["worktree"].as_str() {
+                            println!(
+                                "{}",
+                                macc_core::git::status_porcelain(std::path::Path::new(worker))?
+                            );
+                        }
+                    }
+                    "c" => {
+                        crate::commands::gate_cli_mutation(&paths.root)?;
+                        macc_core::session_store::checkpoints::reconcile(
+                            &paths.root,
+                            id,
+                            Some(sha),
+                        )?;
+                    }
+                    _ => {
+                        println!("Resume deferred. Work preserved.");
+                        return Ok(());
+                    }
+                }
+                attempt = execute();
+            }
+            Err(MaccError::PrdPlanDrift { plan_id, message })
+                if interactive_recovery && command == CoordinatorCommand::SyncRegistry =>
+            {
+                eprintln!("{message}");
+                crate::commands::decisions::confirm_sync_edits(&paths.root, &plan_id)?;
+                break execute()?;
+            }
+            result => break result?,
         }
-        result => result?,
     };
 
     match &command {
@@ -1511,12 +1556,17 @@ fn launch_coordinator_with_client(
 ) -> Result<()> {
     let phase_overrides = build_phase_overrides_label(input);
 
+    let start = || {
+        let pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
+        macc_core::service::supervisor_launch::remember(paths, coordinator_cfg, input.supervisor)?;
+        if input.supervisor {
+            spawn_attached_supervisor(&paths.root, pid as u32)?;
+        }
+        Ok::<(), MaccError>(())
+    };
     match mode {
         CoordinatorClientMode::Tui => {
-            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
-            if input.supervisor {
-                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
-            }
+            start()?;
             macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorAttach {
                 phase_overrides,
             })
@@ -1533,12 +1583,7 @@ fn launch_coordinator_with_client(
             let url = format!("http://{}:{}/ops/console", host, port);
 
             // Start coordinator as background daemon.
-            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
-
-            // Start supervisor with coordinator child PID (not CLI PID).
-            if input.supervisor {
-                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
-            }
+            start()?;
 
             // Launch web server as a background daemon so the CLI can return.
             if let Err(e) = spawn_web_daemon(&paths.root) {
@@ -1567,10 +1612,7 @@ fn launch_coordinator_with_client(
 
         CoordinatorClientMode::None | CoordinatorClientMode::Interactive => {
             // Start coordinator as background daemon; return immediately.
-            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
-            if input.supervisor {
-                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
-            }
+            start()?;
             Ok(())
         }
     }

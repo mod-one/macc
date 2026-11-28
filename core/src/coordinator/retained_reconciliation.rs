@@ -56,6 +56,8 @@ fn has_interrupted_invocation(task: &Task) -> bool {
     rt.current_phase.as_deref() != Some("merge")
         && rt.extra.contains_key("decision_wait")
         && (rt.last_error_origin.as_deref() == Some("decisions")
+            || (rt.last_error_origin.as_deref() == Some("decision_context_refresh")
+                && rt.extra.contains_key("checkpoint_previous_decision"))
             || (rt.last_error_origin.as_deref() == Some("precondition")
                 && rt.extra.contains_key("suspended_phase")
                 && super::phase_diagnostics::decision_wait_id(task).is_some()))

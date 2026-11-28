@@ -271,6 +271,18 @@ impl From<MaccError> for ApiError {
                 response.body.error.preparation = Some(report);
                 response
             }
+            MaccError::CheckpointWorktreeReview {
+                ref id, ref sha, ..
+            } => ApiError::new(
+                StatusCode::CONFLICT,
+                "checkpoint_worktree_review",
+                "Conflict",
+                err.to_string(),
+                false,
+                Some("Review the retained changes with macc coordinator resume.".into()),
+                Some(serde_json::json!({"checkpoint":id, "expected_sha256":sha})),
+                None,
+            ),
             MaccError::PrdPlanDrift { plan_id, message } => ApiError::new(
                 StatusCode::CONFLICT,
                 "prd_plan_drift",

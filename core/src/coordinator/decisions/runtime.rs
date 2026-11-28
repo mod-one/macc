@@ -215,11 +215,7 @@ pub fn sync(root: &Path, prd: &Path, registry: &mut TaskRegistry) -> Result<()> 
                 )
             {
                 task.task_runtime.extra.remove("native_context_refresh");
-                task.task_runtime.set_last_error_details(
-                    "E903",
-                    "decision_context_refresh",
-                    format!("DM_STALE: native context reconciliation blocked: {error}"),
-                );
+                super::waiting::record_refresh_failure(task, &error);
                 continue;
             }
             task.task_runtime

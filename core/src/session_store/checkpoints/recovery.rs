@@ -423,25 +423,12 @@ fn decision_context_ready(root: &Path, task: &str, apply: bool) -> Result<()> {
     let mut historical_reviews = Vec::new();
     for id in ids {
         let preview = reconcile(root, &id, None)?;
-        for field in [
-            "worktree",
-            "branch",
-            "source_revision",
-            "worktree_dirty_digest",
-            "worktree_content_digest",
-            "source_hashes",
-        ] {
+        let before = &preview["previous"];
+        let after = &preview["current"];
+        for field in ["worktree", "branch", "source_revision", "source_hashes"] {
             if preview["previous"][field] != preview["current"][field] {
-                let lifecycle = if matches!(
-                    field,
-                    "worktree_dirty_digest" | "worktree_content_digest"
-                ) {
-                    format!("{WORKTREE_DRIFT}: retained Git state differs from its checkpoint; confirm invocation tools are stopped and inspect late or external writes before reviewed reconciliation; ")
-                } else {
-                    String::new()
-                };
                 return Err(error(format!(
-                    "{}: {lifecycle}task {task} checkpoint {id} phase={} role={}: decision-only refresh refused: {field} changed; previous={} current={}; original work preserved",
+                    "{}: task {task} checkpoint {id} phase={} role={}: decision-only refresh refused: {field} changed; previous={} current={}; original work preserved",
                     CODE,preview["previous"]["phase"],preview["previous"]["role"],preview["previous"][field],preview["current"][field]
                 )));
             }
@@ -460,6 +447,38 @@ fn decision_context_ready(root: &Path, task: &str, apply: bool) -> Result<()> {
             return Err(error(
                 "Decision refresh requires reviewed task reconciliation",
             ));
+        }
+        if before["worktree_dirty_digest"] != after["worktree_dirty_digest"]
+            || before["worktree_content_digest"] != after["worktree_content_digest"]
+        {
+            let files = after["changed_files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            let count = after["validation"]["changed_file_inventory"]["count"]
+                .as_u64()
+                .unwrap_or(files.len() as u64);
+            let sample = files
+                .iter()
+                .take(12)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let worker = after["worktree"].as_str().unwrap_or("unknown");
+            let phase = before["phase"].as_str().unwrap_or("unknown");
+            let role = before["role"].as_str().unwrap_or("unknown");
+            let sha = preview["current_sha256"]
+                .as_str()
+                .ok_or_else(|| error("Checkpoint preview has no confirmation digest"))?;
+            return Err(crate::MaccError::CheckpointWorktreeReview {
+                id: id.clone(),
+                sha: sha.into(),
+                message: format!(
+                    "{task} · {phase} phase\nLocal work changed since checkpoint {id}.\nWorker: {worker}\nCurrent changed paths ({count}): {sample}\nKeeping these changes refreshes the checkpoint. Qualification remains open.\n{CODE} · {WORKTREE_DRIFT} · phase={phase} role={role} · inspect late or external writes (worktree_dirty_digest or content)."
+                ),
+            });
         }
         plans.push((id, preview));
     }

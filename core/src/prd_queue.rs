@@ -5,6 +5,7 @@ mod logging;
 mod manual_delivery;
 pub mod readiness;
 pub mod recovery;
+mod resume_checkpoint;
 pub mod review;
 pub mod transition;
 mod transition_safety;

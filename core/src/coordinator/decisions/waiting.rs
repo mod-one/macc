@@ -144,10 +144,45 @@ pub(super) fn independent_consumer_failure(
         Some(_) => true,
     }
 }
+/// Keep the historical decision link but publish the current recovery failure in every projection.
+pub(crate) fn record_refresh_failure(
+    task: &mut crate::coordinator::model::Task,
+    error: &crate::MaccError,
+) {
+    // The confirmation digest includes the task record. Persisting the digest
+    // in that same record would invalidate every preview as soon as it was shown.
+    let cause = match error {
+        crate::MaccError::CheckpointWorktreeReview { message, .. } => message.clone(),
+        other => other.to_string(),
+    };
+    let reason = format!("DM_STALE: native context reconciliation blocked: {cause}");
+    let runtime = &mut task.task_runtime;
+    let previous = runtime
+        .extra
+        .get("decision_wait")
+        .filter(|id| id.as_str().is_some_and(|id| id != "context_refresh"))
+        .or_else(|| runtime.extra.get("checkpoint_previous_decision"))
+        .cloned();
+    clear_wait_binding(runtime);
+    if let Some(id) = previous {
+        runtime
+            .extra
+            .insert("checkpoint_previous_decision".into(), id);
+    }
+    runtime
+        .extra
+        .insert("decision_wait".into(), "context_refresh".into());
+    runtime.result_explanation = None;
+    runtime.last_error = Some(reason.clone());
+    runtime.unmet_preconditions = vec![reason.clone()];
+    runtime.set_last_error_details("E903", "decision_context_refresh", reason);
+}
+
 pub(super) fn clear_wait_binding(runtime: &mut crate::coordinator::model::TaskRuntime) {
     for key in [
         "decision_wait",
         "decision_wait_status",
+        "checkpoint_previous_decision",
         "decision_wait_owner",
         "decision_wait_action",
         "decision_wait_reason",
@@ -168,6 +203,7 @@ impl PendingDecision {
         )
     }
     pub(super) fn record_binding(&self, runtime: &mut crate::coordinator::model::TaskRuntime) {
+        runtime.extra.remove("checkpoint_previous_decision");
         runtime
             .extra
             .insert("decision_wait".into(), serde_json::json!(self.id));

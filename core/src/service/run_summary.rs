@@ -86,6 +86,7 @@ pub fn load_project_run_summary(
         .as_deref()
         .and_then(|id| registry.find_task(id))
     {
+        refresh_resolved_decision(paths, task, &mut summary)?;
         if let Some(info) = crate::coordinator::scoped_prd::describe(&paths.root, task) {
             summary.headline = "Worker reuse blocked".into();
             summary.cause = info.to_string();
@@ -98,6 +99,53 @@ pub fn load_project_run_summary(
     }
     summary.refresh_supervisor(paths);
     Ok(Some(summary))
+}
+
+fn refresh_resolved_decision(
+    paths: &crate::ProjectPaths,
+    task: &crate::coordinator::model::Task,
+    summary: &mut CoordinatorRunSummary,
+) -> Result<()> {
+    let rt = &task.task_runtime;
+    if task.state != "blocked"
+        || rt.last_error_code.as_deref() != Some("E903")
+        || !matches!(
+            rt.last_error_origin.as_deref(),
+            Some("decision_context_refresh" | "decisions")
+        )
+    {
+        return Ok(());
+    }
+    let previous = rt
+        .extra
+        .get("checkpoint_previous_decision")
+        .and_then(|v| v.as_str());
+    let Some(id) = crate::coordinator::phase_diagnostics::decision_wait_id(task).or(previous)
+    else {
+        return Ok(());
+    };
+    let Some(store) = crate::coordinator::decisions::Store::inspect_registered(&paths.root)? else {
+        return Ok(());
+    };
+    let decision = store.decision(id)?;
+    if decision.status == "resolved" {
+        let reason = if rt.last_error_origin.as_deref() == Some("decision_context_refresh") {
+            rt.last_error_message
+                .as_deref()
+                .unwrap_or("Checkpoint refresh required")
+        } else {
+            "The retained phase needs a current checkpoint"
+        };
+        summary.headline = format!(
+            "{} · decision resolved · retained phase awaiting resume",
+            task.id
+        );
+        summary.cause = format!("Decision {id} v{} resolved. {reason}", decision.version);
+        summary.unmet_preconditions = vec![reason.to_owned()];
+        summary.next_action =
+            "Run macc coordinator resume to check the retained work and continue.".into();
+    }
+    Ok(())
 }
 
 pub fn load_latest_run_summary(
@@ -370,7 +418,7 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
         if crate::coordinator::phase_diagnostics::context_refresh_blocked(task) {
-            return format!("Refresh the retained {} context for {} through native checkpoint recovery. If recovery is blocked, inspect the named checkpoint and changed field; preserve the worktree and resume this phase after reconciliation. This internal refresh has no question to answer.",task.task_runtime.current_phase.as_deref().unwrap_or("execution"),task.id);
+            return format!("Run `macc coordinator resume` to refresh the retained {} context for {}. Review worktree changes when prompted.",task.task_runtime.current_phase.as_deref().unwrap_or("execution"),task.id);
         }
         if task.task_runtime.extra.contains_key("diagnostic_delivery") {
             return "Open Decisions: independently verify the selected assistance, or explicitly reconcile that selection. Then retry the retained review. An unchanged restart or a diagnostic report cannot supply external evidence or authorize release.".into();

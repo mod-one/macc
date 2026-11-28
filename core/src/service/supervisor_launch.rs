@@ -5,6 +5,47 @@ use std::{
     process::{Command as ProcessCommand, Stdio},
 };
 const COORDINATOR_SUPERVISOR_REL_PATH: &str = ".macc/state/coordinator-supervisor.json";
+const POLICY: &str = ".macc/state/queue-supervision.json";
+fn series(cfg: Option<&crate::config::CoordinatorConfig>) -> serde_json::Value {
+    serde_json::json!([
+        cfg.map(|c| c.configured_prds()).unwrap_or_default(),
+        crate::config::CoordinatorConfigResolved::resolve(cfg).reference_branch
+    ])
+}
+pub fn remember(
+    paths: &crate::ProjectPaths,
+    cfg: Option<&crate::config::CoordinatorConfig>,
+    enabled: bool,
+) -> Result<()> {
+    let policy = serde_json::json!({"series":series(cfg),"enabled":enabled});
+    crate::atomic_write(
+        paths,
+        &paths.root.join(POLICY),
+        policy.to_string().as_bytes(),
+    )
+}
+pub(crate) fn resume_enabled(
+    paths: &crate::ProjectPaths,
+    cfg: &crate::config::CoordinatorConfig,
+) -> Result<bool> {
+    let path = paths.root.join(POLICY);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let policy: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|e| MaccError::Validation(e.to_string()))?;
+            Ok(policy["series"] == series(Some(cfg)) && policy["enabled"] == true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(paths.root.join(COORDINATOR_SUPERVISOR_REL_PATH).is_file())
+        }
+        Err(source) => Err(MaccError::Io {
+            path: path.display().to_string(),
+            action: "read queue supervision policy".into(),
+            source,
+        }),
+    }
+}
+
 pub fn attach(project_root: &Path, coordinator_pid: u32) -> Result<()> {
     if let Some(instance) = Instance::running(project_root)? {
         return record_attachment(project_root, coordinator_pid, &instance);
@@ -87,4 +128,23 @@ pub fn stop_attached(project_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn explicit_choice_overrides_old_attachment_and_is_bound_to_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::ProjectPaths::from_root(temp.path());
+        let mut cfg = crate::config::CoordinatorConfig::default();
+        cfg.prd_files = vec!["a.json".into()];
+        remember(&paths, Some(&cfg), false).unwrap();
+        std::fs::write(paths.root.join(COORDINATOR_SUPERVISOR_REL_PATH), "{}").unwrap();
+        assert!(!resume_enabled(&paths, &cfg).unwrap());
+        remember(&paths, Some(&cfg), true).unwrap();
+        assert!(resume_enabled(&paths, &cfg).unwrap());
+        cfg.prd_files.push("b.json".into());
+        assert!(!resume_enabled(&paths, &cfg).unwrap());
+    }
 }

@@ -188,8 +188,10 @@ fn running(paths: &ProjectPaths) -> Result<bool> {
 pub fn stopped(paths: &ProjectPaths, selected: Option<&str>) -> Result<Option<String>> {
     let outcome = resume_queue(paths, selected, None)?;
     // An answer may have committed just before the wait ticket was persisted.
-    if outcome.is_some() && wake_after_decision(&paths.root)? {
-        return Ok(Some("Decision recorded. Coordinator restarted.".into()));
+    if outcome.is_some() {
+        if let Some(observed) = wake_after_decision(&paths.root)? {
+            return Ok(Some(observed));
+        }
     }
     Ok(outcome)
 }
@@ -260,6 +262,7 @@ fn resume_queue(
         &Default::default(),
         Some(cfg),
     );
+    let recoverable = super::resume_checkpoint::inspect(paths, &registry, &args, &position)?;
     let waits = super::manual_delivery::reconcile(paths, &mut registry, cfg, &args)?;
     let automatic = config
         .automation
@@ -267,9 +270,10 @@ fn resume_queue(
         .unwrap_or_default()
         .auto_restart;
     let wake_path = paths.root.join(WAKE);
-    let messages = waits
+    let messages = recoverable
         .iter()
-        .map(|(_, msg)| msg.as_str())
+        .map(String::as_str)
+        .chain(waits.iter().map(|(_, msg)| msg.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
     if !automatic {
@@ -288,6 +292,7 @@ fn resume_queue(
         )?;
     }
     if !waits.is_empty()
+        && recoverable.is_empty()
         && wake.is_none()
         && registry.tasks.iter().all(|t| {
             t.satisfies_dependants()
@@ -306,12 +311,28 @@ fn resume_queue(
     }
     crate::coordinator::state_runtime::clear_coordinator_pause_file(&paths.root)?;
     drop(queue);
-    crate::service::coordinator::coordinator_restart_after_intervention(paths, Some(cfg), &launch)?;
+    let supervised = crate::service::supervisor_launch::resume_enabled(paths, cfg)?;
+    let pid = crate::service::coordinator::coordinator_restart_after_intervention(
+        paths,
+        Some(cfg),
+        &launch,
+    )?;
     if waits.is_empty() && automatic {
         cancel_wait(&paths.root)?;
     }
+    drop(launch);
+    let supervision = if supervised {
+        match crate::service::supervisor_launch::attach(&paths.root, pid as u32) {
+            Ok(()) => "Supervisor attached.".to_string(),
+            Err(error) => format!("Supervisor attachment failed: {error}"),
+        }
+    } else {
+        "Supervision was not requested.".into()
+    };
+    let startup =
+        crate::service::coordinator_readiness::observe_resume(paths, pid, Duration::from_secs(3))?;
     Ok(Some(
-        format!("Coordinator started on {position}. {messages}")
+        format!("{position} · {startup}\n{supervision}\n{messages}")
             .trim_end()
             .into(),
     ))
@@ -328,15 +349,15 @@ pub(crate) fn cancel_wait(root: &Path) -> Result<()> {
 
 /// A committed answer wakes only an explicitly resumed series. The supervisor
 /// also retries this check after a crash between the answer and process launch.
-pub fn wake_after_decision(root: &Path) -> Result<bool> {
+pub fn wake_after_decision(root: &Path) -> Result<Option<String>> {
     let path = root.join(WAKE);
     if !path.try_exists().map_err(|e| invalid(e.to_string()))? {
-        return Ok(false);
+        return Ok(None);
     }
     let ticket: Wake = serde_json::from_slice(&read(&path)?).map_err(|e| invalid(e.to_string()))?;
     let cfg = crate::load_canonical_config(&ProjectPaths::from_root(root).config_path)?;
     if !cfg.automation.supervisor.unwrap_or_default().auto_restart {
-        return Ok(false);
+        return Ok(None);
     }
     let progress = load(root)?;
     if !progress
@@ -344,20 +365,20 @@ pub fn wake_after_decision(root: &Path) -> Result<bool> {
         .get(progress.next)
         .is_some_and(|e| e == &ticket.entry)
     {
-        return Ok(false);
+        return Ok(None);
     }
     if running(&ProjectPaths::from_root(root))? {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(store) = decisions::Store::inspect_registered(root)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut actionable = false;
     for id in &ticket.decisions {
         let d = store.decision(id)?;
         let plan = store.plan(&d.plan_id)?;
         if plan.source != ticket.entry.path || plan.reference_branch != ticket.reference {
-            return Ok(false);
+            return Ok(None);
         }
         actionable |= matches!(
             d.status.as_str(),
@@ -365,9 +386,8 @@ pub fn wake_after_decision(root: &Path) -> Result<bool> {
         );
     }
     if !actionable {
-        return Ok(false);
+        return Ok(None);
     }
     let paths = ProjectPaths::from_root(root);
-    resume_queue(&paths, None, Some(&ticket))?;
-    running(&paths)
+    resume_queue(&paths, None, Some(&ticket))
 }

@@ -67,6 +67,13 @@ pub use worktree::{
 
 #[derive(Error, Debug)]
 pub enum MaccError {
+    #[error("{message}\nConfirm with: macc session-store reconcile {id} --expected-sha256 {sha}\nThen run: macc coordinator resume")]
+    CheckpointWorktreeReview {
+        id: String,
+        sha: String,
+        message: String,
+    },
+
     #[error("{message}")]
     PrdPlanDrift { plan_id: String, message: String },
 

@@ -210,7 +210,16 @@ fn decision_refresh_recovers_dirty_fix_without_rebinding_historical_review() {
         "concurrent external edit before requeue",
     )
     .unwrap();
-    let drift = ensure_task_ready(root, "A").unwrap_err().to_string();
+    let error = ensure_task_ready(root, "A").unwrap_err();
+    let drift = error.to_string();
+    let crate::MaccError::CheckpointWorktreeReview { id, sha, .. } = error else {
+        panic!("{drift}")
+    };
+    std::fs::write(worker.join("proof.txt"), "edited again after preview").unwrap();
+    assert!(reconcile(root, &id, Some(&sha))
+        .unwrap_err()
+        .to_string()
+        .contains("preview again"));
     assert!(drift.contains("worktree_dirty_digest"));
     assert!(drift.contains(WORKTREE_DRIFT));
     assert!(drift.contains("late or external writes"));
